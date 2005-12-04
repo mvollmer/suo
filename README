@@ -1,0 +1,160 @@
+This might at one time be SUO
+-----------------------------
+
+Suo is the name I have picked for yet another crazy attempt at
+implementing something Schemish.  This time it's an exercise in
+resisting the urge at premature optimization.  There will be no
+significant trickery until the system is big enough so that one can
+meaningfully measure the influence of certain optimization approaches.
+However, a second goal is to use as little external dependencies as
+possible.  That's why the compiler is going to directly create machine
+code: not so much to get good performance, but to get close to the
+hardware.
+
+
+The name
+--------
+
+The word "suo" is Finnish, and I choose a Finnish word because I
+started hacking on this after moving to Helsinki.  "Suo" is the
+beginning of "Suomi" (Finland) and literally means swamp.  Well, it
+was short, started with "s" like "Scheme" and seemed appropriate for a
+project that likely is not going anywhere fast...
+
+
+Design notes
+------------
+
+Suo will run as a Unix process.
+
+Everything starts with the definiton of the run-time type system and
+memory management.  First, there will be a simple single-generation
+copying GC that manages all memory except a small set of 'registers'.
+
+- Immediates
+  - Fixnums
+  - Characters
+  - Singletons (#t, #f, (), ...)
+  
+- Non-immediates
+  - pairs
+  - records
+  - vectors
+  - strings
+  - bytevectors
+  - code
+
+First violation of the simplicity principle: pairs should only take
+two words and the tagging can be complicated.
+
+A word is 4 bytes.  All non-immediates start at word boundries.
+Memory above 2 Gigs is not used.  A value is represented as a word.
+This word itself tells whether the value is immediate or
+non-immediate.  Non-immediates specify their type in the first word of
+the memory block pointed to.
+
+Value word:
+
+- xxxxxxxx xxxxxxxx xxxxxxxx xxxxxx00
+
+  Pointer to non-immediate. 
+
+- xxxxxxxx xxxxxxxx xxxxxxxx xxxxxx01
+
+  Fixnum.
+
+- xxxxxxxx xxxxxxxx xxxxxxxx sssss010
+
+  Singletons.  The s-bits describe what it is
+
+  00000: ()
+  00001: #t
+  00010: #f
+  11111: dynamic singleton given in x-bits.
+  
+- xxxxxxxx xxxxxxxx xxxxxxxx xxxxx110
+
+  Characters.
+
+- xxxxxxxx xxxxxxxx xxxxxxxx xxxxxx11
+
+  Unusable.
+
+First word of non-immediate block:
+
+- xxxxxxxx xxxxxxxx xxxxxxxx xxxxxx00
+  xxxxxxxx xxxxxxxx xxxxxxxx xxxxxx01
+  xxxxxxxx xxxxxxxx xxxxxxxx xxxxxx10
+
+  Pair.  The car is the first word itself.
+
+- 0xxxxxxx xxxxxxxx xxxxxxxx xxxxxx11
+
+  Record (fixed length vector).  The first word - b11 points to a
+  record descriptor which contains the size as a fixnum in the second
+  word.  When the length is positive then all the words contain scheme
+  Values.  When it is negative, then the real length is the absolute
+  value of this and the words are just bits.
+
+  'system' records: symbols, floats, complex, bignums, ratnums,
+  closures, boxes, etc..
+
+- 1xxxxxxx xxxxxxxx xxxxxxxx xxxx0011
+
+  Vector, x-bits give length in number of words.
+
+- 1xxxxxxx xxxxxxxx xxxxxxxx xxtt0111
+
+  Stringbuf. t-bits give type, x-bits give length in the units indicated
+  by the t-bits.  The real object is padded to a whole number of words.
+
+  00: UCS-1
+  01: UCS-2
+  11: UCS-4
+
+- 1xxxxxxx xxxxxxxx xxxxxxxx xxxx1011
+
+  Bytes, x-bits give length in bytes.
+
+- 1xxxxxxx xxxxxxxx xxxxllll llll1111
+
+  Code, x-bits give number of words of instructions, l-bits give
+  number of words of literal Scheme values.  Instructions start in
+  word 2, followed by the literal values.
+
+The registers will not bemachine registers but will be in memory.
+There will be 256 general purpose registers and a couple of special
+purpose ones.
+
+The GC will initially be a simple copying one with two semi-spaces.
+
+The run-time will be written in C. It can suspend to disk and has
+simple IO.  Calls into the runtime will use the C calling convention.
+The following calls will initially be available:
+
+  - void gc (void);
+  - void suspend (void);
+  - fixnum read (fixnum fd, bytevec buf, fixnum n);
+  - fixnum write (fixnum fd, bytevec buf, fixnum n);
+
+
+The compiler will initially have these passes:
+
+  - conversion to continuation passing style
+  - closure conversion
+  - register allocation
+
+There will be no register spilling.  Instead, we will have an insane
+amount of registers that might even be run-time adjustable.  (Those
+registers are not in the CPU, of course.)
+
+The first version of the compiler will be a cross-compiler that runs
+in Guile and produces a memory image for the run-time.  Once the
+system is able to run its own compiler, the compiler will be able to
+run both in Suo as well as in Guile.
+
+X86 SPECIFICS
+
+- EBP points to 256 registers
+- ESI points to current code object
+
