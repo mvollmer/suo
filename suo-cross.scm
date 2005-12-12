@@ -19,11 +19,17 @@
 (define (suo:record-desc rec)
   ((record-accessor suo:record-record-type 'desc) rec))
 
+(define (suo:record-fields rec)
+  ((record-accessor suo:record-record-type 'fields) rec))
+
 (define (suo:record-ref rec idx)
-  (vector-ref ((record-accessor suo:record-record-type 'fields) rec) idx))
+  (vector-ref (suo:record-fields rec) idx))
 
 (define (suo:record-set! rec idx val)
-  (vector-set! ((record-accessor suo:record-record-type 'fields) rec) idx val))
+  (vector-set! (suo:record-fields rec) idx val))
+
+(define (suo:record-set-desc! rec desc)
+  ((record-modifier suo:record-record-type 'desc) rec desc))
 
 (define suo:code-record-type
   (make-record-type 'code-record '(insns literals)))
@@ -43,16 +49,10 @@
 
 ;;; Assembling suo objects into a u32vector
 
-(define (assemble-object obj mem)
-  (let ((idx 0)
-	(byte-idx 0)
-	(byte-word 0)
+(define (assemble-object obj)
+  (let ((mem (make-u32vector 1024))
+	(idx 0)
 	(ptr-hash (make-hash-table 1003)))
-
-    (define (emit-word word)
-      (u32vector-set! mem idx word)
-      (set! idx (1+ idx))
-      (1- idx))
 
     (define (emit-byte byte)
       ;; little-endian
@@ -68,45 +68,50 @@
 	    (set! byte-idx 0)
 	    (set! byte-word 0))))
 
+    (define (alloc obj n-words)
+      (let ((ptr idx))
+	(hashq-set! ptr-hash obj ptr)
+	(set! idx (+ idx n-words))
+	ptr))
+
+    (define (emit-words ptr . words)
+      (do ((i ptr (1+ i))
+	   (w words (cdr w)))
+	  ((null? w))
+	(u32vector-set! mem i (car w))))
+
     (define (emit obj)
       (cond
        ((pair? obj)
-	(let* ((w1 (asm (car obj)))
-	       (w2 (asm (cdr obj)))
-	       (ptr (emit-word w1)))
-	  (emit-word w2)
-	  ptr))
+	(let ((ptr (alloc obj 2)))
+	  (emit-words ptr (asm (car obj)) (asm (cadr obj)))))
        ((suo:record? obj)
-	(let* ((desc (asm (suo:record-desc obj)))
-	       (ws (map asm (vector->list (suo:record-fields obj))))
-	       (ptr (emit-word (+ desc 3))))
-	  (for-each emit-word ws)
-	  ptr))
+	(let* ((desc (suo:record-desc obj))
+	       (fields (vector->list (suo:record-fields obj)))
+	       (ptr (alloc obj (1+ (length fields)))))
+	  (if (not (eqv? (length fields) (suo:record-ref desc 0)))
+	      (error "inconsistent record"))
+	  (apply emit-words ptr
+		 (+ (asm desc) 3)
+		 (map asm fields))))
        ((vector? obj)
-	(let* ((ws (map asm (vector->list obj)))
-	       (ptr (emit-word (+ #x80000000 (* (vector-length obj) 16) 3))))
-	  (for-each emit-word ws)
-	  ptr))
-       ((string? obj)
-	(let ((ptr (emit-word (+ #x80000000 (* (string-length obj) 64) 7))))
-	  (for-each emit-byte (map char->integer (string->list obj)))
-	  (flush-bytes)
-	  ptr))
+	(let ((ptr (alloc obj (1+ (vector-length obj)))))
+	  (apply emit-words ptr
+		 (+ #x80000000 (* (vector-length obj) 16) 3)
+		 (map asm (vector->list obj)))))
        ((suo:code? obj)
 	(let* ((insns (suo:code-insns obj))
 	       (insn-words (u32vector-length insns))
 	       (literals (suo:code-literals obj))
 	       (literal-words (vector-length literals))
-	       (literal-ws (map asm (vector->list literals)))
-	       (ptr (emit-word (+ #x80000000
-				  (* insn-words (* 256 16))
-				  (* literal-words 16)
-				  15))))
-	  (do ((i 0 (1+ i)))
-	      ((= i insn-words))
-	    (emit-word (u32vector-ref insns i)))
-	  (for-each emit-word literal-ws)
-	  ptr))
+	       (ptr (alloc obj (+ 1 insn-words literal-words))))
+	  (apply emit-words ptr
+		 (+ #x80000000
+		    (* insn-words (* 256 16))
+		    (* literal-words 16)
+		    15)
+		 (append (u32vector->list insns)
+			 (map asm (vector->list literals))))))
        (else
 	(error "unsupported" obj))))
 
@@ -122,11 +127,17 @@
 	10)
        ((eq? obj #f)
 	18)
+       ((eq? obj (if #f #f))
+	26)
        (else
 	(let ((ptr (hashq-ref ptr-hash obj)))
-	  (or ptr
-	      (let ((ptr (* 4 (emit obj))))
-		(hashq-set! ptr-hash obj ptr)
-		ptr))))))
+	  (* 4 (or ptr
+		   (begin (emit obj)
+			  (hashq-ref ptr-hash obj))))))))
 
-    (asm obj)))
+    (asm obj)
+    (let ((mem2 (make-u32vector idx)))
+      (do ((i 0 (1+ i)))
+	  ((= i idx))
+	(u32vector-set! mem2 i (u32vector-ref mem i)))
+      mem2)))

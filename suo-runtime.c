@@ -2,6 +2,7 @@
  */
 
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -113,20 +114,45 @@ unswizzle_objects (val *mem, word n)
     }
 }
 
-void
-sys (val code)
+val
+sys (int n_args, val first)
 {
-  fprintf (stderr, "sys %08x\n", code);
+  int i;
+  val *args = &first;
+
+  fprintf (stderr, "sys %d", n_args);
+  for (i = 0; i < n_args; i++)
+    fprintf (stderr, " %08x", args[i]);
+  fprintf (stderr, "\n");
+
+  if (n_args > 0)
+    {
+      switch (args[0])
+	{
+	case 1:
+	  fprintf (stderr, "HALT\n");
+	  exit (0);
+	case 5:
+	  fprintf (stderr, "debug\n");
+	  break;
+	default:
+	  fprintf (stderr, "unknown syscall\n");
+	  abort ();
+	}
+    }
+  
+  return 0x0000000a;
 }
 
 void
-go (val code)
+go (val *code, val *free)
 {
-  register val *esi asm ("%esi") = (val *)code;
+  register val *esi asm ("%esi") = code;
+  register val *edi asm ("%edi") = free;
   regs[0] = (val)sys;
   asm ("mov %0,%%ebp\n\t lea 4(%%esi),%%eax\n\t jmp *%%eax"
        :
-       : "r" (regs+1), "r" (esi));
+       : "r" (regs+1), "r" (esi), "r" (edi));
 }
 
 void
@@ -157,17 +183,11 @@ main (int argc, char **argv)
   if (fstat (fd, &buf) < 0)
     perror_exit (argv[1]);
 
-  word start;
-  sword n = read (fd, &start, 4);
-  if (n != 4)
-    perror_exit (argv[1]);
-
-  n = read (fd, heap, buf.st_size-4);
+  ssize_t n = read (fd, heap, buf.st_size);
   if (n < 0)
     perror_exit (argv[1]);
 
   unswizzle_objects (heap, n/4);
 
-  start += (word)heap;
-  go (start);
+  go (heap, heap + n/4);
 }

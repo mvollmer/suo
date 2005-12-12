@@ -7,9 +7,9 @@ resisting the urge at premature optimization.  There will be no
 significant trickery until the system is big enough so that one can
 meaningfully measure the influence of certain optimization approaches.
 However, a second goal is to use as little external dependencies as
-possible.  That's why the compiler is going to directly create machine
-code: not so much to get good performance, but to get close to the
-hardware.
+possible.  That's why the compiler is going to directly generate
+machine code: not so much to get good performance, but to get close to
+the hardware.
 
 
 The name
@@ -47,7 +47,7 @@ copying GC that manages all memory except a small set of 'registers'.
 First violation of the simplicity principle: pairs should only take
 two words and the tagging can be complicated.
 
-A word is 4 bytes.  All non-immediates start at word boundries.
+A word is 4 bytes.  All non-immediates start at word boundaries.
 Memory above 2 Gigs is not used.  A value is represented as a word.
 This word itself tells whether the value is immediate or
 non-immediate.  Non-immediates specify their type in the first word of
@@ -70,11 +70,12 @@ Value word:
   00000: ()
   00001: #t
   00010: #f
+  00011: #<unspecified>
   11111: dynamic singleton given in x-bits.
   
 - xxxxxxxx xxxxxxxx xxxxxxxx xxxxx110
 
-  Characters.
+  Characters (Unicode code points).
 
 - xxxxxxxx xxxxxxxx xxxxxxxx xxxxxx11
 
@@ -93,11 +94,11 @@ First word of non-immediate block:
   Record (fixed length vector).  The first word - b11 points to a
   record descriptor which contains the size as a fixnum in the second
   word.  When the length is positive then all the words contain scheme
-  Values.  When it is negative, then the real length is the absolute
+  values.  When it is negative, then the real length is the absolute
   value of this and the words are just bits.
 
-  'system' records: symbols, floats, complex, bignums, ratnums,
-  closures, boxes, etc..
+  'system' records: strings, symbols, floats, complex, bignums,
+  ratnums, closures, boxes, etc..
 
 - 1xxxxxxx xxxxxxxx xxxxxxxx xxxx0011
 
@@ -122,7 +123,7 @@ First word of non-immediate block:
   number of words of literal Scheme values.  Instructions start in
   word 2, followed by the literal values.
 
-The registers will not bemachine registers but will be in memory.
+The registers will not be machine registers but will be in memory.
 There will be 256 general purpose registers and a couple of special
 purpose ones.
 
@@ -155,6 +156,12 @@ run both in Suo as well as in Guile.
 
 X86 SPECIFICS
 
-- EBP points to 256 registers
+- EBP points to 256 registers (positive offsets) and a couple special
+  ones (negative offsets).  The special registers are:
+
+  -1: syscall entry point, address of a C function that carries out
+      the syscalls.
+
 - ESI points to current code object
 
+- EDI points to the next free byte in the current semi-space
