@@ -165,3 +165,29 @@ X86 SPECIFICS
 - ESI points to current code object
 
 - EDI points to the next free byte in the current semi-space
+
+
+PPC SPECIFICS
+
+The PowerPC has enough registers to use some of them fr CPS registers.
+We don't do this right now, tho, because the indirect approach is
+simpler and more uniform.  Syscalls are calls to C functions and we
+make this easy by staying within the rules of the PPC32 ABI.
+
+r0 has some funny semantics that I don't understand and thus it is not
+used.  (Some instructions treat r0 as constant zero but not all. I
+think.)
+
+r1 is the stack pointer and not touched except for syscalls
+
+r2 is reserved by the system and not touched at all
+
+r3 and r4 are volatile and used as temporaries
+
+r14 to r30 are non-volatile and used for the state as follows:
+
+  r14 points to the indirect registers
+
+  r15 points to the current code object
+
+  r16 points to the next free byte

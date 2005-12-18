@@ -176,3 +176,36 @@
 		       => (lambda (r) (apply ,v r)))))
 	       body-vars
 	       clauses)))))
+
+(define (u32subvector vec start end)
+  (let ((vec2 (make-u32vector (- end start))))
+    (do ((i start (1+ i)))
+	((= i end))
+      (u32vector-set! vec2 i (u32vector-ref vec i)))
+    vec2))
+
+(define (pkx vec)
+  (do ((i 0 (1+ i)))
+      ((= i (uniform-vector-length vec)))
+    (display (number->string (uniform-vector-ref vec i) 16))
+    (display " "))
+  (newline)
+  vec)
+
+(define (dotted-list? lst)
+  (cond ((pair? lst)
+	 (dotted-list? (cdr lst)))
+	(else
+	 (not (null? lst)))))
+
+(define (dotted-list-copy lst)
+  (cond ((pair? lst)
+	 (cons (car lst) (dotted-list-copy (cdr lst))))
+	((else
+	  lst))))
+
+(define (dotted-list-length lst)
+  (cond ((pair? lst)
+	 (1+ (dotted-list-length (cdr lst))))
+	(else
+	 0)))

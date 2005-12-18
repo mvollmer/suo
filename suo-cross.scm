@@ -50,7 +50,7 @@
 ;;; Assembling suo objects into a u32vector
 
 (define (assemble-object obj)
-  (let ((mem (make-u32vector 1024))
+  (let ((mem (make-u32vector 10240))
 	(idx 0)
 	(ptr-hash (make-hash-table 1003)))
 
@@ -118,7 +118,12 @@
     (define (asm obj)
       (cond
        ((integer? obj)
-	(+ (* 4 obj) 1))
+	(+ (* 4 obj)
+	   (cond ((<= 0 obj (1- (expt 2 29))) 0)
+		 ((<= (- (expt 2 29)) obj -1) #x100000000)
+		 (else
+		  (error "integer is not fixnum" obj)))
+	   1))
        ((char? obj)
 	(+ (* 8 (char->integer obj)) 6))
        ((eq? obj '())

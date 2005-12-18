@@ -31,7 +31,7 @@ unswizzle_objects (val *mem, word n)
       char *type;
       val v = *ptr;
       
-      fprintf (stderr, "on %d %08x\n", ptr-mem, v);
+      // fprintf (stderr, "on %d %08x\n", ptr-mem, v);
 
       if ((v & 3) == 3)
 	{
@@ -96,7 +96,7 @@ unswizzle_objects (val *mem, word n)
 	  size = 2;
 	}
 
-      fprintf (stderr, " %s, %d words\n", type, size);
+      // fprintf (stderr, " %s, %d words\n", type, size);
 
       if (size > 0)
 	{
@@ -114,45 +114,60 @@ unswizzle_objects (val *mem, word n)
     }
 }
 
+void
+dump (val v)
+{
+  fprintf (stderr, " %08x", v);
+  if ((v & 3) == 1)
+    fprintf (stderr, " (%d)", ((sword)v) >> 2);
+}
+
 val
-sys (int n_args, val first)
+sys (int n_args,
+     val arg1, val arg2, val arg3, val arg4, val arg5, val arg6, val arg7)
 {
   int i;
-  val *args = &first;
 
-  fprintf (stderr, "sys %d", n_args);
-  for (i = 0; i < n_args; i++)
-    fprintf (stderr, " %08x", args[i]);
+  if (n_args == 0)
+    {
+      fprintf (stderr, "halt\n");
+      exit (0);
+    }
+
+  fprintf (stderr, "syscall");
+  if (n_args > 0)
+    dump (arg1);
+  if (n_args > 1)
+    dump (arg2);
+  if (n_args > 2)
+    dump (arg3);
+  if (n_args > 3)
+    dump (arg4);
+  if (n_args > 4)
+    dump (arg5);
+  if (n_args > 5)
+    dump (arg6);
+  if (n_args > 6)
+    dump (arg7);
+  if (n_args > 7)
+    fprintf (stderr, " ...");
   fprintf (stderr, "\n");
 
-  if (n_args > 0)
-    {
-      switch (args[0])
-	{
-	case 1:
-	  fprintf (stderr, "HALT\n");
-	  exit (0);
-	case 5:
-	  fprintf (stderr, "debug\n");
-	  break;
-	default:
-	  fprintf (stderr, "unknown syscall\n");
-	  abort ();
-	}
-    }
-  
   return 0x0000000a;
 }
 
 void
-go (val *code, val *free)
+go (val *closure, val *free)
 {
-  register val *esi asm ("%esi") = code;
-  register val *edi asm ("%edi") = free;
+  register val *r14 asm ("r14") = regs+1;
+  register val *r15 asm ("r15") = (val *)closure[1];
+  register val *r16 asm ("r16") = free;
   regs[0] = (val)sys;
-  asm ("mov %0,%%ebp\n\t lea 4(%%esi),%%eax\n\t jmp *%%eax"
+  regs[1] = (val)closure;
+
+  asm ("mr 3,15\n\t addi 3,3,4\n\t mtctr 3\n\t bctr"
        :
-       : "r" (regs+1), "r" (esi), "r" (edi));
+       : "r" (r14), "r" (r15), "r" (r16));
 }
 
 void

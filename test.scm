@@ -8,33 +8,29 @@
 (read-set! keywords 'prefix)
 
 (load "suo-util.scm")
-
-(define-struct foo ()
-  a b)
-
-(pk (foo 1 2))
-
 (load "suo-cross.scm")
-(load "suo-asm.scm")
+(load "suo-asm-ppc.scm")
 (load "suo-compiler.scm")
+(load "suo-base.scm")
 
 (define (write-image obj)
   (let* ((port (open-output-file "image"))
 	 (mem (assemble-object obj)))
-    (pkx mem)
     (uniform-vector-write mem port)))
 
-(define do-exp '(lambda () (do ((i 0 (+ i 1))) ((= i 5)) (pk i))))
-(define lambda-exp '(lambda (a) (lambda (b) (+ a b))))
+(define-suo (*+ a b c)
+  (if (zero? a)
+      c
+      (*+ (- a 1) b (+ c b))))
 
-(let ((cps (cps-convert '(lambda ()
-			   (letrec ((loop (lambda ()
-					    (:primitive syscall 1)
-					    (loop))))
-			     (loop)
-			     (:primitive syscall 0))))))
-  (let ((clos (cps-closure-convert cps)))
-    (cps-print clos)
-    (let ((regs (cps-register-allocate clos)))
-      (cps-print regs)
-      (write-image (cps-code-generate regs)))))
+(define-suo (* a b)
+  (*+ a b 0))
+
+(define-suo (fac n)
+  (if (= n 1)
+      n
+      (* n (fac (- n 1)))))
+
+(write-image (cps-compile '(lambda ()
+			     (pk (fac 20))
+			     (:primop syscall))))
