@@ -255,6 +255,26 @@
   (cps-asm-word ctxt #x7c832378)
   (cps-asm-r3-to-reg ctxt res))
 
+(define-primif (if-record? (obj desc) (else-label))
+  (cps-asm-op-to-r3 ctxt obj)
+  ;; andi r3,r3,3
+  (cps-asm-word ctxt #x70630003)
+  ;; cmpwi cr7,r3,0
+  (cps-asm-word ctxt #x2f830000)
+  ;; bne cr7,lab
+  (cps-asm-word-with-s2-laboff ctxt #x409e0000 else-label)
+  (cps-asm-op-to-r3 ctxt obj)
+  (cps-asm-ref-r3-to-r3 ctxt 0)
+  ;; mr r4,r3
+  (cps-asm-word ctxt #x7c641b78)
+  (cps-asm-op-to-r3 ctxt desc)
+  ;; ori r3,r3,3
+  (cps-asm-word ctxt #x60630003)
+  ;; cmpw cr7,r3,r4
+  (cps-asm-word ctxt #x7f832000)
+  ;; bne cr7,lab
+  (cps-asm-word-with-s2-laboff ctxt #x409e0000 else-label))
+
 (define-primop (record-ref (res) (rec idx))
   (cond ((cps-quote? idx)
 	 (cps-asm-op-to-r3 ctxt rec)
@@ -341,6 +361,83 @@
   (cps-asm-op-to-r3 ctxt arg2)
   ;; subi r3,r3,1
   (cps-asm-word ctxt #x3863ffff)
-  ;; sub r3,r4,r3
-  (cps-asm-word ctxt #x7c632050)
+  ;; subo. r3,r4,r3
+  (cps-asm-word ctxt #x7c632451)
+  (let ((out (cps-asm-make-label ctxt)))
+    ;; bns out
+    (cps-asm-word-with-s2-laboff ctxt #x40830000 out)
+    (cps-asm-op-to-r3 ctxt (cps-quote #f))
+    (cps-asm-def-label ctxt out))
   (cps-asm-r3-to-reg ctxt res))
+
+(define-primop (mul-fixnum (res) (arg1 arg2))
+  (cps-asm-op-to-r3 ctxt arg1)
+  ;; mr r4,r3
+  (cps-asm-word ctxt #x7c641b78)
+  (cps-asm-op-to-r3 ctxt arg2)
+  ;; subi r3,r3,1
+  (cps-asm-word ctxt #x3863ffff)
+  ;; srawi r4,2
+  (cps-asm-word ctxt #x7c841670)
+  ;; mullwo. r3,r3,r4
+  (cps-asm-word ctxt #x7c6325d7)
+  ;; addi r3,r3,1
+  (cps-asm-word ctxt #x38630001)
+  (let ((out (cps-asm-make-label ctxt)))
+    ;; bns out
+    (cps-asm-word-with-s2-laboff ctxt #x40830000 out)
+    (cps-asm-op-to-r3 ctxt (cps-quote #f))
+    (cps-asm-def-label ctxt out))
+  (cps-asm-r3-to-reg ctxt res))
+
+(define-primif (if-< (v1 v2) (else-label))
+  (cps-asm-op-to-r3 ctxt v1)
+  ;; mr r4,r3
+  (cps-asm-word ctxt #x7c641b78)
+  (cps-asm-op-to-r3 ctxt v2)
+  ;; cmpw cr7,r3,r4
+  (cps-asm-word ctxt #x7f832000)
+  ;; ble cr7,lab
+  (cps-asm-word-with-s2-laboff ctxt #x409d0000 else-label))
+
+(define-primop (cons (res) (a b))
+  (cps-asm-alloc-to-r4 ctxt 2)
+  (cps-asm-op-to-r3 ctxt a)
+  (cps-asm-store-r3-to-r4 ctxt 0)
+  (cps-asm-op-to-r3 ctxt b)
+  (cps-asm-store-r3-to-r4 ctxt 1)
+  ;; mr r3,r4
+  (cps-asm-word ctxt #x7c832378)
+  (cps-asm-r3-to-reg ctxt res))
+
+(define-primif (if-pair? (a) (else-label))
+  (cps-asm-op-to-r3 ctxt a)
+  ;; andi r3,r3,3
+  (cps-asm-word ctxt #x70630003)
+  ;; cmpwi cr7,r3,0
+  (cps-asm-word ctxt #x2f830000)
+  ;; bne cr7,lab
+  (cps-asm-word-with-s2-laboff ctxt #x409e0000 else-label)
+  (cps-asm-op-to-r3 ctxt a)
+  (cps-asm-ref-r3-to-r3 ctxt 0)
+  ;; andi r3,r3,3
+  (cps-asm-word ctxt #x70630003)
+  ;; cmpwi cr7,r3,3
+  (cps-asm-word ctxt #x2f830003)
+  ;; beq cr7,lab
+  (cps-asm-word-with-s2-laboff ctxt #x419e0000 else-label))
+
+(define-primop (car (res) (a))
+  (cps-asm-op-to-r3 ctxt a)
+  (cps-asm-ref-r3-to-r3 ctxt 0)
+  (cps-asm-r3-to-reg ctxt res))
+
+(define-primop (cdr (res) (a))
+  (cps-asm-op-to-r3 ctxt a)
+  (cps-asm-ref-r3-to-r3 ctxt 1)
+  (cps-asm-r3-to-reg ctxt res))
+
+(define-primop (identity (res) (a))
+  (cps-asm-op-to-r3 ctxt a)
+  (cps-asm-r3-to-reg ctxt res))
+  

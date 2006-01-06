@@ -8,7 +8,8 @@
 ;; code - code-record
 
 (define suo:record-record-type
-  (make-record-type 'record-record '(desc fields)))
+  (make-record-type 'record-record '(desc fields)
+		    (lambda (obj port) (display "#<suo-record>" port))))
 
 (define (suo:record? obj)
   ((record-predicate suo:record-record-type) obj))
@@ -32,7 +33,8 @@
   ((record-modifier suo:record-record-type 'desc) rec desc))
 
 (define suo:code-record-type
-  (make-record-type 'code-record '(insns literals)))
+  (make-record-type 'code-record '(insns literals)
+		    (lambda (obj port) (display "#<suo-code>" port))))
 
 (define (suo:code? obj)
   ((record-predicate suo:code-record-type) obj))
@@ -84,7 +86,7 @@
       (cond
        ((pair? obj)
 	(let ((ptr (alloc obj 2)))
-	  (emit-words ptr (asm (car obj)) (asm (cadr obj)))))
+	  (emit-words ptr (asm (car obj)) (asm (cdr obj)))))
        ((suo:record? obj)
 	(let* ((desc (suo:record-desc obj))
 	       (fields (vector->list (suo:record-fields obj)))

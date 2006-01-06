@@ -209,3 +209,11 @@
 	 (1+ (dotted-list-length (cdr lst))))
 	(else
 	 0)))
+
+(define (flatten-dotted-list lst)
+  (cond ((pair? lst)
+	 (cons (car lst) (flatten-dotted-list (cdr lst))))
+	((null? lst)
+	 '())
+	(else
+	 (list lst))))

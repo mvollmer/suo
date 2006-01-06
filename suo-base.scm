@@ -62,6 +62,17 @@
 				      (,loop ,@steps))))))
 	   (,loop ,@inits)))))
 
+(define-suo-variable error:not-a-closure #f)
+(define-suo-variable error:wrong-num-args #f)
+
+(define-suo (error:not-a-closure thing)
+  (:primop syscall 1 2 thing)
+  (:primop syscall))
+
+(define-suo (error:wrong-num-args)
+  (:primop syscall 1 3)
+  (:primop syscall))
+
 ;;; Debugging
 
 (define-suo (pk x)
@@ -102,7 +113,24 @@
 	   `(let ((,tmp ,(car args)))
 	      (if ,tmp
 		  ,tmp
-		  (or ,(cdr args))))))))
+		  (or ,@(cdr args))))))))
+;;; Pairs
+
+(define-suo (cons a b)
+  (:primop cons a b))
+
+(define-suo (pair? a)
+  (:primif (if-pair? a) #t #f))
+
+(define-suo (car a)
+  (if (pair? a)
+      (:primop car a)
+      (error 0)))
+
+(define-suo (cdr a)
+  (if (pair? a)
+      (:primop cdr a)
+      (error 0)))
 
 ;;; Fixnums
 
@@ -110,17 +138,40 @@
   (:primif (if-fixnum? obj) #t #f))
 
 (define-suo (+ a b)
-  (or (and (fixnum? a)
-	   (fixnum? b)
-	   (or (:primop add-fixnum a b)
-	       (error 1))) ;; overflow
-      (error 0))) ;; non-fixnums
+  (if (and (fixnum? a)
+	   (fixnum? b))
+      (or (:primop add-fixnum a b)
+	  (error 1))               ; overflow
+      (error 0)))                  ; non-fixnums
 
 (define-suo (- a b)
-  (:primop sub-fixnum a b))
+  (if (and (fixnum? a)
+	   (fixnum? b))
+      (or (:primop sub-fixnum a b)
+	  (error 1))               ; overflow
+      (error 0)))                  ; non-fixnums
+
+(define-suo (* a b)
+  (if (and (fixnum? a)
+	   (fixnum? b))
+      (or (:primop mul-fixnum a b)
+	  (error 1))               ; overflow
+      (error 0)))                  ; non-fixnums
 
 (define-suo (= a b)
-  (eq? a b))
+  (if (and (fixnum? a)
+	   (fixnum? b))
+      (eq? a b)
+      (error 0)))
 
 (define-suo (zero? a)
   (= a 0))
+
+(define-suo (< a b)
+  (if (and (fixnum? a)
+	   (fixnum? b))
+      (:primif (if-< a b) #t #f)
+      (error 0)))
+
+(define-suo (<= a b)
+  (or (< a b) (= a b)))

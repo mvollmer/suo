@@ -77,7 +77,7 @@
   func args)
 
 (define-struct cps-func (cps-object)
-  name args body)
+  name args restp body)
 
 (define-struct cps-fix (cps-instruction)
   funcs cont)
@@ -122,6 +122,7 @@
 (define-method (cps-render (obj cps-func/class))
   `(,(cps-render (cps-func-name obj))
     ,(map cps-render (cps-func-args obj))
+    ,(cps-func-restp obj)
     ,(cps-render (cps-func-body obj))))
 
 (define-method (cps-render (obj cps-primop/class))
@@ -297,9 +298,11 @@
 
   (define (conv-func func-label args body env)
     (let* ((cont-arg (genvar))
-	   (arg-vars (map (lambda (a) (genvar)) args))
-	   (box-vars (map (lambda (a) (genvar)) args))
-	   (body-env (extend-env* args box-vars env)))
+	   (restp (dotted-list? args))
+	   (flat-args (flatten-dotted-list args))
+	   (arg-vars (map (lambda (a) (genvar)) flat-args))
+	   (box-vars (map (lambda (a) (genvar)) flat-args))
+	   (body-env (extend-env* flat-args box-vars env)))
       (define (make-body arg-vars box-vars)
 	(if (null? arg-vars)
 	    (conv (cons :begin body)
@@ -311,6 +314,7 @@
 			 (make-body (cdr arg-vars) (cdr box-vars)))))
       (cps-func func-label
 		(cons* cont-arg arg-vars)
+		restp
 		(make-body arg-vars box-vars))))
 
   (define (is-tail-call? obj result-var)
@@ -341,6 +345,7 @@
 	  (gen-call (lambda (c) (c (tail-call-cont cont-body))))
 	  (cps-fun (cps-func cont-label
 			     (list result-var)
+			     #f
 			     cont-body)
 		   (gen-call (lambda (c)
 			       (c cont-label)))))))
@@ -366,6 +371,7 @@
 	  (gen-if (tail-call-cont cont-body))
 	  (cps-fun (cps-func cont-label
 			     (list result-var)
+			     #f
 			     cont-body)
 		   (gen-if cont-label)))))
 
@@ -478,7 +484,7 @@
      (union (cps-used-vars func)
 	    (map-union cps-used-vars args)))
 
-    ((cps-func label args body)
+    ((cps-func label args restp body)
      (cps-used-vars body))
 
     ((cps-fun func cont)
@@ -501,7 +507,7 @@
     ((cps-app func args)
      '())
 
-    ((cps-func label args body)
+    ((cps-func label args restp body)
      (union (list label)
 	    (union args
 		   (cps-bound-vars body))))
@@ -579,7 +585,9 @@
 				(set! ,tmp old)))))
        (dynamic-wind ,swap (lambda () ,@body) ,swap))))
 
-;;; Closure conversion of FUNs
+;;; Closure conversion and calling convention implementation of FUNs
+
+;; Calling convention: all arguments are passed as a list.
 
 ;; Create a closure record for CODE and VALUES, bind it to RESULT and
 ;; continue with CONT.  No type checking.
@@ -596,13 +604,41 @@
 				  (list cont))))))
 
 ;; Get the code object out of the closure record CLOSURE and continue
-;; with CONT.  No type checking.
+;; with CONT.
 ;;
 (define (cps-gen-closure-ref-code result closure cont)
-  (cps-primop 'record-ref
-	      (list result)
-	      (list closure (cps-quote 0))
-	      (list cont)))
+  (let* ((error-closure (suo:record-ref 
+			 (lookup-global-variable 'error:not-a-closure)
+			 0)))
+    (if error-closure
+	(cps-primop 'if-record?
+		    '()
+		    (list closure (cps-quote suo:closure-descriptor))
+		    (list (cps-primop 'record-ref
+				      (list result)
+				      (list closure (cps-quote 0))
+				      (list cont))
+			  (let ((p1 (genvar))
+				(p2 (genvar)))
+			    (cps-primop 
+			     'cons
+			     (list p1)
+			     (list closure (cps-quote '()))
+			     (list (cps-primop
+				    'cons
+				    (list p2)
+				    (list (cps-quote #f) p1)
+				    (list (cps-app (cps-quote
+						    (suo:record-ref
+						     error-closure 0))
+						   (list (cps-quote
+							  error-closure)
+							 p2)))))))))
+
+	(cps-primop 'syscall
+		    (list result)
+		    '()
+		    (list cont)))))
 
 ;; Put all values in the closure record CLOSURE into the VARIABLES and
 ;; continue with CONT.  No type checking.
@@ -622,6 +658,66 @@
 		(list closure (cps-quote 1))
 		(list (open-them 0 variables)))))
 
+;; Return cps-instructions to create a list containing VALUES and call
+;; C with the cps-value that represents it.
+;;
+(define (cps-gen-list values c)
+  (cond ((null? values)
+	 (c (cps-quote '())))
+	(else
+	 (cps-gen-list (cdr values)
+		       (lambda (z)
+			 (let ((var (genvar)))
+			   (cps-primop 'cons
+				       (list var)
+				       (list (car values) z)
+				       (list (c var)))))))))
+
+;; Put the elements of LST into VARS, continuing with CONT.
+;;
+(define (cps-gen-unlist vars restp lst cont)
+  (let* ((error-closure (suo:record-ref 
+			 (lookup-global-variable 'error:wrong-num-args)
+			 0))
+	 (error-cps (and error-closure
+			 (cps-app (cps-quote
+				   (suo:record-ref error-closure 0))
+				  (list (cps-quote error-closure)
+					(cps-quote (list #f)))))))
+
+    (define (gen vars lst)
+      (cond ((null? vars)
+	     (if error-cps
+		 (cps-primop 'if-eq?
+			     '()
+			     (list lst (cps-quote '()))
+			     (list cont error-cps))
+		 cont))
+	    ((and restp (null? (cdr vars)))
+	     (cps-primop 'identity
+			 (list (car vars))
+			 (list lst)
+			 (list cont)))
+	    (else
+	     (let* ((cdr-var (genvar))
+		    (cont (cps-primop 
+			   'car
+			   (list (car vars))
+			   (list lst)
+			   (list (cps-primop 
+				  'cdr
+				  (list cdr-var)
+				  (list lst)
+				  (list (gen (cdr vars) cdr-var)))))))
+	       (if error-cps
+		   (cps-primop 'if-pair?
+			       '()
+			       (list lst)
+			       (list cont error-cps))
+		   cont)))))
+
+    (gen vars lst)))
+
 (define-dynamic-attr cps-replacement)
 
 (define (cps-closure-convert cps)
@@ -636,36 +732,54 @@
     ((cps-app func args)
      (let ((closure (cps-closure-convert func))
 	   (code-var (genvar)))
-       (cps-gen-closure-ref-code code-var
-				 closure
-				 (cps-app code-var
-					  (cons closure 
-						(map cps-closure-convert
-						     args))))))
+       (cps-gen-list (map cps-closure-convert args)
+		     (lambda (arglist)
+		       (cps-gen-closure-ref-code
+			code-var
+			closure
+			(cps-app code-var (list closure arglist)))))))
 
-    ((cps-func label args body)
+    ((cps-func label args restp body)
      (cps-func label
 	       (map cps-closure-convert args)
+	       restp
 	       (cps-closure-convert body)))
 
     ((cps-fun func cont)
-     (let* ((func-args (cps-func-args func))
-	    (cont-arg (car func-args))
+     (let* (;; closure
 	    (closure-arg (genvar))
 	    (closure-var (genvar))
 	    (free-vars (cps-free-vars func))
 	    (closure-vars (map (lambda (v) (genvar)) free-vars))
+	    ;; aguments
+	    (arglist-arg (genvar))
+	    (func-args (cps-func-args func))
+	    (func-args-vars (map (lambda (v) (genvar)) func-args))
 	    (func-name (cps-func-name func)))
-       (pk-cps 'free (cps-func-name func) free-vars)
+
+       ; (pk-cps 'free (cps-func-name func) free-vars)
+
+       (define (do-closure cont)
+	 (cps-gen-open-closure closure-vars closure-arg
+			       (with-attr* (cps-replacement free-vars
+							    closure-vars)
+			         (cont))))
+
+       (define (do-args cont)
+	 (cps-gen-unlist func-args-vars (cps-func-restp func) 
+			 arglist-arg
+			 (with-attr* (cps-replacement func-args
+						      func-args-vars)
+			   (cont))))
+	 
        (cps-fun (cps-func func-name
-			  (cons closure-arg func-args)
-			  (cps-gen-open-closure closure-vars
-						closure-arg
-						(with-attr*
-						 (cps-replacement free-vars
-								  closure-vars)
-						 (cps-closure-convert
-						  (cps-func-body func)))))
+			  (list closure-arg arglist-arg)
+			  #f
+			  (do-args 
+			   (lambda ()
+			     (do-closure
+			      (lambda ()
+				(cps-closure-convert (cps-func-body func)))))))
 		(cps-gen-make-closure closure-var
 				      func-name
 				      (map cps-closure-convert free-vars)
@@ -679,10 +793,9 @@
 		 (map cps-closure-convert args)
 		 (map cps-closure-convert conts)))))
 
-;;; Register allocation and calling convention implementation
+;;; Register allocation
 
-;; Callig convention: all arguments in registers starting from
-;; register 0.
+;; Callig convention: all arguments as a list.
 
 (define-param cps-next-register)
 
@@ -713,12 +826,13 @@
      (cps-app (cps-register-allocate func)
 	      (map cps-register-allocate args)))
     
-    ((cps-func label args body)
+    ((cps-func label args restp body)
      (with-param (cps-next-register 0)
        (allocate-regs args
 		      (lambda ()
 			(cps-func label
 				  (map cps-register-allocate args)
+				  restp
 				  (cps-register-allocate body))))))
     
     ((cps-fun func cont)
@@ -761,7 +875,7 @@
 		      (map cps-reg (iota (length args))))
      (cps-asm-go (cps-asm-context) (cps-code-generate func)))
 
-    ((cps-func label args body)
+    ((cps-func label args restp body)
      (let ((ctxt (cps-asm-make-context)))
        (with-param (cps-asm-context ctxt)
          (cps-code-generate body))
@@ -787,17 +901,23 @@
 
 ;;; Putting it together
 
+(define cps-verbose #f)
+
+(define (cps-dbg tag cps)
+  (cond (cps-verbose
+	 (pk tag)
+	 (cps-print cps))))
+
+(define (cps-compile-cps cps)
+  (cps-dbg 'cps cps)
+  (let ((clos (cps-closure-convert cps)))
+    (cps-dbg 'clos clos)
+    (let ((regs (cps-register-allocate (cps-fun-func clos))))
+      (cps-dbg 'regs regs)
+      (suo:record suo:closure-descriptor
+		  (cps-code-generate regs)
+		  #()))))
+  
 (define (cps-compile lambda-exp)
   (pk 'compile lambda-exp)
-  (let ((cps (cps-convert lambda-exp)))
-    (pk 'cps)
-    (cps-print cps)
-    (let ((clos (cps-closure-convert cps)))
-      (pk 'clos)
-      (cps-print clos)
-      (let ((regs (cps-register-allocate (cps-fun-func clos))))
-	(pk 'regs)
-	(cps-print regs)
-	(suo:record suo:closure-descriptor
-		    (cps-code-generate regs)
-		    #())))))
+  (cps-compile-cps (cps-convert lambda-exp)))

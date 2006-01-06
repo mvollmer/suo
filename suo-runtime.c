@@ -120,6 +120,8 @@ dump (val v)
   fprintf (stderr, " %08x", v);
   if ((v & 3) == 1)
     fprintf (stderr, " (%d)", ((sword)v) >> 2);
+  else if ((v & 3) == 0)
+    fprintf (stderr, " [%08x]", *(val *)v);
 }
 
 val
@@ -157,13 +159,14 @@ sys (int n_args,
 }
 
 void
-go (val *closure, val *free)
+go (val closure, val arglist, val *free)
 {
   register val *r14 asm ("r14") = regs+1;
-  register val *r15 asm ("r15") = (val *)closure[1];
+  register val *r15 asm ("r15") = (val *)((val *)closure)[1];
   register val *r16 asm ("r16") = free;
   regs[0] = (val)sys;
-  regs[1] = (val)closure;
+  regs[1] = closure;
+  regs[2] = arglist;
 
   asm ("mr 3,15\n\t addi 3,3,4\n\t mtctr 3\n\t bctr"
        :
@@ -204,5 +207,5 @@ main (int argc, char **argv)
 
   unswizzle_objects (heap, n/4);
 
-  go (heap, heap + n/4);
+  go (heap[0], heap[1], heap + n/4);
 }
