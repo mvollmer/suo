@@ -19,20 +19,13 @@
 	 (mem (assemble-object obj)))
     (uniform-vector-write mem port)))
 
-(define-suo (fac n)
-  (if (= n 1)
-      n
-      (* n (fac (- n 1)))))
-
-(define-suo (reduce f i l)
-  (if (pair? l)
-      (f (car l) (reduce f i (cdr l)))
-      i))
-
 (define-suo (iota n)
   (if (zero? n)
       '()
       (cons n (iota (- n 1)))))
+
+(define-suo (fac n)
+  (apply * (iota n)))
 
 (define-suo (tarai x y z)
   (if (<= x y)
@@ -41,12 +34,28 @@
 	     (tarai (- y 1) z x)
 	     (tarai (- z 1) x y))))
 
-(set! cps-verbose #t)
+(define-suo (loop x)
+  (loop (+ x 1)))
 
-(define-suo (list . elts)
-  elts)
+(define-suo (test)
+  (call/cc (lambda (k)
+	     (pk 1)
+	     (k 2)
+	     (pk 2)
+	     (pk 3)
+	     4)))
+
+(set! cps-verbose #f)
+
+(define-suo (call/v producer consumer)
+  (:call/v producer consumer))
+
+(define-suo (values . args)
+  (call/cc (lambda (k) (apply k args))))
+
+(set! cps-verbose #f)
 
 (write-image (cons (cps-compile '(lambda ()
-				   (pk (list 1))
+				   (:primop syscall 2 1 "Hello, World\n" 0 13)
 				   (:primop syscall)))
 		   (list #f)))

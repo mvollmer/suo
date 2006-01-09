@@ -93,9 +93,7 @@ First word of non-immediate block:
 
   Record (fixed length vector).  The first word - b11 points to a
   record descriptor which contains the size as a fixnum in the second
-  word.  When the length is positive then all the words contain scheme
-  values.  When it is negative, then the real length is the absolute
-  value of this and the words are just bits.
+  word.
 
   'system' records: strings, symbols, floats, complex, bignums,
   ratnums, closures, boxes, etc..
@@ -103,15 +101,6 @@ First word of non-immediate block:
 - 1xxxxxxx xxxxxxxx xxxxxxxx xxxx0011
 
   Vector, x-bits give length in number of words.
-
-- 1xxxxxxx xxxxxxxx xxxxxxxx xxtt0111
-
-  Stringbuf. t-bits give type, x-bits give length in the units indicated
-  by the t-bits.  The real object is padded to a whole number of words.
-
-  00: UCS-1
-  01: UCS-2
-  11: UCS-4
 
 - 1xxxxxxx xxxxxxxx xxxxxxxx xxxx1011
 
@@ -191,3 +180,5 @@ r14 to r30 are non-volatile and used for the state as follows:
   r15 points to the current code object
 
   r16 points to the next free byte
+
+  r17 points just after the last free byte

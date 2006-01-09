@@ -75,9 +75,13 @@
 
 ;;; Debugging
 
-(define-suo (pk x)
+(define-suo (pk1 x)
   (:primop syscall 0 x)
   x)
+
+(define-suo (pk . args)
+  (for-each pk1 args)
+  #f)
 
 ;;; Error handling
 
@@ -132,32 +136,80 @@
       (:primop cdr a)
       (error 0)))
 
+;;; Lists
+
+(define-suo (list . elts)
+  elts)
+
+(define-suo (null? lst)
+  (eq? lst '()))
+
+(define-suo (reduce f i l)
+  (if (pair? l)
+      (f (car l) (reduce f i (cdr l)))
+      i))
+
+(define-suo (map func lst)
+  (if (null? lst)
+      '()
+      (cons (func (car lst)) (map func (cdr lst)))))
+
+(define-suo (for-each func lst)
+  (if (not (null? lst))
+      (begin
+	(func (car lst))
+	(for-each func (cdr lst)))))
+
+;;; Functions
+
+(define-suo (flatten-for-apply arg1 args+rest)
+  (if (null? args+rest)
+      arg1
+      (cons arg1 (flatten-for-apply (car args+rest) (cdr args+rest)))))
+
+(define-suo (apply func arg1 . args+rest)
+  (:apply func (flatten-for-apply arg1 args+rest)))
+
+(define-suo (call/cc func)
+  (:call/cc func))
+
 ;;; Fixnums
 
 (define-suo (fixnum? obj)
   (:primif (if-fixnum? obj) #t #f))
 
-(define-suo (+ a b)
+(define-suo (2+ a b)
   (if (and (fixnum? a)
 	   (fixnum? b))
       (or (:primop add-fixnum a b)
 	  (error 1))               ; overflow
       (error 0)))                  ; non-fixnums
 
-(define-suo (- a b)
+(define-suo (+ . args)
+  (reduce 2+ 0 args))
+
+(define-suo (2- a b)
   (if (and (fixnum? a)
 	   (fixnum? b))
       (or (:primop sub-fixnum a b)
 	  (error 1))               ; overflow
       (error 0)))                  ; non-fixnums
 
-(define-suo (* a b)
+(define-suo (- arg . rest)
+  (if (null? rest)
+      (2- 0 arg)
+      (2- arg (apply + rest))))
+
+(define-suo (2* a b)
   (if (and (fixnum? a)
 	   (fixnum? b))
       (or (:primop mul-fixnum a b)
 	  (error 1))               ; overflow
       (error 0)))                  ; non-fixnums
 
+(define-suo (* . args)
+  (reduce 2* 1 args))
+  
 (define-suo (= a b)
   (if (and (fixnum? a)
 	   (fixnum? b))

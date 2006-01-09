@@ -56,24 +56,20 @@
 	(idx 0)
 	(ptr-hash (make-hash-table 1003)))
 
-    (define (emit-byte byte)
-      ;; little-endian
-      (set! byte-word (+ (* 256 byte-word) byte))
-      (if (= byte-idx 3)
-	  (flush-ytes)
-	  (set! byte-idx (1+ byte-idx))))
-
-    (define (flush-bytes)
-      (if (> byte-idx 0)
-	  (begin
-	    (emit-word byte-word)
-	    (set! byte-idx 0)
-	    (set! byte-word 0))))
+    (define (grow-mem)
+      (let ((mem2 (make-u32vector (pk 'new (+ idx 10240))))
+	    (len (u32vector-length mem)))
+	(do ((i 0 (1+ i)))
+	    ((= i len))
+	  (u32vector-set! mem2 i (u32vector-ref mem i)))
+	(set! mem mem2)))
 
     (define (alloc obj n-words)
       (let ((ptr idx))
 	(hashq-set! ptr-hash obj ptr)
 	(set! idx (+ idx n-words))
+	(if (> idx (u32vector-length mem))
+	    (grow-mem))
 	ptr))
 
     (define (emit-words ptr . words)
@@ -81,6 +77,26 @@
 	   (w words (cdr w)))
 	  ((null? w))
 	(u32vector-set! mem i (car w))))
+
+    (define (bytes->words bytes)
+      (let loop ((bs bytes)
+		 (ws '())
+		 (w 0)
+		 (i 0))
+	(cond ((null? bs)
+	       (reverse! (if (zero? i)
+			     ws
+			     (cons (ash w (* (- 4 i) 8)) ws))))
+	      ((= i 3)
+	       (loop (cdr bs)
+		     (cons (+ (ash w 8) (car bs)) ws)
+		     0
+		     0))
+	      (else
+	       (loop (cdr bs)
+		     ws
+		     (+ (ash w 8) (car bs))
+		     (1+ i))))))
 
     (define (emit obj)
       (cond
@@ -101,6 +117,13 @@
 	  (apply emit-words ptr
 		 (+ #x80000000 (* (vector-length obj) 16) 3)
 		 (map asm (vector->list obj)))))
+       ((string? obj)
+	(let* ((len (string-length obj))
+	       (words (quotient (+ len 3) 4))
+	       (ptr (alloc obj (1+ words))))
+	  (apply emit-words ptr
+		 (+ #x80000000 (* len 16) 11)
+		 (bytes->words (map char->integer (string->list obj))))))
        ((suo:code? obj)
 	(let* ((insns (suo:code-insns obj))
 	       (insn-words (u32vector-length insns))

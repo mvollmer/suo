@@ -212,14 +212,17 @@
   ;; bctr
   (cps-asm-word ctxt #x4e800420))
 
+(define (cps-asm-move-rX-to-rY ctxt x y)
+  ;; mr rY,rX
+  (cps-asm-word ctxt (+ #x7c000378
+			(* x (expt 2 11))
+			(* y (expt 2 16))
+			(* x (expt 2 21)))))
+  
 (define-primop (syscall (res) args)
   (for-each (lambda (a r)
 	      (cps-asm-op-to-r3 ctxt a)
-	      ;; mr rR,r3
-	      (cps-asm-word ctxt (+ #x7c000378
-				    (* 3 (expt 2 11))
-				    (* r (expt 2 16))
-				    (* 3 (expt 2 21)))))
+	      (cps-asm-move-rX-to-rY ctxt 3 r))
 	    args (list-head '(4 5 6 7 8 9 10)
 			    (length args)))
   (cps-asm-op-to-r3 ctxt (cps-reg -1))
@@ -232,10 +235,22 @@
   (cps-asm-r3-to-reg ctxt res))
 
 (define (cps-asm-alloc-to-r4 ctxt words)
-  ;; mr r4,r16
-  (cps-asm-word ctxt #x7e048378)
-  ;; addi r16,r16,off
-  (cps-asm-word ctxt (+ #x3a100000 (s2val (* 4 words)))))
+  (let ((lab (cps-asm-make-label ctxt)))
+    ;; mr r4,r16
+    (cps-asm-word ctxt #x7e048378)
+    ;; addi r16,r16,off
+    (cps-asm-word ctxt (+ #x3a100000 (s2val (* 4 words))))
+    ;; cmpw cr7,r16,r17
+    (cps-asm-word ctxt #x7f908800)
+    ;; blt cr7,lab
+    (cps-asm-word-with-s2-laboff ctxt #x419c0000 lab)
+    ;; branch to gc_glue, which knows about our register setup
+    (cps-asm-op-to-r3 ctxt (cps-reg -2))
+    ;; mtctr r3
+    (cps-asm-word ctxt #x7c6903a6)
+    ;; bctrl
+    (cps-asm-word ctxt #x4e800421)
+    (cps-asm-def-label ctxt lab)))
 
 (define (cps-asm-store-r3-to-r4 ctxt idx)
   ;; stw r3,off(r4)
