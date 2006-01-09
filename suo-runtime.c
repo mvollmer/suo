@@ -209,7 +209,7 @@ copy (val *ptr)
 	    {
 	      /* bytevec header */
 	      type = "bytevec";
-	      size = -(((v >> 4) + 3) / 4);
+	      size = (((v >> 4) + 3) / 4);
 	    }
 	  else if ((v & 15) == 15)
 	    {
@@ -234,9 +234,6 @@ copy (val *ptr)
   fprintf (stderr, " %s, %d words\n", type, size);
 #endif
   
-  if (size < 0)
-    size = -size;
-
   memcpy (to_ptr, ptr, size*sizeof(val));
   *ptr = (val)to_ptr;
   to_ptr += size;
@@ -316,8 +313,12 @@ scan (val *ptr)
 #endif
   
   if (size > 0)
-    scan_words (ptr, size);
-  return ptr + size;
+    {
+      scan_words (ptr, size);
+      return ptr + size;
+    }
+  else
+    return ptr - size;
 }
 
 int gc_count = 0;

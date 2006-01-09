@@ -55,7 +55,11 @@
 
 (set! cps-verbose #f)
 
+(define-suo (sys-write fd buf start end)
+  (:primop syscall 2 fd buf start end))
+
 (write-image (cons (cps-compile '(lambda ()
-				   (:primop syscall 2 1 "Hello, World\n" 0 13)
+				   (pk (tarai 10 5 0))
+				   (sys-write 2 "Hello, World\n" 0 13)
 				   (:primop syscall)))
 		   (list #f)))
