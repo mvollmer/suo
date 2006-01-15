@@ -34,32 +34,24 @@
 	     (tarai (- y 1) z x)
 	     (tarai (- z 1) x y))))
 
-(define-suo (loop x)
-  (loop (+ x 1)))
-
 (define-suo (test)
-  (call/cc (lambda (k)
-	     (pk 1)
-	     (k 2)
-	     (pk 2)
-	     (pk 3)
-	     4)))
-
-(set! cps-verbose #f)
-
-(define-suo (call/v producer consumer)
-  (:call/v producer consumer))
-
-(define-suo (values . args)
-  (call/cc (lambda (k) (apply k args))))
-
-(set! cps-verbose #f)
-
-(define-suo (sys-write fd buf start end)
-  (:primop syscall 2 fd buf start end))
-
+  (let ((ch (input-char (current-input-port))))
+    (cond (ch
+	   (pk ch)
+	   (test)))))
+	   
 (write-image (cons (cps-compile '(lambda ()
-				   (pk (tarai 10 5 0))
-				   (sys-write 2 "Hello, World\n" 0 13)
-				   (:primop syscall)))
+				   (init-ports)
+				   (let ((t (make-record-type 3 "foo")))
+				     (pk (record t 1 2 3)))
+				   (sys:halt)))
 		   (list #f)))
+
+(for-each (lambda (c)
+	    (let ((name (car c))
+		  (val (cdr c)))
+	      (if (and (suo:record? val)
+		       (eq? (suo:record-desc val) suo:variable-descriptor)
+		       (eq? (suo:record-ref val 0) (if #f #f)))
+		  (pk 'unspec name))))
+	  toplevel)

@@ -27,7 +27,7 @@ typedef         word val;
 val specials_and_regs[2+256];
 val *regs = specials_and_regs + 2;
 
-#define HEAP_SIZE  (1*1024*1024)
+#define HEAP_SIZE  (16*1024*1024)
 #define SPACE_SIZE (HEAP_SIZE/2)
 
 val *spaces[2];
@@ -398,6 +398,16 @@ dump (val v)
   fprintf (stderr, " %08x", v);
   if ((v & 3) == 1)
     fprintf (stderr, " (%d)", ((sword)v) >> 2);
+  else if ((v & 7) == 6)
+    fprintf (stderr, " (#\\%c)", ((sword)v) >> 3);
+  else if (v == 2)
+    fprintf (stderr, " (nil)");
+  else if (v == 10)
+    fprintf (stderr, " (#t)");
+  else if (v == 18)
+    fprintf (stderr, " (#f)");
+  else if (v == 26)
+    fprintf (stderr, " (unspec)");
   else if ((v & 3) == 0)
     fprintf (stderr, " [%08x]", *(val *)v);
 }
@@ -425,6 +435,21 @@ sys (int n_args,
 
       // fprintf (stderr, "writing %d %p %d %d\n", fd, buf, start, end);
       res = write (fd, ((char *)(buf+1)) + start, end-start);
+
+      return (val)((res << 2) | 1);
+    }
+  else if (arg1 == ((3<<2)|1))
+    {
+      /* read (fd, buf, start, end) */
+      word fd = ((word)arg2) >> 2;
+      val *buf = (val *)arg3;
+      word start = ((word)arg4) >> 2;
+      word end = ((word)arg5) >> 2;
+      char *bytes = (char*)(buf+1);
+      word res;
+
+      // fprintf (stderr, "reading %d %p %d %d\n", fd, buf, start, end);
+      res = read (fd, ((char *)(buf+1)) + start, end-start);
 
       return (val)((res << 2) | 1);
     }
@@ -473,6 +498,15 @@ go (val closure, val arglist, val *free, val *end)
        : "r" (r14), "r" (r15), "r" (r16), "r" (r17));
 }
 
+void
+find_markers (val *mem, size_t n)
+{
+  int i;
+  for (i = 0; i < n; i++)
+    if ((mem[i] & 0xFFFF) == 0xDEAD)
+      printf ("marker: %p\n", mem+i);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -510,14 +544,10 @@ main (int argc, char **argv)
     perror_exit (argv[1]);
 
   unswizzle_objects (space, n/4);
-  
+
+  find_markers (space, n/4);
+
   go (space[0], space[1], space + n/4, space + SPACE_SIZE);
 
   return 0;
-}
-
-void
-foo ()
-{
-  ((val (*)())regs[-1]) (1, 2, 3);
 }

@@ -57,7 +57,7 @@
 	(ptr-hash (make-hash-table 1003)))
 
     (define (grow-mem)
-      (let ((mem2 (make-u32vector (pk 'new (+ idx 10240))))
+      (let ((mem2 (make-u32vector (+ idx 10240)))
 	    (len (u32vector-length mem)))
 	(do ((i 0 (1+ i)))
 	    ((= i len))

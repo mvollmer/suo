@@ -193,15 +193,18 @@
 
 ;;; Code generation hooks for the compiler
 
-(define suo:descriptor-descriptor (suo:record #f 1))
+(define suo:descriptor-descriptor (suo:record #f 2 "record-type"))
 (suo:record-set-desc! suo:descriptor-descriptor
 		      suo:descriptor-descriptor)
 
-(define suo:box-descriptor (suo:record suo:descriptor-descriptor 1))
+(define suo:box-descriptor (suo:record suo:descriptor-descriptor
+				       1 "box"))
 
-(define suo:variable-descriptor (suo:record suo:descriptor-descriptor 1))
+(define suo:variable-descriptor (suo:record suo:descriptor-descriptor
+					    1 "variable"))
 
-(define suo:closure-descriptor (suo:record suo:descriptor-descriptor 2))
+(define suo:closure-descriptor (suo:record suo:descriptor-descriptor
+					   2 "closure"))
 
 ;; Bind a box to RESULT, put VALUE into it and continue with CONT
 ;;
@@ -223,7 +226,7 @@
 ;;
 (define (cps-gen-box-set box value cont)
   (cps-primop 'record-set
-	      '()
+	      (list (genvar))
 	      (list box (cps-quote 0) value)
 	      (list cont)))
 
@@ -247,7 +250,7 @@
 ;;
 (define (cps-gen-variable-set variable value cont)
   (cps-primop 'record-set
-	      '()
+	      (list (genvar))
 	      (list variable (cps-quote 0) value)
 	      (list cont)))
 
@@ -503,7 +506,7 @@
 
   (topfun (conv exp (make-env)
 		(lambda (z)
-		  (cps-primop 'bottom '() '() '())))))
+		  (cps-primop 'bottom '() (list z) '())))))
 
 ;;; Used, bound, and free variables
 
@@ -652,14 +655,14 @@
   (let* ((error-closure (suo:record-ref 
 			 (lookup-global-variable 'error:not-a-closure)
 			 0)))
-    (if error-closure
-	(cps-primop 'if-record?
-		    '()
-		    (list closure (cps-quote suo:closure-descriptor))
-		    (list (cps-primop 'record-ref
-				      (list result)
-				      (list closure (cps-quote 0))
-				      (list cont))
+    (cps-primop 'if-record?
+		'()
+		(list closure (cps-quote suo:closure-descriptor))
+		(list (cps-primop 'record-ref
+				  (list result)
+				  (list closure (cps-quote 0))
+				  (list cont))
+		      (if error-closure
 			  (let ((p1 (genvar))
 				(p2 (genvar)))
 			    (cps-primop 
@@ -676,12 +679,11 @@
 						   (list (cps-quote
 							  error-closure)
 							 p2)
-						   #f))))))))
-
-	(cps-primop 'syscall
-		    (list result)
-		    '()
-		    (list cont)))))
+						   #f))))))
+			  (cps-primop 'syscall
+				      (list result)
+				      '()
+				      (list cont)))))))
 
 ;; Put all values in the closure record CLOSURE into the VARIABLES and
 ;; continue with CONT.  No type checking.
@@ -972,5 +974,6 @@
 		  #()))))
   
 (define (cps-compile lambda-exp)
-  (pk 'compile lambda-exp)
+  (if cps-verbose
+      (pk 'compile lambda-exp))
   (cps-compile-cps (cps-convert lambda-exp)))
