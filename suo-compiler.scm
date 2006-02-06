@@ -143,45 +143,40 @@
 
 (define toplevel '())
 
-(define-struct suo-macro ()
-  expander)
-
 (define (register-thing name thing)
   (set! toplevel (acons name thing toplevel)))
 
 (define (register-macro name expander)
-  (register-thing name (suo-macro expander)))
+  (register-thing name (suo:record suo:macro-type expander name)))
 
 (define (register-variable name value)
-  (register-thing name (suo:record suo:variable-descriptor value)))
+  (register-thing name (suo:record suo:variable-type value name)))
 
 (define (lookup-global sym)
   (and=> (assq sym toplevel) cdr))
 
 (define (lookup-global-macro sym)
   (let ((thing (lookup-global sym)))
-    (if (and thing (suo-macro? thing))
+    (if (and thing (eq? (suo:record-desc thing) suo:macro-type))
 	thing
 	#f)))
 
 (define (lookup-global-variable sym)
   (let ((thing (lookup-global sym)))
-    (cond ((and (suo:record? thing)
-		(eq? (suo:record-desc thing) suo:variable-descriptor))
+    (cond ((and thing (eq? (suo:record-desc thing) suo:variable-type))
 	   thing)
 	  ((not thing)
 	   (register-variable sym (if #f #f))
 	   (lookup-global-variable sym))
 	  (else
-	   (error "not a variable" foo)))))
+	   (error "not a variable" sym)))))
 
 (define (set-global-variable sym value)
   (let ((var (lookup-global-variable sym)))
     (suo:record-set! var 0 value)))
 
 (define (expand-macro macro form)
-  ((suo-macro-expander macro) form))
-
+  ((suo:record-ref macro 0) form))
 
 (define genvar
   (let ((counter 0))
@@ -193,25 +188,12 @@
 
 ;;; Code generation hooks for the compiler
 
-(define suo:descriptor-descriptor (suo:record #f 2 "record-type"))
-(suo:record-set-desc! suo:descriptor-descriptor
-		      suo:descriptor-descriptor)
-
-(define suo:box-descriptor (suo:record suo:descriptor-descriptor
-				       1 "box"))
-
-(define suo:variable-descriptor (suo:record suo:descriptor-descriptor
-					    1 "variable"))
-
-(define suo:closure-descriptor (suo:record suo:descriptor-descriptor
-					   2 "closure"))
-
 ;; Bind a box to RESULT, put VALUE into it and continue with CONT
 ;;
 (define (cps-gen-box result value cont)
   (cps-primop 'record
 	      (list result)
-	      (list (cps-quote suo:box-descriptor) value)
+	      (list (cps-quote suo:box-type) value)
 	      (list cont)))
 
 ;; Bind the value in BOX to RESULT and continue with CONT
@@ -415,7 +397,10 @@
   ;;
   (define (conv exp env c)
     (pattern-case exp
-		  
+		
+       ((:define ?var ?val)
+	(error "wrong 'define' placement"))
+
        ((:quote ?val)
 	(c (cps-quote ?val)))
 
@@ -644,7 +629,7 @@
 		values
 		(list (cps-primop 'record
 				  (list result)
-				  (list (cps-quote suo:closure-descriptor)
+				  (list (cps-quote suo:closure-type)
 					code vector-var)
 				  (list cont))))))
 
@@ -657,7 +642,7 @@
 			 0)))
     (cps-primop 'if-record?
 		'()
-		(list closure (cps-quote suo:closure-descriptor))
+		(list closure (cps-quote suo:closure-type))
 		(list (cps-primop 'record-ref
 				  (list result)
 				  (list closure (cps-quote 0))
@@ -969,7 +954,7 @@
     (cps-dbg 'clos clos)
     (let ((regs (cps-register-allocate (cps-fun-func clos))))
       (cps-dbg 'regs regs)
-      (suo:record suo:closure-descriptor
+      (suo:record suo:closure-type
 		  (cps-code-generate regs)
 		  #()))))
   

@@ -735,6 +735,29 @@
   ;; bne cr7,lab
   (cps-asm-word-with-s2-laboff ctxt #x409e0000 else-label))
 
+(define-primop (make-bytevec (res) (n))
+  (cps-asm-op-to-r3 ctxt n)
+  ;; addi r3,r3,12
+  (cps-asm-word ctxt #x3863000c)
+  ;; rlwinm  r3,r3,30,2,29
+  (cps-asm-word ctxt #x5463f0ba)
+  ;; addi r3,r3,4
+  (cps-asm-word ctxt #x38630004)
+  (cps-asm-alloc-r3-bytes-to-r4 ctxt)
+  ;; mr r3,r4
+  (cps-asm-word ctxt #x7c832378)
+  (cps-asm-r3-to-reg ctxt res)
+  (cps-asm-op-to-r3 ctxt n)
+  ;;    0:   3c 00 80 00     lis     r0,-32768
+  (cps-asm-word ctxt #x3c008000)
+  ;;    4:   54 63 10 36     rlwinm  r3,r3,2,0,27
+  (cps-asm-word ctxt #x54631036)
+  ;;    8:   60 00 00 03     ori     r0,r0,11
+  (cps-asm-word ctxt #x6000000b)
+  ;;    c:   7c 63 03 78     or      r3,r3,r0
+  (cps-asm-word ctxt #x7c630378)
+  (cps-asm-store-r3-to-r4 ctxt 0))
+
 (define-primop (bytevec-length (res) (a))
   (cps-asm-op-to-r3 ctxt a)
   (cps-asm-ref-r3-to-r3 ctxt 0)

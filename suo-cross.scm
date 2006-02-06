@@ -48,16 +48,26 @@
 (define (suo:code-literals code)
   ((record-accessor suo:code-record-type 'literals) code))
 
+;;; The self-referential type of record types
+
+(define suo:record-type-type (suo:record #f 2 'record-type))
+(suo:record-set-desc! suo:record-type-type
+		      suo:record-type-type)
 
 ;;; Assembling suo objects into a u32vector
 
+(define all-suo-symbols '())
+
+(define suo-bootinfo-marker (list 'bootinfo))
+
 (define (assemble-object obj)
-  (let ((mem (make-u32vector 10240))
+  (let ((mem (make-u32vector 102400))
 	(idx 0)
-	(ptr-hash (make-hash-table 1003)))
+	(ptr-hash (make-hash-table 100311))
+	(bootinfo-idxs '()))
 
     (define (grow-mem)
-      (let ((mem2 (make-u32vector (+ idx 10240)))
+      (let ((mem2 (make-u32vector (+ idx 102400)))
 	    (len (u32vector-length mem)))
 	(do ((i 0 (1+ i)))
 	    ((= i len))
@@ -76,7 +86,9 @@
       (do ((i ptr (1+ i))
 	   (w words (cdr w)))
 	  ((null? w))
-	(u32vector-set! mem i (car w))))
+	(if (car w)
+	    (u32vector-set! mem i (car w))
+	    (set! bootinfo-idxs (cons i bootinfo-idxs)))))
 
     (define (bytes->words bytes)
       (let loop ((bs bytes)
@@ -124,6 +136,12 @@
 	  (apply emit-words ptr
 		 (+ #x80000000 (* len 16) 11)
 		 (bytes->words (map char->integer (string->list obj))))))
+       ((symbol? obj)
+	(let ((suo-sym (suo:record suo:symbol-type (symbol->string obj))))
+	  (set! all-suo-symbols (cons suo-sym all-suo-symbols))
+	  (emit suo-sym)
+	  ;; register the original OBJ as required
+	  (hashq-set! ptr-hash obj (hashq-ref ptr-hash suo-sym))))
        ((suo:code? obj)
 	(let* ((insns (suo:code-insns obj))
 	       (insn-words (u32vector-length insns))
@@ -142,6 +160,8 @@
 
     (define (asm obj)
       (cond
+       ((eq? obj suo-bootinfo-marker)
+	#f)
        ((integer? obj)
 	(+ (* 4 obj)
 	   (cond ((<= 0 obj (1- (expt 2 29))) 0)
@@ -166,6 +186,10 @@
 			  (hashq-ref ptr-hash obj))))))))
 
     (asm obj)
+    (for-each (lambda (idx)
+		(emit-words idx (asm all-suo-symbols)))
+	      bootinfo-idxs)
+
     (let ((mem2 (make-u32vector idx)))
       (do ((i 0 (1+ i)))
 	  ((= i idx))

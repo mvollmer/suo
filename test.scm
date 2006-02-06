@@ -34,24 +34,76 @@
 	     (tarai (- y 1) z x)
 	     (tarai (- z 1) x y))))
 
-(define-suo (test)
+(define-suo (read-line-1 chars)
   (let ((ch (input-char (current-input-port))))
-    (cond (ch
-	   (pk ch)
+    (cond ((and (not ch) (null? chars))
+	   #f)
+	  ((or (not ch) (eq? ch #\nl))
+	   (reverse chars))
+	  (else
+	   (read-line-1 (cons ch chars))))))
+
+(define-suo (read-line)
+  (and=> (read-line-1 '()) list->string))
+
+(define-suo (test)
+  (let ((l (read-line)))
+    (cond (l
+	   (pk l)
+	   (if (eq? (string->symbol l) 'foo)
+	       (pk 'foo))
 	   (test)))))
-	   
-(write-image (cons (cps-compile '(lambda ()
+
+(define (all-variables)
+  (remove-if-not (lambda (val)
+		   (and (suo:record? val)
+			(eq? (suo:record-desc val) suo:variable-type)))
+		 (map cdr toplevel)))
+
+
+(define-suo-variable toplevel (all-variables))
+
+(define-suo (lookup-global sym)
+  (let loop ((vars toplevel))
+    (cond ((null? vars)
+	   (begin))
+	  ((eq? (record-ref (car vars) 1) sym)
+	   (record-ref (car vars) 0))
+	  (else
+	   (loop (cdr vars))))))
+
+(define-suo (eval exp)
+  (cond ((symbol? exp)
+	 (lookup-global exp))
+	((pair? exp)
+	 (let ((vals (map eval exp)))
+	   (apply (car vals) (cdr vals))))
+	(else
+	 exp)))
+
+(define-suo (repl)
+  (display "> ")
+  (call/v (lambda () (eval (read)))
+	  (lambda vals
+	    (for-each (lambda (v)
+			(write v)
+			(newline))
+		      vals)))
+  (repl))
+
+(write-image (cons (cps-compile '(lambda (syms)
 				   (init-ports)
-				   (let ((t (make-record-type 3 "foo")))
-				     (pk (record t 1 2 3)))
+				   (init-print)
+				   (init-symbols syms)
+				   (repl)
 				   (sys:halt)))
-		   (list #f)))
+		   (list #f suo-bootinfo-marker)))
 
 (for-each (lambda (c)
 	    (let ((name (car c))
 		  (val (cdr c)))
 	      (if (and (suo:record? val)
-		       (eq? (suo:record-desc val) suo:variable-descriptor)
+		       (eq? (suo:record-desc val) suo:variable-type)
 		       (eq? (suo:record-ref val 0) (if #f #f)))
 		  (pk 'unspec name))))
 	  toplevel)
