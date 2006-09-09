@@ -1,109 +1,54 @@
-(use-modules (ice-9 pretty-print)
+(use-modules (oop goops)
+	     ;;(srfi srfi-39)
+	     (ice-9 pretty-print)
 	     (oop goops)
 	     (ice-9 common-list))
 
 (debug-enable 'debug)
 (debug-enable 'backtrace)
-(debug-set! stack 200000)
+(debug-set! stack 2000000)
 (read-enable 'positions)
 (read-set! keywords 'prefix)
 
-(load "suo-util.scm")
-(load "suo-cross.scm")
-(load "suo-asm-ppc.scm")
-(load "suo-compiler.scm")
-(load "suo-base.scm")
+(set! pk (lambda args
+	   (display ";;;")
+	   (for-each (lambda (elt)
+		       (display " ")
+		       (write elt))
+		     args)
+	   (newline)
+	   (car (last-pair args))))
 
-(define (write-image obj)
-  (let* ((port (open-output-file "image"))
-	 (mem (assemble-object obj)))
+(load "suo-cross.scm")
+
+(suo:load-for-build "suo-base.scm")
+(suo:load-for-build "suo-asm.scm")
+(suo:load-for-build "suo-asm-ppc.scm")
+(suo:load-for-build "suo-util.scm")
+(suo:load-for-build "suo-compiler.scm")
+
+(import-build-types)
+
+(suo:load-for-image "suo-base.scm")
+(suo:load-for-image "suo-asm.scm")
+;;(suo:load-for-image "suo-asm-ppc.scm")
+(suo:load-for-image "suo-boot.scm")
+
+;;(suo:load-for-image "suo-test.scm")
+
+(define (write-image mem)
+  (let* ((port (open-output-file "image")))
     (uniform-vector-write mem port)))
 
-(define-suo (iota n)
-  (if (zero? n)
-      '()
-      (cons n (iota (- n 1)))))
+(define (make-bootstrap-image exp)
+  (let ((comp-exp (suo:eval-for-build
+		   `(compile '(lambda ()
+				,exp
+				(primop syscall))))))
+    (or (and (pair? comp-exp) (eq? (car comp-exp) :quote))
+	(error "expected quote expression"))
+    (write-image
+     (suo:eval-for-build 
+      `(dump-object (cons ',(cadr comp-exp) (list #f)))))))
 
-(define-suo (fac n)
-  (apply * (iota n)))
-
-(define-suo (tarai x y z)
-  (if (<= x y)
-      y
-      (tarai (tarai (- x 1) y z)
-	     (tarai (- y 1) z x)
-	     (tarai (- z 1) x y))))
-
-(define-suo (read-line-1 chars)
-  (let ((ch (input-char (current-input-port))))
-    (cond ((and (not ch) (null? chars))
-	   #f)
-	  ((or (not ch) (eq? ch #\nl))
-	   (reverse chars))
-	  (else
-	   (read-line-1 (cons ch chars))))))
-
-(define-suo (read-line)
-  (and=> (read-line-1 '()) list->string))
-
-(define-suo (test)
-  (let ((l (read-line)))
-    (cond (l
-	   (pk l)
-	   (if (eq? (string->symbol l) 'foo)
-	       (pk 'foo))
-	   (test)))))
-
-(define (all-variables)
-  (remove-if-not (lambda (val)
-		   (and (suo:record? val)
-			(eq? (suo:record-desc val) suo:variable-type)))
-		 (map cdr toplevel)))
-
-
-(define-suo-variable toplevel (all-variables))
-
-(define-suo (lookup-global sym)
-  (let loop ((vars toplevel))
-    (cond ((null? vars)
-	   (begin))
-	  ((eq? (record-ref (car vars) 1) sym)
-	   (record-ref (car vars) 0))
-	  (else
-	   (loop (cdr vars))))))
-
-(define-suo (eval exp)
-  (cond ((symbol? exp)
-	 (lookup-global exp))
-	((pair? exp)
-	 (let ((vals (map eval exp)))
-	   (apply (car vals) (cdr vals))))
-	(else
-	 exp)))
-
-(define-suo (repl)
-  (display "> ")
-  (call/v (lambda () (eval (read)))
-	  (lambda vals
-	    (for-each (lambda (v)
-			(write v)
-			(newline))
-		      vals)))
-  (repl))
-
-(write-image (cons (cps-compile '(lambda (syms)
-				   (init-ports)
-				   (init-print)
-				   (init-symbols syms)
-				   (repl)
-				   (sys:halt)))
-		   (list #f suo-bootinfo-marker)))
-
-(for-each (lambda (c)
-	    (let ((name (car c))
-		  (val (cdr c)))
-	      (if (and (suo:record? val)
-		       (eq? (suo:record-desc val) suo:variable-type)
-		       (eq? (suo:record-ref val 0) (if #f #f)))
-		  (pk 'unspec name))))
-	  toplevel)
+(make-bootstrap-image (pk 'top (suo:toplevel-expression)))

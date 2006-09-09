@@ -2,114 +2,60 @@
   (pretty-print val)
   val)
 
-;;; Structures
+;;; Record definers
 
-;; (define-struct NAME BASE FIELD...) defines a new structure type.
-;;
-;; BASE is either (), indicating no base type, or (BASE-NAME), where
-;; BASE-NAME is the name of a previously defined structure type.
-;;
-;; FIELD is either just NAME (a symbol, called a non-defaulted field)
-;; or (NAME DEFAULT) where DEFAULT is a an arbitrary expression.
+;; (define-record NAME FIELD...) defines a new record type and
+;; associated procedures.
 ;;
 ;; (NAME VALUE...) is a constructor and returns a new object with
 ;; fields initialized according to the arguments of the constructor.
-;; VALUE... is a list with one member for each non-defaulted field of
-;; the structure, including those from BASE.  (The expressions for
-;; defaulted fields are evaluated in an environment where the values
-;; for the non-defaulted fields are visible with their names. XXX -
-;; not yet.)
+;; VALUE... is a list with one member for each field of the record.
 ;;
 ;; (NAME? obj) is the predicate.
 ;;
-;; (NAME-FIELD obj) is an accessor (getter and setter) for FIELD.
+;; (NAME-FIELD obj) is a getter for FIELD.
 ;;
-;; define-struct also registers the structure type so that it can be
-;; used as a BASE for other structure types and with struct-case.
+;; (set-NAME-FIELD! obj val) is a setter for FIELD.
+;;
+;; NAME/type is the type of the record.
 
-;; The meta structure must be done in long hand...
-
-(define-class struct-type ()
-  (base :accessor struct-type-base
-	:init-keyword :base)
-  (direct-fields :accessor struct-type-direct-fields
-		 :init-keyword :direct-fields))
-
-(define (struct-type-fields type)
-  (append (if (struct-type-base type)
-	      (struct-type-fields (struct-type-base type))
-	      '())
-	  (struct-type-direct-fields type)))
-
-(define struct-types '())
-
-(define (register-struct-type name type)
-  (set! struct-types (acons name type struct-types)))
-
-(define (find-struct-type name)
-  (or (assq-ref struct-types name)
-      (error "no such struct type" name)))
-
-(define-macro (define-struct name opt-base . fields)
-
-  (define (field-name f) (if (list? f) (car f) f))
-  (define field-defaulted? list?)
-  (define field-default cadr)
-  
-  (define (field->slot f)
-    (let ((fn (field-name f)))
-      `(,fn :accessor ,(symbol-append name '- fn)
-	    :init-keyword ,(symbol->keyword fn)
-	    ,@(if (field-defaulted? f) 
-		  `(:init-value ,(field-default f)) 
-		  '()))))
-
-  (let* ((class-name (symbol-append name '/class))
-	 (base-name (if (null? opt-base) #f (car opt-base)))
-	 (base (and base-name (find-struct-type base-name)))
-	 (accessors (map (lambda (f)
-			   (symbol-append name '- (field-name f)))
-			 fields))
-	 (type (make struct-type 
-		 :base base
-		 :direct-fields fields))
-	 (constructor-args (remove-if field-defaulted?
-				      (struct-type-fields type))))
-
-    (register-struct-type name type)
-
+(define-macro (define-record name . fields)
+  (let* ((type-name (symbol-append name '/type))
+	 (pred-name (symbol-append name '?)))
     `(begin
-       (define-class ,class-name ,(if base-name
-				      (list (symbol-append base-name '/class))
-				      '())
-	 ,@(map field->slot fields))
-       (define (,(symbol-append name '?) x) (is-a? x ,class-name))
-       (define (,name ,@constructor-args)
-	 (make ,class-name
-	   ,@(apply append (map (lambda (f)
-				  (list (symbol->keyword f)
-					f))
-				constructor-args)))))))
+       (define ,type-name (make-record-type ,(length fields) ',name))
+       (define (,pred-name x) (record-with-type? x ,type-name))
+       (define (,name ,@fields) (record ,type-name ,@fields))
+       ,@(map (lambda (f i)
+		`(begin
+		   (define (,(symbol-append name '- f) x)
+		     (if (,pred-name x)
+			 (record-ref x ,i)
+			 (error:wrong-type x)))
+		   (define (,(symbol-append 'set- name '- f '!) x)
+		     (if (,pred-name x y)
+			 (record-set! x ,i y)
+			 (error:wrong-type x)))))
+	      fields (iota (length fields))))))
 
-(define-macro (struct-case exp . clauses)
+(define-macro (record-case exp . clauses)
   ;; clause -> ((NAME FIELD...) BODY...)
   (let ((tmp (gensym)))
-    (define (field-name f) (if (list? f) (car f) f))
-    (define (struct-clause->cond-clause clause)
-      (let* ((pattern (car clause))
-	     (name (car pattern))
-	     (args (cdr pattern))
-	     (body (cdr clause)))
-	`((,(symbol-append name '?) ,tmp)
-	  ((lambda ,args ,@body)
-	   ,@(map (lambda (f)
-		    `(,(symbol-append name '- (field-name f)) ,tmp))
-		  (list-head
-		   (struct-type-fields (find-struct-type name))
-		   (length args)))))))
+    (define (record-clause->cond-clause clause)
+      (let ((pattern (car clause)))
+	(if (eq? pattern 'else)
+	    clause
+	    (let* ((name (car pattern))
+		   (args (cdr pattern))
+		   (body (cdr clause)))
+	      `((,(symbol-append name '?) ,tmp)
+		((lambda ,args ,@body)
+		 ,@(map (lambda (i)
+			  `(record-ref ,tmp ,i))
+			(iota (length args)))))))))
     `(let ((,tmp ,exp))
-       (cond ,@(map struct-clause->cond-clause clauses)
-	     (else (error "unsupported struct instance" ,tmp))))))
+       (cond ,@(map record-clause->cond-clause clauses)
+	     (else (error "unsupported record instance" ,tmp))))))
 
 ;;; Pattern matching
 
@@ -191,29 +137,3 @@
     (display " "))
   (newline)
   vec)
-
-(define (dotted-list? lst)
-  (cond ((pair? lst)
-	 (dotted-list? (cdr lst)))
-	(else
-	 (not (null? lst)))))
-
-(define (dotted-list-copy lst)
-  (cond ((pair? lst)
-	 (cons (car lst) (dotted-list-copy (cdr lst))))
-	((else
-	  lst))))
-
-(define (dotted-list-length lst)
-  (cond ((pair? lst)
-	 (1+ (dotted-list-length (cdr lst))))
-	(else
-	 0)))
-
-(define (flatten-dotted-list lst)
-  (cond ((pair? lst)
-	 (cons (car lst) (flatten-dotted-list (cdr lst))))
-	((null? lst)
-	 '())
-	(else
-	 (list lst))))

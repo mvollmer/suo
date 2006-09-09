@@ -5,46 +5,40 @@
 (define (register-primitive name func)
   (set! primitives (acons name func primitives)))
 
-;; (define-primop (name (result ...) (arg ...)) body ...)
-(define-macro (define-primop head . body)
+;; (define-primitive (name (result ...) (arg ...) (extra-cont-label ...))
+;;                   body ...)
+(define-macro (define-primitive head . body)
   (let* ((name (car head))
-	 (result-names (list-copy (cadr head)))
+	 (result-names (cadr head))
 	 (n-results (length result-names))
 	 (arg-names (caddr head))
 	 (n-args (dotted-list-length arg-names))
+	 (extra-cont-names (cadddr head))
+	 (n-extra-conts (length extra-cont-names))
 	 (args-cmp (if (dotted-list? arg-names) '>= '=))
-	 (all-args (cons 'ctxt (append! result-names arg-names))))
+	 (all-args (cons 'ctxt (append extra-cont-names
+				       result-names
+				       arg-names))))
     `(let ((func (lambda ,all-args ,@body)))
        (register-primitive
 	',name
 	(lambda (ctxt results args extra-cont-labels)
+	  (if (not (= (length extra-cont-labels) ,n-extra-conts))
+	      (error "wrong number of continuations: "
+		     ,n-extra-conts (length extra-cont-labels)))
 	  (if (not (= (length results) ,n-results))
 	      (error "wrong number of results"))
 	  (if (not (,args-cmp (length args) ,n-args))
 	      (error "wrong number of args"))
-	  (if (not (null? extra-cont-labels))
-	      (error "wrong number of continuations"))
-	  (apply func ctxt (append results args)))))))
+	  (apply func ctxt (append extra-cont-labels results args)))))))
 
+;; (define-primop (name (result ...) (arg ...)) body ...)
+(define-macro (define-primop head . body)
+  `(define-primitive ,(append head '(())) ,@body))
+  
 ;; (define-primif (name (arg ...) (else-label)) body ...)
 (define-macro (define-primif head . body)
-  (let* ((name (car head))
-	 (else-name (car (caddr head)))
-	 (arg-names (cadr head))
-	 (n-args (dotted-list-length arg-names))
-	 (args-cmp (if (dotted-list? arg-names) '>= '=))
-	 (all-args (cons* 'ctxt else-name arg-names)))
-    `(let ((func (lambda ,all-args ,@body)))
-       (register-primitive
-	',name
-	(lambda (ctxt results args extra-cont-labels)
-	  (if (not (zero? (length results)))
-	      (error "wrong number of results"))
-	  (if (not (,args-cmp (length args) ,n-args))
-	      (error "wrong number of args"))
-	  (if (not (= (length extra-cont-labels) 1))
-	      (error "wrong number of continuations"))
-	  (apply func ctxt (append extra-cont-labels args)))))))
+  `(define-primitive (,(car head) () ,@(cdr head)) ,@body))
 
 (define (cps-asm-primop ctxt type results args extra-cont-labels)
   (let ((func (or (assq-ref primitives type)
@@ -52,7 +46,7 @@
     (func ctxt results args extra-cont-labels)))
 
 (define (cps-asm-make-context)
-  (let ((words (make-u32vector 1024 0))
+  (let ((words (make-u32vector 10240 0))
 	(idx 0)
 	(fixups '())
 	(literals '()))
@@ -98,8 +92,8 @@
 
       (define (finish)
 	(for-each (lambda (f) (f)) fixups)
-	(suo:code (u32subvector words 0 idx)
-		  (list->vector literals)))
+	(code (u32subvector words 0 idx)
+	      (list->vector literals)))
 
       (case op
 	((emit-word)
@@ -137,9 +131,9 @@
 
 (define (s2val val)
   (cond
-   ((<= 0 val #x7FFFF)
+   ((and (<= 0 val) (<= val #x7FFFF))
     val)
-   ((<= (- #x8000) val -1)
+   ((and (<= (- #x8000) val) (<= val -1))
     (+ val #x10000))
    (else
     (error "value out of bounds" val))))
@@ -515,7 +509,11 @@
   ;; bne cr7,lab
   (cps-asm-word-with-s2-laboff ctxt #x409e0000 else-label))
   
-(define-primop (add-fixnum (res) (arg1 arg2))
+(define-primitive (add-fixnum (res) (arg1 arg2) (overflow))
+  ;; li r0,0
+  (cps-asm-word ctxt #x38000000)
+  ;; mtxer r0
+  (cps-asm-word ctxt #x7c0103a6)
   (cps-asm-op-to-r3 ctxt arg1)
   ;; mr r4,r3
   (cps-asm-word ctxt #x7c641b78)
@@ -524,18 +522,59 @@
   (cps-asm-word ctxt #x3863ffff)
   ;; addo. r3,r3,r4
   (cps-asm-word ctxt #x7c632615)
-  (let ((out (cps-asm-make-label ctxt)))
-    ;; bns out
-    (cps-asm-word-with-s2-laboff ctxt #x40830000 out)
-    ;; li r0,0
-    (cps-asm-word ctxt #x38000000)
-    ;; mtxer r0
-    (cps-asm-word ctxt #x7c0103a6)
-    (cps-asm-op-to-r3 ctxt (cps-quote #f))
-    (cps-asm-def-label ctxt out))
+  ;; bso overflow
+  (cps-asm-word-with-s2-laboff ctxt #x41830000 overflow)
   (cps-asm-r3-to-reg ctxt res))
 
-(define-primop (sub-fixnum (res) (arg1 arg2))
+(define (cps-asm-split-r3 ctxt hi lo)
+  ;;  138:   54 64 93 ba     rlwinm  r4,r3,18,14,29
+  ;;  13c:   54 63 13 ba     rlwinm  r3,r3,2,14,29
+  (cps-asm-word ctxt #x546493ba)
+  (cps-asm-word ctxt #x546313ba)
+  ;;   f4:   60 84 00 01     ori     r4,r4,1
+  ;;   f8:   60 63 00 01     ori     r3,r3,1
+  (cps-asm-word ctxt #x60840001)
+  (cps-asm-word ctxt #x60630001)
+  (cps-asm-r3-to-reg ctxt lo)
+  ;; mr r3,r4
+  (cps-asm-word ctxt #x7c832378)
+  (cps-asm-r3-to-reg ctxt hi))
+
+(define (cps-asm-unfix-r3 ctxt)
+  ;; e8:   7c 63 16 70     srawi   r3,r3,2
+  (cps-asm-word ctxt #x7c631670))
+
+(define (cps-asm-fix-r3 ctxt)
+  ;;   f0:   54 63 13 ba     rlwinm  r3,r3,2,14,29
+  (cps-asm-word ctxt #x546313ba)
+  ;;   f8:   60 63 00 01     ori     r3,r3,1
+  (cps-asm-word ctxt #x60630001))
+ 
+(define-primitive (split-fixnum (hi lo) (a) ())
+  (cps-asm-op-to-r3 ctxt a)
+  (cps-asm-unfix-r3 ctxt)
+  (cps-asm-split-r3 ctxt hi lo))
+
+(define-primitive (add-fixnum2 (hi lo) (a b k) ())
+  (cps-asm-op-to-r3 ctxt a)
+  (cps-asm-unfix-r3 ctxt)
+  ;; mr r4,r3
+  (cps-asm-word ctxt #x7c641b78)
+  (cps-asm-op-to-r3 ctxt b)
+  (cps-asm-unfix-r3 ctxt)
+  ;;   8:   7c 83 22 14     add     r4,r3,r4
+  (cps-asm-word ctxt #x7c832214)
+  (cps-asm-op-to-r3 ctxt k)
+  (cps-asm-unfix-r3 ctxt)
+  ;;   c:   7c 63 22 14     add     r3,r3,r4
+  (cps-asm-word ctxt #x7c632214)
+  (cps-asm-split-r3 ctxt hi lo))
+
+(define-primitive (sub-fixnum (res) (arg1 arg2) (overflow))
+  ;; li r0,0
+  (cps-asm-word ctxt #x38000000)
+  ;; mtxer r0
+  (cps-asm-word ctxt #x7c0103a6)
   (cps-asm-op-to-r3 ctxt arg1)
   ;; mr r4,r3
   (cps-asm-word ctxt #x7c641b78)
@@ -544,18 +583,32 @@
   (cps-asm-word ctxt #x3863ffff)
   ;; subo. r3,r4,r3
   (cps-asm-word ctxt #x7c632451)
-  (let ((out (cps-asm-make-label ctxt)))
-    ;; bns out
-    (cps-asm-word-with-s2-laboff ctxt #x40830000 out)
-    ;; li r0,0
-    (cps-asm-word ctxt #x38000000)
-    ;; mtxer r0
-    (cps-asm-word ctxt #x7c0103a6)
-    (cps-asm-op-to-r3 ctxt (cps-quote #f))
-    (cps-asm-def-label ctxt out))
+  ;; bso overflow
+  (cps-asm-word-with-s2-laboff ctxt #x41830000 overflow)
   (cps-asm-r3-to-reg ctxt res))
 
-(define-primop (mul-fixnum (res) (arg1 arg2))
+(define-primitive (sub-fixnum2 (hi lo) (a b k) ())
+  (cps-asm-op-to-r3 ctxt a)
+  (cps-asm-unfix-r3 ctxt)
+  ;; mr r4,r3
+  (cps-asm-word ctxt #x7c641b78)
+  (cps-asm-op-to-r3 ctxt b)
+  (cps-asm-unfix-r3 ctxt)
+  ;;   c:   7c 83 20 50     subf    r4,r3,r4
+  (cps-asm-word ctxt #x7c832050)
+  (cps-asm-op-to-r3 ctxt k)
+  (cps-asm-unfix-r3 ctxt)
+  ;;  a8:   7c 63 07 34     extsh   r3,r3
+  (cps-asm-word ctxt #x7c630734)
+  ;;   c:   7c 63 22 14     add     r3,r3,r4
+  (cps-asm-word ctxt #x7c632214)
+  (cps-asm-split-r3 ctxt hi lo))
+
+(define-primitive (mul-fixnum (res) (arg1 arg2) (overflow))
+  ;; li r0,0
+  (cps-asm-word ctxt #x38000000)
+  ;; mtxer r0
+  (cps-asm-word ctxt #x7c0103a6)
   (cps-asm-op-to-r3 ctxt arg1)
   ;; mr r4,r3
   (cps-asm-word ctxt #x7c641b78)
@@ -568,16 +621,53 @@
   (cps-asm-word ctxt #x7c6325d7)
   ;; addi r3,r3,1
   (cps-asm-word ctxt #x38630001)
-  (let ((out (cps-asm-make-label ctxt)))
-    ;; bns out
-    (cps-asm-word-with-s2-laboff ctxt #x40830000 out)
-    ;; li r0,0
-    (cps-asm-word ctxt #x38000000)
-    ;; mtxer r0
-    (cps-asm-word ctxt #x7c0103a6)
-    (cps-asm-op-to-r3 ctxt (cps-quote #f))
-    (cps-asm-def-label ctxt out))
+  ;; bso overflow
+  (cps-asm-word-with-s2-laboff ctxt #x41830000 overflow)
   (cps-asm-r3-to-reg ctxt res))
+
+(define-primitive (mul-fixnum2 (hi lo) (a b c k) ())
+  (cps-asm-op-to-r3 ctxt a)
+  (cps-asm-unfix-r3 ctxt)
+  ;; mr r4,r3
+  (cps-asm-word ctxt #x7c641b78)
+  (cps-asm-op-to-r3 ctxt b)
+  (cps-asm-unfix-r3 ctxt)
+  ;;  18:   7c 83 21 d6     mullw   r4,r3,r4
+  (cps-asm-word ctxt #x7c8321d6)
+  (cps-asm-op-to-r3 ctxt c)
+  (cps-asm-unfix-r3 ctxt)
+  ;; 1c:   7c 83 22 14     add     r4,r3,r4
+  (cps-asm-word ctxt #x7c832214)
+  (cps-asm-op-to-r3 ctxt k)
+  (cps-asm-unfix-r3 ctxt)
+  ;;   c:   7c 63 22 14     add     r3,r3,r4
+  (cps-asm-word ctxt #x7c632214)
+  (cps-asm-split-r3 ctxt hi lo))
+  
+(define-primitive (quotrem-fixnum2 (q r) (a b c) ())
+  ;; MARKER
+  (cps-asm-word ctxt #x7063DEAD)
+  (cps-asm-op-to-r3 ctxt a)
+  ;; rlwinm 4,3,14,0,15
+  (cps-asm-word ctxt #x5464701e)
+  (cps-asm-op-to-r3 ctxt b)
+  (cps-asm-unfix-r3 ctxt)
+  ;; add 4,3,4
+  (cps-asm-word ctxt #x7c832214)
+  (cps-asm-op-to-r3 ctxt c)
+  (cps-asm-unfix-r3 ctxt)
+  ;; mr 0,3
+  (cps-asm-word ctxt #x7c601b78)
+  ;; divwu 3,4,0
+  (cps-asm-word ctxt #x7c640396)
+  ;; mullw 0,3,0
+  (cps-asm-word ctxt #x7c0301d6)
+  (cps-asm-fix-r3 ctxt)
+  (cps-asm-r3-to-reg ctxt q)
+  ;; subf 3,0,4
+  (cps-asm-word ctxt #x7c602050)
+  (cps-asm-fix-r3 ctxt)
+  (cps-asm-r3-to-reg ctxt r))
 
 (define-primop (quotient-fixnum (res) (arg1 arg2))
   (cps-asm-op-to-r3 ctxt arg1)

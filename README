@@ -171,7 +171,7 @@ r1 is the stack pointer and not touched except for syscalls
 
 r2 is reserved by the system and not touched at all
 
-r3 and r4 are volatile and used as temporaries
+r3, r4 and r5 are volatile and used as temporaries
 
 r14 to r30 are non-volatile and used for the state as follows:
 

@@ -1,4 +1,36 @@
-;;;; suo-cross -- suo objects in plain Scheme
+;;;; suo-cross -- Part of Suo in plain Scheme
+
+;; When bootstrapping Suo with a second Scheme implementation, we just
+;; load a number of files with the toplevel definitions for Suo into
+;; the 'build environment'.  These definitions start with basic things
+;; like 'cond' and end with the compiler.  These files are called "the
+;; suo boot files".
+;;
+;; After the compiler has been put into the build environment in this
+;; way, it is used to compile the 'suo image files'.  The result of
+;; this compilation is an image with a boot procedure.  When this
+;; image is loaded by the suo runtime, the boot procedure is executed
+;; and will carry out the actions specified in the suo boot files.
+;;
+;; The build environment is special: before loading the boot files
+;; into it, it already contains a carefully selected set of bindings
+;; and attempts to redefine those bindings will be ignored.  In this
+;; way, the boot files can contain definitions that are right for Suo,
+;; but need to be different for the build environment.
+;;
+;; The pre-defined bindings are things like 'if', 'cons', 'car',
+;; 'record-ref', etc.  For Suo, they are defined in terms of
+;; primitives understood by the compiler and code-generator.  For the
+;; build environment, we want to use the native definitions or provide
+;; suitable definitions in this file.
+;;
+;; While compiling the suo image files to get the suo image, the
+;; compiler creates the 'image environment'.  This environment
+;; contains macros and functions for the suo runtime environment and
+;; the macros in it are therefore not useable at compile time.  The
+;; compiler looks up macros in the build environment when compiling
+;; the image files.  Thus, the boot files need to provide all macros
+;; used by the image files.
 
 ;;; Representation of suo objects as Scheme values
 
@@ -8,20 +40,31 @@
 ;; code - code-record
 
 (define suo:record-record-type
-  (make-record-type 'record-record '(desc fields)
+  (make-record-type 'record-record '(type fields)
 		    (lambda (obj port) (display "#<suo-record>" port))))
 
-(define (suo:record? obj)
-  ((record-predicate suo:record-record-type) obj))
+(define suo:record? (record-predicate suo:record-record-type))
 
-(define (suo:record desc . fields)
-  ((record-constructor suo:record-record-type) desc (apply vector fields)))
+(define (suo:record-with-type? obj type)
+  (and (suo:record? obj)
+       (eq? (suo:record-type obj) type)))
 
-(define (suo:record-desc rec)
-  ((record-accessor suo:record-record-type 'desc) rec))
+(define (suo:record-length rec)
+  (suo:record-ref (suo:record-type rec) 0))
 
-(define (suo:record-fields rec)
-  ((record-accessor suo:record-record-type 'fields) rec))
+(define suo:record
+  (let ((constructor (record-constructor suo:record-record-type)))
+    (lambda (type . fields)
+      (constructor type (apply vector fields)))))
+
+(define suo:make-record
+  (let ((constructor (record-constructor suo:record-record-type)))
+    (lambda (type init)
+      (constructor type (make-vector (suo:record-ref type 0) init)))))
+
+(define suo:record-type (record-accessor suo:record-record-type 'type))
+
+(define suo:record-fields (record-accessor suo:record-record-type 'fields))
 
 (define (suo:record-ref rec idx)
   (vector-ref (suo:record-fields rec) idx))
@@ -29,169 +72,283 @@
 (define (suo:record-set! rec idx val)
   (vector-set! (suo:record-fields rec) idx val))
 
-(define (suo:record-set-desc! rec desc)
-  ((record-modifier suo:record-record-type 'desc) rec desc))
+(define suo:record-set-type! (record-modifier suo:record-record-type 'type))
 
 (define suo:code-record-type
   (make-record-type 'code-record '(insns literals)
 		    (lambda (obj port) (display "#<suo-code>" port))))
 
-(define (suo:code? obj)
-  ((record-predicate suo:code-record-type) obj))
+(define suo:code? (record-predicate suo:code-record-type))
 
-(define (suo:code insns literals)
-  ((record-constructor suo:code-record-type) insns literals))
+(define suo:code (record-constructor suo:code-record-type))
 
-(define (suo:code-insns code)
-  ((record-accessor suo:code-record-type 'insns) code))
+(define suo:code-insns (record-accessor suo:code-record-type 'insns))
 
-(define (suo:code-literals code)
-  ((record-accessor suo:code-record-type 'literals) code))
+(define suo:code-literals (record-accessor suo:code-record-type 'literals))
 
 ;;; The self-referential type of record types
 
 (define suo:record-type-type (suo:record #f 2 'record-type))
-(suo:record-set-desc! suo:record-type-type
+(suo:record-set-type! suo:record-type-type
 		      suo:record-type-type)
 
-;;; Assembling suo objects into a u32vector
+;;; Basic record types, needed by the compiler
 
-(define all-suo-symbols '())
+(define (suo:make-record-type n-fields name)
+  (suo:record suo:record-type-type n-fields name))
 
-(define suo-bootinfo-marker (list 'bootinfo))
+(define suo:box-type (suo:make-record-type 1 'box))
 
-(define (assemble-object obj)
-  (let ((mem (make-u32vector 102400))
-	(idx 0)
-	(ptr-hash (make-hash-table 100311))
-	(bootinfo-idxs '()))
+(define suo:variable-type (suo:make-record-type 2 'variable))
 
-    (define (grow-mem)
-      (let ((mem2 (make-u32vector (+ idx 102400)))
-	    (len (u32vector-length mem)))
-	(do ((i 0 (1+ i)))
-	    ((= i len))
-	  (u32vector-set! mem2 i (u32vector-ref mem i)))
-	(set! mem mem2)))
+(define suo:macro-type (suo:make-record-type 2 'macro))
 
-    (define (alloc obj n-words)
-      (let ((ptr idx))
-	(hashq-set! ptr-hash obj ptr)
-	(set! idx (+ idx n-words))
-	(if (> idx (u32vector-length mem))
-	    (grow-mem))
-	ptr))
+(define suo:closure-type (suo:make-record-type 2 'closure))
 
-    (define (emit-words ptr . words)
-      (do ((i ptr (1+ i))
-	   (w words (cdr w)))
-	  ((null? w))
-	(if (car w)
-	    (u32vector-set! mem i (car w))
-	    (set! bootinfo-idxs (cons i bootinfo-idxs)))))
+(define suo:symbol-type (suo:make-record-type 1 'symbol))
 
-    (define (bytes->words bytes)
-      (let loop ((bs bytes)
-		 (ws '())
-		 (w 0)
-		 (i 0))
-	(cond ((null? bs)
-	       (reverse! (if (zero? i)
-			     ws
-			     (cons (ash w (* (- 4 i) 8)) ws))))
-	      ((= i 3)
-	       (loop (cdr bs)
-		     (cons (+ (ash w 8) (car bs)) ws)
-		     0
-		     0))
-	      (else
-	       (loop (cdr bs)
-		     ws
-		     (+ (ash w 8) (car bs))
-		     (1+ i))))))
+(define suo:keyword-type (suo:make-record-type 1 'keyword))
 
-    (define (emit obj)
-      (cond
-       ((pair? obj)
-	(let ((ptr (alloc obj 2)))
-	  (emit-words ptr (asm (car obj)) (asm (cdr obj)))))
-       ((suo:record? obj)
-	(let* ((desc (suo:record-desc obj))
-	       (fields (vector->list (suo:record-fields obj)))
-	       (ptr (alloc obj (1+ (length fields)))))
-	  (if (not (eqv? (length fields) (suo:record-ref desc 0)))
-	      (error "inconsistent record"))
-	  (apply emit-words ptr
-		 (+ (asm desc) 3)
-		 (map asm fields))))
-       ((vector? obj)
-	(let ((ptr (alloc obj (1+ (vector-length obj)))))
-	  (apply emit-words ptr
-		 (+ #x80000000 (* (vector-length obj) 16) 3)
-		 (map asm (vector->list obj)))))
-       ((string? obj)
-	(let* ((len (string-length obj))
-	       (words (quotient (+ len 3) 4))
-	       (ptr (alloc obj (1+ words))))
-	  (apply emit-words ptr
-		 (+ #x80000000 (* len 16) 11)
-		 (bytes->words (map char->integer (string->list obj))))))
-       ((symbol? obj)
-	(let ((suo-sym (suo:record suo:symbol-type (symbol->string obj))))
-	  (set! all-suo-symbols (cons suo-sym all-suo-symbols))
-	  (emit suo-sym)
-	  ;; register the original OBJ as required
-	  (hashq-set! ptr-hash obj (hashq-ref ptr-hash suo-sym))))
-       ((suo:code? obj)
-	(let* ((insns (suo:code-insns obj))
-	       (insn-words (u32vector-length insns))
-	       (literals (suo:code-literals obj))
-	       (literal-words (vector-length literals))
-	       (ptr (alloc obj (+ 1 insn-words literal-words))))
-	  (apply emit-words ptr
-		 (+ #x80000000
-		    (* insn-words (* 256 16))
-		    (* literal-words 16)
-		    15)
-		 (append (u32vector->list insns)
-			 (map asm (vector->list literals))))))
-       (else
-	(error "unsupported" obj))))
+;;; The image environment
 
-    (define (asm obj)
-      (cond
-       ((eq? obj suo-bootinfo-marker)
-	#f)
-       ((integer? obj)
-	(+ (* 4 obj)
-	   (cond ((<= 0 obj (1- (expt 2 29))) 0)
-		 ((<= (- (expt 2 29)) obj -1) #x100000000)
-		 (else
-		  (error "integer is not fixnum" obj)))
-	   1))
-       ((char? obj)
-	(+ (* 8 (char->integer obj)) 6))
-       ((eq? obj '())
-	2)
-       ((eq? obj #t)
-	10)
-       ((eq? obj #f)
-	18)
-       ((eq? obj (if #f #f))
-	26)
-       (else
-	(let ((ptr (hashq-ref ptr-hash obj)))
-	  (* 4 (or ptr
-		   (begin (emit obj)
-			  (hashq-ref ptr-hash obj))))))))
+;; The compiler accesses and manipulates the image environment by
+;; calling 'register-toplevel-macro', 'lookup-toplevel-macro', and
+;; 'lookup-toplevel-variable'.  It also uses 'expand-macro' to invoke
+;; a macro transformer function.
+ 
+;;; The build environment
 
-    (asm obj)
-    (for-each (lambda (idx)
-		(emit-words idx (asm all-suo-symbols)))
-	      bootinfo-idxs)
+;; Things are fairly simple for toplevel variable definitions.  When
+;; creating the suo-like environment in the build system by loading
+;; the suo boot files, a toplevel variable definition is either
+;; ignored (when a definition for the same name already exists), or a
+;; new variable is installed.
+;;
+;; Macros are more complicated.  A macro that is defined when loading
+;; the suo boot files is put both into the suo-like environment (when
+;; no definition for its name exists), and made available ...
 
-    (let ((mem2 (make-u32vector idx)))
-      (do ((i 0 (1+ i)))
-	  ((= i idx))
-	(u32vector-set! mem2 i (u32vector-ref mem i)))
-      mem2)))
+(define suo:toplevel '())
+(define suo:build-macros '())
+
+(define (suo:expand-macro macro form)
+  (apply macro (cdr form)))
+
+(define-macro (suo:define-macro head . rest)
+  (if (pair? head)
+      `(define-macro ,(car head) (lambda ,(cdr head) ,@rest))
+      (register-build-macro head (car rest))))
+
+(define (register-build-macro sym transformer-exp)
+  (pk 'build-macro sym)
+  (let ((transformer (eval transformer-exp build-module)))
+    (eval `(define ,sym ',(defmacro:transformer transformer)) build-module)
+    (set! suo:build-macros (acons sym transformer suo:build-macros))))
+
+(define (register-toplevel-binding sym obj)
+  (if (assq-ref suo:toplevel sym)
+      (error "redefinition" sym))
+  (set! suo:toplevel (acons sym obj suo:toplevel))
+  obj)
+  
+(define (suo:lookup-toplevel-variable sym)
+  (if (suo:lookup-toplevel-macro sym)
+      (error "not a variable:" sym))
+  (or (assq-ref suo:toplevel sym)
+      (let ((var (suo:record suo:variable-type (if #f #f) sym)))
+	(pk 'variable sym)
+	(register-toplevel-binding sym var))))
+
+(define (suo:register-toplevel-macro sym val)
+  (pk 'macro sym)
+  (register-toplevel-binding sym (suo:record suo:macro-type val sym)))
+
+(define (suo:lookup-toplevel-macro sym)
+  (assq-ref suo:build-macros sym))
+
+(define (suo:sys:halt)
+  (error "halt"))
+
+(define (suo:make-parameter val)
+  (let ((f (make-fluid)))
+    (fluid-set! f val)
+    (lambda args
+      (if (null? args)
+	  (fluid-ref f)
+	  (fluid-set! f (car args))))))
+
+(define build-pre-defines
+  '(lambda
+    define
+    define-macro
+    begin
+    quote
+    quasiquote
+    if
+    let let* letrec
+    set!
+    apply
+    dynamic-wind
+    make-parameter
+    sys:halt
+    
+    lookup-toplevel-macro expand-macro
+    lookup-toplevel-variable
+
+    ;; Output
+    display write newline pretty-print
+
+    ;; Testing and booleans
+    eq?
+
+    ;; Pairs
+    pair? cons car cdr set-car! set-cdr!
+    ;; map for-each cadr caddr append memv memq
+    ;; acons assq assq-ref
+
+    ;; Characters
+    char? integer->char char->integer
+
+    ;; Strings
+    string? make-string string-length string-ref string-set!
+
+    ;; Bootinfo
+    bootinfo
+
+    ;; Symbols
+    symbol-type symbol? string->symbol symbol->string gensym
+
+    ;; Keywords
+    keyword-type keyword? keyword->symbol
+
+    ;; Fixnums
+    fixnum? +:2 -:2 *:2 quotient remainder <
+    ;; + - * <= >= >
+
+    ;; Vectors
+    vector? vector-length make-vector vector-ref vector-set!
+    vector->list
+
+    ;; Records
+    record? record-with-type? record-type record-length record-ref record-set!
+    make-record record-type-type make-record-type
+
+    ;; Types
+    variable-type macro-type box-type closure-type
+
+    ;; Code
+    code code? code-insns code-literals
+
+    ;; XXX
+    make-u32vector u32vector-ref u32vector-set! u32vector-length
+    u32vector->list
+    make-hash-table hashq-ref hashq-set!
+    ash expt))
+
+(define build-module (make-module 1031))
+
+(define ignored-variable (make-variable #f))
+
+(define (suo:bootinfo)
+  (cons '() '()))
+
+(define (suo:fixnum? n)
+  (integer? n))
+
+(define (suo:+:2 a b)
+  (+ a b))
+
+(define (suo:-:2 a b)
+  (- a b))
+
+(define (suo:*:2 a b)
+  (* a b))
+
+(for-each (lambda (sym)
+	    (module-add! build-module sym
+			 (or (module-variable (current-module)
+					      (symbol-append 'suo: sym))
+			     (module-variable (current-module)
+					      sym)
+			     (error "nope" sym))))
+	  build-pre-defines)
+
+(set-module-eval-closure! 
+ build-module
+ (lambda (sym define?)
+   (if define?
+       (if (memq sym build-pre-defines)
+	   (begin
+	     (pk 'ignore sym)
+	     ignored-variable)
+	   (begin
+	     (pk 'define sym)
+	     (module-make-local-var! build-module sym)))
+       (begin
+	 ;;(pk 'lookup sym)
+	 (module-local-variable build-module sym)))))
+
+(define (suo:load-for-build filename)
+  (save-module-excursion
+   (lambda ()
+     (set-current-module build-module)
+     (load filename))))
+
+(define (suo:eval-for-build form)
+  (eval form build-module))
+
+(define suo:topexp '())
+
+(define (suo:add-toplevel-expression exp)
+  (pk 'cross-exp exp)
+  (set! suo:topexp (cons exp suo:topexp)))
+
+(define (suo:toplevel-expression)
+  (cons 'begin (reverse suo:topexp)))
+
+(define (literal? exp)
+  (and (not (pair? exp)) (not (symbol? exp))))
+
+(define (suo:cross-eval form)
+  (let ((exp (suo:eval-for-build `(macroexpand ',form))))
+    (if (pair? exp)
+	(case (car exp)
+	  ((:define)
+	   (let* ((name (cadr exp))
+		  (val (caddr exp))
+		  (var (suo:lookup-toplevel-variable name))
+		  (comp-val (suo:eval-for-build `(compile ',val))))
+	     (if (and (pair? comp-val) (eq? :quote (car comp-val)))
+		 (suo:record-set! var 0 (cadr comp-val))
+		 (if (literal? comp-val)
+		     (suo:record-set! var 0 comp-val)
+		     (suo:add-toplevel-expression 
+		      `(primop record-set ',var 0 ,comp-val))))))
+	  ((:define-macro)
+	   (let* ((name (cadr exp))
+		  (val (caddr exp))
+		  (comp-val (suo:eval-for-build `(compile ',val))))
+	     (suo:register-toplevel-macro name comp-val)))
+	  (else
+	   (suo:add-toplevel-expression exp))))))
+
+(define (suo:load-for-image file)
+  (with-input-from-file file
+    (lambda ()
+      (let loop ((form (read)))
+	(cond ((not (eof-object? form))
+	       (suo:cross-eval form)
+	       (loop (read))))))))
+
+(define (import-from-build sym)
+  (let ((var (suo:lookup-toplevel-variable sym)))
+    (suo:record-set! var 0 (suo:eval-for-build sym))))
+
+(define (import-build-types)
+  (for-each import-from-build '(record-type-type
+				symbol-type
+				keyword-type
+				variable-type
+				macro-type
+				closure-type
+				box-type)))

@@ -409,7 +409,16 @@ dump (val v)
   else if (v == 26)
     fprintf (stderr, " (unspec)");
   else if ((v & 3) == 0)
-    fprintf (stderr, " [%08x]", *(val *)v);
+    {
+      val t = *(val *)v;
+      if ((t & 0x8000000f) == 0x8000000b)
+	{
+	  val l = (t & ~0x80000000) >> 4;
+	  fprintf (stderr, " %d \"%.*s\"", l, l, ((val *)v)+1);
+	}
+      else
+	fprintf (stderr, " [%08x]", t);
+    }
 }
 
 val
