@@ -645,8 +645,6 @@
   (cps-asm-split-r3 ctxt hi lo))
   
 (define-primitive (quotrem-fixnum2 (q r) (a b c) ())
-  ;; MARKER
-  (cps-asm-word ctxt #x7063DEAD)
   (cps-asm-op-to-r3 ctxt a)
   ;; rlwinm 4,3,14,0,15
   (cps-asm-word ctxt #x5464701e)
@@ -848,7 +846,7 @@
   (cps-asm-word ctxt #x7c630378)
   (cps-asm-store-r3-to-r4 ctxt 0))
 
-(define-primop (bytevec-length (res) (a))
+(define-primop (bytevec-length-8 (res) (a))
   (cps-asm-op-to-r3 ctxt a)
   (cps-asm-ref-r3-to-r3 ctxt 0)
   ;; rlwinm  r3,r3,30,3,29
@@ -888,6 +886,40 @@
   (cps-asm-word ctxt #x5463f0be)
   ;;   8:   88 63 00 04     stb     r3,4(r4)
   (cps-asm-word ctxt #x98640004)
+  (cps-asm-op-to-r3 ctxt (cps-quote (if #f #f)))
+  (cps-asm-r3-to-reg ctxt res))
+
+(define-primop (bytevec-ref-u16 (res) (vec idx))
+  (cps-asm-op-to-r3 ctxt vec)
+  ;; mr r4,r3
+  (cps-asm-word ctxt #x7c641b78)
+  (cps-asm-op-to-r3 ctxt idx)
+  ;;   0:   54 63 f0 be     rlwinm  r3,r3,30,2,31
+  ;;   4:   7c 63 22 14     add     r3,r3,r4
+  ;;   8:   a0 63 00 04     lhz     r3,4(r3)
+  ;;   c:   54 63 10 3a     rlwinm  r3,r3,2,0,29
+  ;;  10:   60 63 00 01     ori     r3,r3,1
+  (cps-asm-word ctxt #x5463f0be)
+  (cps-asm-word ctxt #x7c632214)
+  (cps-asm-word ctxt #xa0630004)
+  (cps-asm-word ctxt #x5463103a)
+  (cps-asm-word ctxt #x60630001)
+  (cps-asm-r3-to-reg ctxt res))
+
+(define-primop (bytevec-set-u16 (res) (vec idx val))
+  (cps-asm-op-to-r3 ctxt vec)
+  ;; mr r4,r3
+  (cps-asm-word ctxt #x7c641b78)
+  (cps-asm-op-to-r3 ctxt idx)
+  ;;   0:   54 63 f0 be     rlwinm  r3,r3,30,2,31
+  (cps-asm-word ctxt #x5463f0be)
+  ;;   4:   7c 63 22 14     add     r4,r3,r4
+  (cps-asm-word ctxt #x7c832214)
+  (cps-asm-op-to-r3 ctxt val)
+  ;;   0:   54 63 f0 be     rlwinm  r3,r3,30,2,31
+  (cps-asm-word ctxt #x5463f0be)
+  ;;   8:   b0 64 00 04     sth     r3,4(r4)
+  (cps-asm-word ctxt #xb0640004)
   (cps-asm-op-to-r3 ctxt (cps-quote (if #f #f)))
   (cps-asm-r3-to-reg ctxt res))
 

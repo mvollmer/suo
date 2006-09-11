@@ -78,13 +78,20 @@
 	  (apply emit-words ptr
 		 (+ #x80000000 (* (vector-length obj) 16) 3)
 		 (map asm (vector->list obj)))))
-       ((string? obj)
-	(let* ((len (string-length obj))
+       ((u8vector? obj)
+	(let* ((len (u8vector-length obj))
 	       (words (quotient (+ len 3) 4))
 	       (ptr (alloc obj (1+ words))))
 	  (apply emit-words ptr
 		 (+ #x80000000 (* len 16) 11)
-		 (bytes->words (map char->integer (string->list obj))))))
+		 (bytes->words (u8vector->list obj)))))
+       ((string? obj)
+	(let ((suo-str (record string-type
+			       (apply u8vector
+				      (map char->integer (string->list obj))))))
+	  (emit suo-str)
+	  ;; register the original OBJ as required
+	  (hashq-set! ptr-hash obj (hashq-ref ptr-hash suo-str))))
        ((symbol? obj)
 	(let ((suo-sym (record symbol-type (symbol->string obj))))
 	  (set! all-suo-symbols (cons suo-sym all-suo-symbols))

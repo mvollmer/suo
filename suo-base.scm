@@ -98,8 +98,11 @@
 (define-macro (define head . body)
   (if (pair? head)
       `(define ,(car head) (lambda ,(cdr head) 
-			     ;;(primop syscall 0 ,(symbol->string (car head)))
-			     ,@body))
+;;;			     (primop syscall 0 ,(host-string-chars
+;;;						 (symbol->string (car head))))
+;;;			     (let ()
+			       ,@body))
+;;;                                    )
       `(:define ,head ,(car body))))
 
 (define-macro (define-macro head . body)
@@ -498,6 +501,33 @@ the result list."
 	((null? l2) l1)
 	(else (union (cdr l1) (adjoin (car l1) l2)))))
 
+;;; Byte vectors
+
+(define (bytevec? val)
+  (primif (if-bytevec? val) #t #f))
+
+(define (make-bytevec n)
+  (if (fixnum? n)
+      (primop make-bytevec n)
+      (error:wrong-type n)))
+
+(define (bytevec-length-8 bv)
+  (if (bytevec? bv)
+      (primop bytevec-length-8 bv)
+      (error:wrong-type bv)))
+
+(define (bytevec-ref-u8 bv i)
+  (if (and (<= 0 i) (< i (bytevec-length-8 bv)))
+      (primop bytevec-ref-u8 bv i)
+      (error:out-of-range i)))
+
+(define (bytevec-set-u8! bv i val)
+  (if (and (<= 0 i) (< i (bytevec-length-8 bv)))
+      (if (and (<= 0 val) (< val 256))
+	  (primop bytevec-set-u8 bv i val)
+	  (error:out-of-range val))
+      (error:out-of-range i)))
+
 ;;; Characters
 
 (define (char? val)
@@ -516,14 +546,18 @@ the result list."
 (define (char=? a b)
   (eq? a b))
 
-;;; Strings (just bytevecs for now)
+;;; Strings
 
 (define (string? val)
-  (primif (if-bytevec? val) #t #f))
+  (record-with-type? val string-type))
 
 (define (make-string n)
-  (if (fixnum? n)
-      (primop make-bytevec n)))
+  (make-record string-type (make-bytevec n)))
+
+(define (string-chars str)
+  (if (string? str)
+      (record-ref str 0)
+      (error:wrong-type str)))
 
 (define (string . chars)
   (let ((str (make-string (length chars))))
@@ -543,27 +577,19 @@ the result list."
 	((< i 0) l))))
 
 (define (string-length str)
-  (if (string? str)
-      (primop bytevec-length str)
-      (error:wrong-type str)))
+  (bytevec-length-8 (string-chars str)))
 
 (define (string-ref str idx)
-  (if (and (<= 0 idx) (< idx (string-length str)))
-      (integer->char (primop bytevec-ref-u8 str idx))
-      (error:out-of-range idx)))
+  (integer->char (bytevec-ref-u8 (string-chars str) idx)))
 
 (define (string-set! str idx chr)
-  (if (and (<= 0 idx) (< idx (string-length str)))
-      (primop bytevec-set-u8 str idx (char->integer chr))
-      (error:out-of-range idx)))
+  (bytevec-set-u8! (string-chars str) idx (char->integer chr)))
 
 (define (number->string n)
-  (if (= n -536870912)
-      "-536870912"
-      (list->string
-       (if (< n 0)
-	   (cons #\- (reverse (positive-number->char-list (- n))))
-	   (reverse (positive-number->char-list n))))))
+  (list->string
+   (if (< n 0)
+       (cons #\- (reverse (positive-number->char-list (- n))))
+       (reverse (positive-number->char-list n)))))
 
 (define (positive-number->char-list n)
   (let ((q (quotient n 10))
@@ -642,6 +668,13 @@ the result list."
 
 (define (values . results)
   (call/cc (lambda (k) (apply k results))))
+
+(define-macro (let-values1 bindings . body)
+  ;; bindings -> (sym1 sym2 ... producer)
+  (let* ((n (length bindings))
+	 (producer (list-ref bindings (1- n)))
+	 (vals (list-head bindings (1- n))))
+    (pk `(call/v (lambda () ,producer) (lambda ,vals ,@body)))))
 
 (define (call/de env func)
   (call/cc (lambda (k)
@@ -726,8 +759,11 @@ the result list."
 	    ((and (= i 1) (>= k #xe000))
 	     (+ (vector-ref x 0) (* (- k #x10000) #x10000)))
 	    (else
-	     ;;(pk 'trunc-to (1+ i))
+	     (pk-dbg 'trunc-to (1+ i))
 	     (make-record bignum-type (subvector x 0 (1+ i))))))))
+
+(define (normalize-bignum b)
+  (vector->bignum (bignum-limbs b)))
 
 (define-macro (pk-dbg . args)
   (car (last-pair args)))
@@ -829,23 +865,96 @@ the result list."
 	  #t))))
 
 (define (bignum-less-than a b)
-  (pk '< a b)
+  (pk-dbg '< a b)
   (let* ((a-n (bignum-length a))
 	 (b-n (bignum-length b))
 	 (n (if (> a-n b-n) a-n b-n)))
     (let loop ((i (1- n)))
-      (pk 'i i)
+      (pk-dbg 'i i)
       (if (< i 0)
 	  #f
 	  (let ((v-a (if (= i (1- n)) (bignum-sref a i) (bignum-ref a i)))
 		(v-b (if (= i (1- n)) (bignum-sref b i) (bignum-ref b i))))
-	    (pk 'a v-a 'b v-b)
+	    (pk-dbg 'a v-a 'b v-b)
 	    (cond ((< v-a v-b)
 		   #t)
 		  ((= v-a v-b)
 		   (loop (1- i)))
 		  (else
 		   #f)))))))
+
+(define (bignum-shift-limbs a n)
+  (let* ((a-v (bignum-limbs a))
+	 (a-n (vector-length a-v))
+	 (v (make-vector (+ a-n n) 0)))
+    (do ((i 0 (1+ i)))
+	((= i a-n) (vector->bignum v))
+      (vector-set! v (+ i n) (vector-ref a-v i)))))
+
+(define (quot-fixnum2 q1 q2 v)
+  (:primitive quotrem-fixnum2 (ww rr) (q1 q2 v) (ww)))
+
+(define (bignum-quotrem q v)
+  
+  (define (quot1 q q-n v v-n)
+    (pk-dbg 'quot1 q q-n v v-n)
+    ;; compute one limb of q/v.
+    ;; (q[n-1] q[n-2]) / v[n-1] is less than b.
+    (let* ((ww (quot-fixnum2 (bignum-ref q (- q-n 1))
+			     (bignum-ref q (- q-n 2))
+			     (bignum-ref v (- v-n 1))))
+	   (v-shift (bignum-shift-limbs v (- q-n v-n 1)))
+	   (r (->bignum (* ww v-shift))))
+      (let loop ((ww ww)
+		 (r r))
+	(pk-dbg 'ww? ww)
+	(if (> r q)
+	    (loop (- ww 1)
+		  (->bignum (- r v-shift)))
+	    (values ww (->bignum (- q r)))))))
+
+  (define (non-zero-bignum-length v)
+    (let loop ((n (bignum-length v)))
+      (if (or (zero? n)
+	      (not (zero? (bignum-ref v (1- n)))))
+	  n
+	  (loop (1- n)))))
+
+  (define (quotrem q v)
+    (pk-dbg 'q q)
+    (pk-dbg 'v v)
+    (let* ((v-n (non-zero-bignum-length v))
+	   (d (quotient #xFFFF (bignum-ref v (1- v-n))))
+	   (v (->bignum (* d v)))
+	   (q (->bignum (* d q))))
+      (let loop ((q-n (+ (bignum-length q) 1))
+		 (q q)
+		 (w 0))
+	(pk-dbg 'q q 'w w)
+	(if (<= q-n v-n)
+	    (values w
+		    (if (zero? q) (normalize-bignum q) (quotient q d)))
+	    (let-values1 (ww q (quot1 q q-n v v-n))
+	      (pk-dbg 'ww ww)
+	      (loop (1- q-n)
+		    q
+		    (+ (* w #x10000) ww)))))))
+
+  (if (< q 0)
+      (let-values1 (w r (bignum-quotrem (->bignum (- q)) v))
+        (values (- w) (- r)))
+      (if (< v 0)
+	  (let-values1 (w r (quotrem q (->bignum (- v))))
+            (values (- w) r))
+	  (quotrem q v))))
+
+(define (bignum-quotient q v)
+  (let-values1 (w r (bignum-quotrem q v))
+    w))
+
+(define (bignum-remainder q v)
+  (let-values1 (w r (bignum-quotrem q v))
+    r))
 
 (define (+:2 a b)
   (if (and (fixnum? a) (fixnum? b))
@@ -880,18 +989,14 @@ the result list."
   (reduce *:2 1 args))
 
 (define (quotient a b)
-  (if (fixnum? a)
-      (if (fixnum? b)
-	  (primop quotient-fixnum a b)
-	  (error:wrong-type b))
-      (error:wrong-type a)))
+  (if (and (fixnum? a) (fixnum? b))
+      (primop quotient-fixnum a b)
+      (bignum-quotient (->bignum a) (->bignum b))))
 
 (define (remainder a b)
-  (if (fixnum? a)
-      (if (fixnum? b)
-	  (primop remainder-fixnum a b)
-	  (error:wrong-type b))
-      (error:wrong-type a)))
+  (if (and (fixnum? a) (fixnum? b))
+      (primop remainder-fixnum a b)
+      (bignum-remainder (->bignum a) (->bignum b))))
 
 (define (= a b)
   (if (and (fixnum? a) (fixnum? b))
@@ -928,6 +1033,10 @@ the result list."
 	(reverse res)
 	(loop (cons i res) (1+ i)))))
 
+(define (number? x)
+  ;;(fixnum? x)
+  (or (fixnum? x) (bignum? x)))
+
 ;;; Syscalls
 
 (define (sys:halt)
@@ -945,20 +1054,20 @@ the result list."
 	   (primop syscall 0 (car vals) (cadr vals) (caddr vals))))))
 
 (define (sys:write fd buf start end)
-  (if (string? buf)
+  (if (bytevec? buf)
       (if (and (<= 0 start)
 	       (<= start end))
-	  (if (<= end (string-length buf))
+	  (if (<= end (bytevec-length-8 buf))
 	      (primop syscall 2 fd buf start end)
 	      (error:out-of-range end))
 	  (error:out-of-range start))
       (error:wrong-type buf)))
 
 (define (sys:read fd buf start end)
-  (if (string? buf)
+  (if (bytevec? buf)
       (if (and (<= 0 start)
 	       (<= start end))
-	  (if (<= end (string-length buf))
+	  (if (<= end (bytevec-length-8 buf))
 	      (primop syscall 3 fd buf start end)
 	      (error:out-of-range end))
 	  (error:out-of-range start))
@@ -989,8 +1098,8 @@ the result list."
 (define (make-sys-output-port fd)
   (lambda (op arg)
     (cond ((= op 0)
-	   (let ((buf "."))
-	     (string-set! buf 0 arg)
+	   (let ((buf (make-bytevec 1)))
+	     (bytevec-set-u8! buf 0 (char->integer arg))
 	     (sys:write fd buf 0 1)))
 	  ((= op 1)
 	   (error "can't read from output port"))
@@ -1005,10 +1114,10 @@ the result list."
 		 (let ((r ch))
 		   (set! ch #f)
 		   r)
-		 (let ((buf "."))
+		 (let ((buf (make-bytevec 1)))
 		   (let ((res (sys:read fd buf 0 1)))
 		     (cond ((= res 1)
-			    (string-ref buf 0))
+			    (integer->char (bytevec-ref-u8 buf 0)))
 			   ((= res 0)
 			    arg)
 			   (else
@@ -1132,7 +1241,7 @@ the result list."
 			 (output-string port "#<unspecified>"))
 			((char? val)
 			 (print-character val state))
-			((fixnum? val)
+			((number? val)
 			 (print-number val state))
 			((string? val)
 			 (print-string val state))

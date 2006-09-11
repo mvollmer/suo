@@ -36,7 +36,7 @@
 
 ;; fixnum, characters, singletons, pairs, vectors, strings - directly
 ;; records - record-record (no bit records)
-;; bytevectors - u8vector
+;; bytevecs - u8vector
 ;; code - code-record
 
 (define suo:record-record-type
@@ -104,6 +104,8 @@
 (define suo:macro-type (suo:make-record-type 2 'macro))
 
 (define suo:closure-type (suo:make-record-type 2 'closure))
+
+(define suo:string-type (suo:make-record-type 1 'string))
 
 (define suo:symbol-type (suo:make-record-type 1 'symbol))
 
@@ -177,6 +179,9 @@
 	  (fluid-ref f)
 	  (fluid-set! f (car args))))))
 
+(define (host-string-chars str)
+  (apply u8vector (map char->integer (string->list str))))
+
 (define build-pre-defines
   '(lambda
     define
@@ -215,6 +220,9 @@
     ;; Bootinfo
     bootinfo
 
+    ;; Strings
+    string-type
+
     ;; Symbols
     symbol-type symbol? string->symbol symbol->string gensym
 
@@ -242,7 +250,9 @@
     ;; XXX
     make-u32vector u32vector-ref u32vector-set! u32vector-length
     u32vector->list
+    u8vector u8vector? make-u8vector u8vector->list u8vector-length
     make-hash-table hashq-ref hashq-set!
+    host-string-chars
     ash expt))
 
 (define build-module (make-module 1031))
@@ -346,6 +356,7 @@
 
 (define (import-build-types)
   (for-each import-from-build '(record-type-type
+				string-type
 				symbol-type
 				keyword-type
 				variable-type
