@@ -111,6 +111,8 @@
 
 (define suo:keyword-type (suo:make-record-type 1 'keyword))
 
+(define suo:bignum-type (suo:make-record-type 1 'bignum))
+
 ;;; The image environment
 
 ;; The compiler accesses and manipulates the image environment by
@@ -182,6 +184,11 @@
 (define (host-string-chars str)
   (apply u8vector (map char->integer (string->list str))))
 
+(define topexp-variable-inits '())
+
+(define (topexp-variable-init? var)
+  (memq var topexp-variable-inits))
+
 (define build-pre-defines
   '(lambda
     define
@@ -218,7 +225,7 @@
     string? make-string string-length string-ref string-set!
 
     ;; Bootinfo
-    bootinfo
+    bootinfo suo-bootinfo-marker
 
     ;; Strings
     string-type
@@ -232,6 +239,9 @@
     ;; Fixnums
     fixnum? +:2 -:2 *:2 quotient remainder <
     ;; + - * <= >= >
+
+    ;; Bignums
+    bignum-type
 
     ;; Vectors
     vector? vector-length make-vector vector-ref vector-set!
@@ -248,10 +258,12 @@
     code code? code-insns code-literals
 
     ;; XXX
+    topexp-variable-init?
     make-u32vector u32vector-ref u32vector-set! u32vector-length
     u32vector->list
     u8vector u8vector? make-u8vector u8vector->list u8vector-length
-    make-hash-table hashq-ref hashq-set!
+    make-hash-table 
+    make-hashq-table hashq-ref hashq-set!
     host-string-chars
     ash expt))
 
@@ -259,11 +271,14 @@
 
 (define ignored-variable (make-variable #f))
 
+(define suo-bootinfo-marker (list 'bootinfo))
+
 (define (suo:bootinfo)
-  (cons '() '()))
+  (list '() '() '()))
 
 (define (suo:fixnum? n)
-  (integer? n))
+  (and (integer? n)
+       (<= -536870912 n 536870911)))
 
 (define (suo:+:2 a b)
   (+ a b))
@@ -273,6 +288,8 @@
 
 (define (suo:*:2 a b)
   (* a b))
+
+(define suo:make-hashq-table make-hash-table)
 
 (for-each (lambda (sym)
 	    (module-add! build-module sym
@@ -323,6 +340,15 @@
   (let ((exp (suo:eval-for-build `(macroexpand ',form))))
     (if (pair? exp)
 	(case (car exp)
+	  ((:begin)
+	   (let loop ((forms (cdr exp)))
+	     (cond ((null? forms)
+		    (if #f #f))
+		   ((null? (cdr forms))
+		    (suo:cross-eval (car forms)))
+		   (else
+		    (suo:cross-eval (car forms))
+		    (loop (cdr forms))))))
 	  ((:define)
 	   (let* ((name (cadr exp))
 		  (val (caddr exp))
@@ -332,15 +358,31 @@
 		 (suo:record-set! var 0 (cadr comp-val))
 		 (if (literal? comp-val)
 		     (suo:record-set! var 0 comp-val)
-		     (suo:add-toplevel-expression 
-		      `(primop record-set ',var 0 ,comp-val))))))
+		     (begin
+		       (set! topexp-variable-inits 
+			     (cons var topexp-variable-inits))
+		       (suo:add-toplevel-expression
+			`(primop record-set ',var 0 ,comp-val)))))))
 	  ((:define-macro)
 	   (let* ((name (cadr exp))
 		  (val (caddr exp))
 		  (comp-val (suo:eval-for-build `(compile ',val))))
-	     (suo:register-toplevel-macro name comp-val)))
+	     (if (and (pair? comp-val) (eq? :quote (car comp-val)))
+		 (suo:register-toplevel-macro name (cadr comp-val))
+		 (error "expected ':quote': " comp-val))))
 	  (else
 	   (suo:add-toplevel-expression exp))))))
+
+(define (suo:check-undefineds)
+  (pk (length suo:toplevel) 'bindings)
+  (for-each (lambda (binding)
+	      (let ((sym (car binding))
+		    (obj (cdr binding)))
+		(if (and (suo:record-with-type? obj suo:variable-type)
+			 (eq? (if #f #f) (suo:record-ref obj 0))
+			 (not (topexp-variable-init? obj)))
+		    (pk 'undefined sym))))
+	    suo:toplevel))
 
 (define (suo:load-for-image file)
   (with-input-from-file file
@@ -359,7 +401,193 @@
 				string-type
 				symbol-type
 				keyword-type
+				bignum-type
 				variable-type
 				macro-type
 				closure-type
 				box-type)))
+
+;;; Dumping suo objects into a u32vector
+
+(define all-suo-symbols '())
+(define all-suo-keywords '())
+
+(define (integer->limbs n)
+  (define (->limbs x)
+    (if (zero? x)
+	'()
+	(cons (remainder x #x10000)
+	      (->limbs (quotient x #x10000)))))
+  (let* ((l (->limbs n))
+	 (v (make-u8vector (* 2 (length l)))))
+    (do ((i 0 (+ i 2))
+	 (l l (cdr l)))
+	((null? l))
+      (u8vector-set! v i      (quotient (car l) #x100))
+      (u8vector-set! v (1+ i) (remainder (car l) #x100)))
+    v))
+
+(define (dump-object obj)
+  (pk 'dump)
+
+  (let ((mem (make-u32vector 102400))
+	(idx 0)
+	(ptr-hash (make-hash-table 100311))
+	(bootinfo-idxs '()))
+
+    (define (grow-mem)
+      (let ((mem2 (make-u32vector (+ idx 102400)))
+	    (len (u32vector-length mem)))
+	(do ((i 0 (1+ i)))
+	    ((= i len))
+	  (u32vector-set! mem2 i (u32vector-ref mem i)))
+	(set! mem mem2)))
+
+    (define (alloc obj n-words)
+      (let ((ptr idx))
+	(hashq-set! ptr-hash obj ptr)
+	(set! idx (+ idx n-words))
+	(if (> idx (u32vector-length mem))
+	    (grow-mem))
+	ptr))
+
+    (define (emit-words ptr . words)
+      (do ((i ptr (1+ i))
+	   (w words (cdr w)))
+	  ((null? w))
+	(if (car w)
+	    (u32vector-set! mem i (car w))
+	    (set! bootinfo-idxs (cons i bootinfo-idxs)))))
+
+    (define (bytes->words bytes)
+      (let loop ((bs bytes)
+		 (ws '())
+		 (w 0)
+		 (i 0))
+	(cond ((null? bs)
+	       (reverse (if (zero? i)
+			    ws
+			    (cons (ash w (* (- 4 i) 8)) ws))))
+	      ((= i 3)
+	       (loop (cdr bs)
+		     (cons (+ (ash w 8) (car bs)) ws)
+		     0
+		     0))
+	      (else
+	       (loop (cdr bs)
+		     ws
+		     (+ (ash w 8) (car bs))
+		     (1+ i))))))
+
+    (define (emit obj)
+      (cond
+       ((pair? obj)
+	(let ((ptr (alloc obj 2)))
+	  (emit-words ptr (asm (car obj)) (asm (cdr obj)))))
+       ((suo:record? obj)
+	(let* ((type (suo:record-type obj))
+	       (fields (vector->list (suo:record-fields obj)))
+	       (ptr (alloc obj (1+ (length fields)))))
+	  (if (not (eqv? (length fields) (suo:record-ref type 0)))
+	      (error "inconsistent record"))
+	  (apply emit-words ptr
+		 (+ (asm type) 3)
+		 (map asm fields))))
+       ((vector? obj)
+	(let ((ptr (alloc obj (1+ (vector-length obj)))))
+	  (apply emit-words ptr
+		 (+ #x80000000 (* (vector-length obj) 16) 3)
+		 (map asm (vector->list obj)))))
+       ((u8vector? obj)
+	(let* ((len (u8vector-length obj))
+	       (words (quotient (+ len 3) 4))
+	       (ptr (alloc obj (1+ words))))
+	  (apply emit-words ptr
+		 (+ #x80000000 (* len 16) 11)
+		 (bytes->words (u8vector->list obj)))))
+       ((string? obj)
+	(let ((suo-str (suo:record suo:string-type
+				   (apply u8vector
+					  (map char->integer
+					       (string->list obj))))))
+	  (emit suo-str)
+	  ;; register the original OBJ as required
+	  (hashq-set! ptr-hash obj (hashq-ref ptr-hash suo-str))))
+       ((symbol? obj)
+	(let ((suo-sym (suo:record suo:symbol-type (symbol->string obj))))
+	  (set! all-suo-symbols (cons suo-sym all-suo-symbols))
+	  (emit suo-sym)
+	  ;; register the original OBJ as required
+	  (hashq-set! ptr-hash obj (hashq-ref ptr-hash suo-sym))))
+       ((keyword? obj)
+	(let ((suo-keyword (suo:record suo:keyword-type (keyword->symbol obj))))
+	  (set! all-suo-keywords (cons suo-keyword all-suo-keywords))
+	  (emit suo-keyword)
+	  ;; register the original OBJ as required
+	  (hashq-set! ptr-hash obj (hashq-ref ptr-hash suo-keyword))))
+       ((suo:code? obj)
+	(let* ((insns (suo:code-insns obj))
+	       (insn-words (u32vector-length insns))
+	       (literals (suo:code-literals obj))
+	       (literal-words (vector-length literals))
+	       (ptr (alloc obj (+ 1 insn-words literal-words))))
+	  (apply emit-words ptr
+		 (+ #x80000000
+		    (* insn-words (* 256 16))
+		    (* literal-words 16)
+		    15)
+		 (append (u32vector->list insns)
+			 (map asm (vector->list literals))))))
+       ((integer? obj)
+	;; bignum
+	(let ((suo-bignum (suo:record suo:bignum-type (integer->limbs obj))))
+	  (emit suo-bignum)
+	  ;; register the original OBJ as required
+	  (hashq-set! ptr-hash obj (hashq-ref ptr-hash suo-bignum))))
+       (else
+	(error "unsupported value: " obj))))
+
+    (define (asm obj)
+      (cond
+       ((eq? obj suo-bootinfo-marker)
+	#f)
+       ((suo:fixnum? obj)
+	(+ (* 4 obj)
+	   (if (< obj 0) #x100000000 0)
+	   1))
+       ((char? obj)
+	(+ (* 8 (char->integer obj)) 6))
+       ((eq? obj '())
+	2)
+       ((eq? obj #t)
+	10)
+       ((eq? obj #f)
+	18)
+       ((eq? obj (if #f #f))
+	26)
+       (else
+	(let ((ptr (hashq-ref ptr-hash obj)))
+	  (* 4 (or ptr
+		   (begin (emit obj)
+			  (hashq-ref ptr-hash obj))))))))
+
+    (asm obj)
+
+    ;; The toplevel might contain symbols or keywords that are
+    ;; otherwise unreferenced, and keywords might otherwise unused
+    ;; symbols, so the order here is important.
+    ;;
+    (asm suo:toplevel)
+    (asm all-suo-keywords)
+    (asm all-suo-symbols)
+    (for-each (lambda (idx)
+		(emit-words idx (asm (list all-suo-symbols
+					   all-suo-keywords
+					   suo:toplevel))))
+	      bootinfo-idxs)
+
+    (let ((mem2 (make-u32vector idx)))
+      (do ((i 0 (1+ i)))
+	  ((= i idx))
+	(u32vector-set! mem2 i (u32vector-ref mem i)))
+      mem2)))

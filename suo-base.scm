@@ -480,6 +480,17 @@
 (define (assq-ref alist key)
   (and=> (assq key alist) cdr))
 
+(define (assoc key alist)
+  (cond ((null? alist)
+	 #f)
+	((equal? key (car (car alist)))
+	 (car alist))
+	(else
+	 (assoc key (cdr alist)))))
+
+(define (assoc-ref alist key)
+  (and=> (assoc key alist) cdr))
+
 ;;; Lists as sets
 
 (define (set-difference l1 l2)
@@ -523,10 +534,42 @@ the result list."
 
 (define (bytevec-set-u8! bv i val)
   (if (and (<= 0 i) (< i (bytevec-length-8 bv)))
-      (if (and (<= 0 val) (< val 256))
+      (if (and (<= 0 val) (< val #x100))
 	  (primop bytevec-set-u8 bv i val)
 	  (error:out-of-range val))
       (error:out-of-range i)))
+
+(define (bytevec-length-16 bv)
+  (if (bytevec? bv)
+      (primop bytevec-length-16 bv)
+      (error:wrong-type bv)))
+
+(define (bytevec-ref-u16 bv i)
+  (if (and (<= 0 i) (< i (bytevec-length-16 bv)))
+      (primop bytevec-ref-u16 bv i)
+      (error:out-of-range i)))
+
+(define (bytevec-set-u16! bv i val)
+  (if (and (<= 0 i) (< i (bytevec-length-16 bv)))
+      (if (and (<= 0 val) (< val #x10000))
+	  (primop bytevec-set-u16 bv i val)
+	  (error:out-of-range val))
+      (error:out-of-range i)))
+
+(define (bytevec-u16 . vals)
+  (let* ((n (length vals))
+	 (v (make-bytevec (* 2 n))))
+    (do ((i 0 (1+ i))
+	 (vals vals (cdr vals)))
+	((= i n) v)
+      (bytevec-set-u16! v i (car vals)))))
+
+(define (bytevec-subvector-u16 v start end)
+  (let ((s (make-bytevec (* (- end start) 2))))
+    (do ((i start (1+ i)))
+	((= i end))
+      (bytevec-set-u16! s (- i start) (bytevec-ref-u16 v i)))
+    s))
 
 ;;; Characters
 
@@ -585,19 +628,25 @@ the result list."
 (define (string-set! str idx chr)
   (bytevec-set-u8! (string-chars str) idx (char->integer chr)))
 
-(define (number->string n)
-  (list->string
-   (if (< n 0)
-       (cons #\- (reverse (positive-number->char-list (- n))))
-       (reverse (positive-number->char-list n)))))
+(define (number->string n . opt-base)
+  (let ((base (if (null? opt-base) 10 (car opt-base))))
+    (list->string
+     (if (< n 0)
+	 (cons #\- (reverse (positive-number->char-list (- n) base)))
+	 (reverse (positive-number->char-list n base))))))
 
-(define (positive-number->char-list n)
-  (let ((q (quotient n 10))
-	(r (remainder n 10)))
-    (cons (integer->char (+ (char->integer #\0) r))
+(define (integer->digit d)
+  (integer->char (if (< d 10)
+		     (+ (char->integer #\0) d)
+		     (+ (char->integer #\A) (- d 10)))))
+  
+(define (positive-number->char-list n b)
+  (let ((q (quotient n b))
+	(r (remainder n b)))
+    (cons (integer->digit r)
 	  (if (zero? q)
 	      '()
-	      (positive-number->char-list q)))))
+	      (positive-number->char-list q b)))))
 
 (define (digit? ch)
   (and (<= (char->integer #\0) (char->integer ch))
@@ -709,8 +758,6 @@ the result list."
 (define (fixnum? obj)
   (primif (if-fixnum? obj) #t #f))
 
-(define bignum-type (make-record-type 1 'bignum))
-
 (define (bignum? x)
   (record-with-type? x bignum-type))
 
@@ -718,15 +765,15 @@ the result list."
   (record-ref b 0))
 
 (define (bignum-length b)
-  (vector-length (bignum-limbs b)))
+  (bytevec-length-16 (bignum-limbs b)))
 
 (define (bignum-ref b i)
   (let* ((l (bignum-limbs b))
-	 (n (vector-length l)))
+	 (n (bytevec-length-16 l)))
     (if (>= i n)
-	(if (>= (vector-ref l (1- n)) #x8000)
+	(if (>= (bytevec-ref-u16 l (1- n)) #x8000)
 	    #xFFFF #x0000)
-	(vector-ref l i))))
+	(bytevec-ref-u16 l i))))
 
 (define (bignum-sref b i)
   (let ((v (bignum-ref b i)))
@@ -736,34 +783,44 @@ the result list."
 
 (define (bignum-negative? b)
   (let* ((l (bignum-limbs b))
-	 (n (vector-length l)))
-    (>= (vector-ref l (1- n)) #x8000)))
+	 (n (bytevec-length-16 l)))
+    (>= (bytevec-ref-u16 l (1- n)) #x8000)))
 
 (define (fixnum->bignum n)
   (:primitive split-fixnum (hi lo) (n)
-	      ((make-record bignum-type (vector lo hi)))))
+	      ((make-record bignum-type (bytevec-u16 lo hi)))))
 
-(define (vector->bignum x)
-  (let loop ((i (1- (vector-length x))))
-    (let ((k (vector-ref x i)))
+(define (make-bignum-limbs n)
+  (make-bytevec (* 2 n)))
+
+(define (make-bignum-limbs-zero n)
+  (let ((l (make-bignum-limbs n)))
+    (do ((i 0 (1+ i)))
+	((= i n))
+      (bytevec-set-u16! l i 0))
+    l))
+
+(define (limbs->bignum x)
+  (let loop ((i (1- (bytevec-length-16 x))))
+    (let ((k (bytevec-ref-u16 x i)))
       (cond ((= i 0)
 	     (if (>= k #x8000)
 		 (- k #x10000)
 		 k))
-	    ((and (= k 0) (< (vector-ref x (1- i)) #x8000))
+	    ((and (= k 0) (< (bytevec-ref-u16 x (1- i)) #x8000))
 	     (loop (1- i)))
-	    ((and (= k #xFFFF) (>= (vector-ref x (1- i)) #x8000))
+	    ((and (= k #xFFFF) (>= (bytevec-ref-u16 x (1- i)) #x8000))
 	     (loop (1- i)))
 	    ((and (= i 1) (< k #x2000))
-	     (+ (vector-ref x 0) (* k #x10000)))
+	     (+ (bytevec-ref-u16 x 0) (* k #x10000)))
 	    ((and (= i 1) (>= k #xe000))
-	     (+ (vector-ref x 0) (* (- k #x10000) #x10000)))
+	     (+ (bytevec-ref-u16 x 0) (* (- k #x10000) #x10000)))
 	    (else
 	     (pk-dbg 'trunc-to (1+ i))
-	     (make-record bignum-type (subvector x 0 (1+ i))))))))
+	     (make-record bignum-type (bytevec-subvector-u16 x 0 (1+ i))))))))
 
 (define (normalize-bignum b)
-  (vector->bignum (bignum-limbs b)))
+  (limbs->bignum (bignum-limbs b)))
 
 (define-macro (pk-dbg . args)
   (car (last-pair args)))
@@ -781,7 +838,7 @@ the result list."
   (let* ((a-n (bignum-length a))
 	 (b-n (bignum-length b))
 	 (n (1+ (if (> a-n b-n) a-n b-n)))
-	 (z (make-vector n 0)))
+	 (z (make-bignum-limbs n)))
     (pk-dbg a-n b-n n)
     (let loop ((i 0)
 	       (k 0))
@@ -792,16 +849,16 @@ the result list."
 					   (pk-dbg 'k k))
 		      ((begin
 			 (pk-dbg 'res hi lo)
-			 (vector-set! z i lo)
+			 (bytevec-set-u16! z i lo)
 			 (loop (1+ i) hi))))
-	  (vector->bignum (pk-dbg 'result z))))))
+	  (limbs->bignum (pk-dbg 'result z))))))
 
 (define (bignum-sub a b)
   (pk-dbg 'sub a b)
   (let* ((a-n (bignum-length a))
 	 (b-n (bignum-length b))
 	 (n (1+ (if (> a-n b-n) a-n b-n)))
-	 (z (make-vector n 0)))
+	 (z (make-bignum-limbs n)))
     (pk-dbg a-n b-n n)
     (let loop ((i 0)
 	       (k 0))
@@ -812,9 +869,9 @@ the result list."
 					   (pk-dbg 'k k))
 		      ((begin
 			 (pk-dbg 'res hi lo)
-			 (vector-set! z i lo)
+			 (bytevec-set-u16! z i lo)
 			 (loop (1+ i) hi))))
-	  (vector->bignum (pk-dbg 'result z))))))
+	  (limbs->bignum (pk-dbg 'result z))))))
 
 (define (bignum-mul a b)
 
@@ -823,7 +880,7 @@ the result list."
     (let* ((a-n (bignum-length a))
 	   (b-n (bignum-length b))
 	   (n (+ a-n b-n))
-	   (z (make-vector n 0)))
+	   (z (make-bignum-limbs-zero n)))
       (let loop-j ((j 0))
 	(pk-dbg 'j j)
 	(if (< j a-n)
@@ -834,16 +891,17 @@ the result list."
 		  (:primitive mul-fixnum2 (hi lo) ((pk-dbg 'a (bignum-ref a j))
 						   (pk-dbg 'b (bignum-ref b i))
 						   (pk-dbg 'c
-						       (vector-ref z (+ i j)))
+						       (bytevec-ref-u16
+							z (+ i j)))
 						   (pk-dbg 'k k))
 			      ((begin
 				 (pk-dbg 'res hi lo)
-				 (vector-set! z (+ i j) lo)
+				 (bytevec-set-u16! z (+ i j) lo)
 				 (loop-i (1+ i) hi))))
 		  (begin
-		    (vector-set! z (+ i j) k)
+		    (bytevec-set-u16! z (+ i j) k)
 		    (loop-j (1+ j)))))
-	    (vector->bignum (pk-dbg 'result z))))))
+	    (limbs->bignum (pk-dbg 'result z))))))
 
   (if (bignum-negative? a)
       (if (bignum-negative? b)
@@ -885,11 +943,15 @@ the result list."
 
 (define (bignum-shift-limbs a n)
   (let* ((a-v (bignum-limbs a))
-	 (a-n (vector-length a-v))
-	 (v (make-vector (+ a-n n) 0)))
+	 (a-n (bytevec-length-16 a-v))
+	 (v (make-bignum-limbs (+ a-n n))))
     (do ((i 0 (1+ i)))
-	((= i a-n) (vector->bignum v))
-      (vector-set! v (+ i n) (vector-ref a-v i)))))
+	((= i a-n))
+      (bytevec-set-u16! v (+ i n) (bytevec-ref-u16 a-v i)))
+    (do ((i 0 (1+ i)))
+	((= i n))
+      (bytevec-set-u16! v i 0))
+    (limbs->bignum v)))
 
 (define (quot-fixnum2 q1 q2 v)
   (:primitive quotrem-fixnum2 (ww rr) (q1 q2 v) (ww)))
@@ -926,19 +988,19 @@ the result list."
     (let* ((v-n (non-zero-bignum-length v))
 	   (d (quotient #xFFFF (bignum-ref v (1- v-n))))
 	   (v (->bignum (* d v)))
-	   (q (->bignum (* d q))))
-      (let loop ((q-n (+ (bignum-length q) 1))
-		 (q q)
-		 (w 0))
+	   (q (->bignum (* d q)))
+	   (q-n (+ (bignum-length q) 1))
+	   (w (make-bignum-limbs (max 0 (- q-n v-n)))))
+      (let loop ((q-n q-n)
+		 (q q))
 	(pk-dbg 'q q 'w w)
 	(if (<= q-n v-n)
-	    (values w
+	    (values (limbs->bignum w)
 		    (if (zero? q) (normalize-bignum q) (quotient q d)))
 	    (let-values1 (ww q (quot1 q q-n v v-n))
 	      (pk-dbg 'ww ww)
-	      (loop (1- q-n)
-		    q
-		    (+ (* w #x10000) ww)))))))
+	      (bytevec-set-u16! w (- q-n v-n 1) ww)
+	      (loop (1- q-n) q))))))
 
   (if (< q 0)
       (let-values1 (w r (bignum-quotrem (->bignum (- q)) v))
@@ -1026,6 +1088,18 @@ the result list."
 (define (1- a)
   (- a 1))
 
+(define (max:2 a b)
+  (if (> a b) a b))
+
+(define (max a . rest)
+  (reduce max:2 a rest))
+
+(define (min:2 a b)
+  (if (< a b) a b))
+
+(define (min a . rest)
+  (reduce min:2 a rest))
+
 (define (iota n)
   (let loop ((res '())
 	     (i 0))
@@ -1034,7 +1108,7 @@ the result list."
 	(loop (cons i res) (1+ i)))))
 
 (define (number? x)
-  ;;(fixnum? x)
+  ;;(fixnum? x))
   (or (fixnum? x) (bignum? x)))
 
 ;;; Syscalls
@@ -1211,6 +1285,19 @@ the result list."
       (print (vector-ref v i) state))
     (output-char port #\))))
 
+(define (print-bytevec v state)
+  (let ((port (print-state-port state))
+	(n (bytevec-length-8 v)))
+    (output-string port "/")
+    (do ((i 0 (+ i 1)))
+	((= i n))
+      (if (and (> i 0)
+	       (zero? (remainder i 2)))
+	  (output-string port "/"))
+      (output-char port (integer->digit (quotient (bytevec-ref-u8 v i) 16)))
+      (output-char port (integer->digit (remainder (bytevec-ref-u8 v i) 16))))
+    (output-string port "/")))
+
 (define (print-weird-symbol s state)
   (output-char (print-state-port state) #\|)
   (output-string (print-state-port state) (symbol->string s))
@@ -1254,6 +1341,8 @@ the result list."
 			 (print-list val state))
 			((vector? val)
 			 (print-vector val state))
+			((bytevec? val)
+			 (print-bytevec val state))
 			((code? val)
 			 (print-code val state))
 			((record? val)
@@ -1485,6 +1574,11 @@ the result list."
 (define (list->vector lst)
   (apply vector lst))
 
+(define (vector->list vec)
+  (do ((i 0 (1+ i))
+       (r '() (cons (vector-ref vec i) r)))
+      ((= i (vector-length vec)) (reverse r))))
+
 (define (subvector v start end)
   (let ((s (make-vector (- end start) #f)))
     (do ((i start (1+ i)))
@@ -1549,24 +1643,20 @@ the result list."
 
 ;;; Symbols
 
-(define all-symbols (car (bootinfo)))
+(define symbols (let ((t (make-hash-table 213)))
+		  (for-each (lambda (sym)
+			      (hash-set! t (symbol->string sym) sym))
+			    (car (bootinfo)))
+		  t))
 
 (define (symbol? val)
   (record-with-type? val symbol-type))
 
-(define (find-symbol str syms)
-  (cond ((null? syms)
-	 #f)
-	((equal? (symbol->string (car syms)) str)
-	 (car syms))
-	(else
-  	 (find-symbol str (cdr syms)))))
-
 (define (string->symbol str)
   (if (string? str)
-      (or (find-symbol str all-symbols)
+      (or (hash-ref symbols str)
 	  (let ((sym (record symbol-type str)))
-	    (set! all-symbols (cons sym all-symbols))
+	    (hash-set! symbols str sym)
 	    sym))
       (error:wrong-type str)))
 
@@ -1588,7 +1678,11 @@ the result list."
 
 ;;; Keywords
 
-(define all-keywords (cdr (bootinfo)))
+(define keywords (let ((t (make-hashq-table 213)))
+		   (for-each (lambda (key)
+			       (hashq-set! t (keyword->symbol key) key))
+			     (cadr (bootinfo)))
+		   t))
 
 (define (keyword? val)
   (record-with-type? val keyword-type))
@@ -1597,3 +1691,150 @@ the result list."
   (if (record-with-type? key keyword-type)
       (record-ref key 0)
       (error:wrong-type key)))
+
+;;; Hash tables
+
+(define (mix-hash n . vals)
+  (let loop ((h 0)
+	     (vals vals))
+    (if (null? vals)
+	h
+	(loop (remainder (+ (* h 37) (car vals)) n)
+	      (cdr vals)))))
+
+(define (string-hash n str)
+  (apply mix-hash n (map char->integer (string->list str))))
+
+(define (symbol-hash n sym)
+  (string-hash n (symbol->string sym)))
+
+(define (pair-hash n p)
+  (mix-hash n (hash (car p) n) (hash (cdr p) n)))
+
+(define (vector-hash n vec)
+  (apply mix-hash n (map (lambda (e) (hash e n)) (vector->list vec))))
+
+(define (record-hash n rec)
+  (apply mix-hash n (map (lambda (e) (hash e n)) (record->list rec))))
+
+(define (hash obj n)
+  (cond
+   ((string? obj)
+    (string-hash n obj))
+   ((symbol? obj)
+    (symbol-hash n obj))
+   ((pair? obj)
+    (pair-hash n obj))
+   ((vector? obj)
+    (vector-hash n obj))
+   ((record? obj)
+    (record-hash n obj))
+   ((number? obj)
+    (remainder obj n))
+   ((char? obj)
+    (hash (char->integer obj) n))
+   ((eq? #t obj)
+    (remainder 10 n))
+   ((eq? #f obj)
+    (remainder 18 n))
+   ((eq? '() obj)
+    (remainder 2 n))
+   (else
+    (error:wrong-type obj))))
+
+(define (make-hash-table n)
+  (make-vector n '()))
+
+(define (hash-ref tab key)
+  (assoc-ref (vector-ref tab (hash key (vector-length tab))) key))
+
+(define (hash-set! tab key val)
+  (let* ((h (hash key (vector-length tab)))
+	 (c (assoc key (vector-ref tab h))))
+    (if c
+	(set-cdr! c val)
+	(vector-set! tab h (acons key val (vector-ref tab h))))))
+
+(define (make-hashq-table n)
+  (let ((v (make-vector n '())))
+    (set-hashq-vectors (cons v (get-hashq-vectors)))
+    v))
+
+(define (hashq-ref vec key)
+  (if (vector? vec)
+      (and=> (primop syscall 4 vec key #f) cdr)
+      (error:wrong-type vec)))
+
+(define (hashq-set! vec key val)
+  (if (vector? vec)
+      (let* ((new-pair (acons key val '()))
+	     (c (primop syscall 4 vec key new-pair)))
+	(if c
+	    (set-cdr! c val)))
+      (error:wrong-type vec)))
+
+(define (hashq-del! vec key)
+  (if (vector? vec)
+      (primop syscall 5 vec key)
+      (error:wrong-type vec)))
+
+(define (hashq->alist! vec)
+  (if (vector? vec)
+      (primop syscall 6 vec)
+      (error:wrong-type vec)))
+
+(define (alist->hashq! alist vec)
+  (if (vector? vec)
+      (primop syscall 7 alist vec)
+      (error:wrong-type vec)))
+
+(define (get-hashq-vectors)
+  (primop syscall 8 -3))
+
+(define (set-hashq-vectors v)
+  (primop syscall 9 -3 v))
+
+;;; Variables, macros and name spaces
+
+(define (variable? obj)
+  (record-with-type? obj variable-type))
+
+(define (variable-ref obj)
+  (if (variable? obj)
+      (record-ref obj 0)
+      (error:wrong-type obj)))
+
+(define (variable-set! obj val)
+  (if (variable? obj)
+      (record-set! obj 0 val)
+      (error:wrong-type obj)))
+
+(define (variable-name obj)
+  (if (variable? obj)
+      (record-ref obj 1)
+      (error:wrong-type obj)))
+
+(define (macro? obj)
+  (record-with-type? obj macro-type))
+
+(define (macro-transformer obj)
+  (if (macro? obj)
+      (record-ref obj 0)
+      (error:wrong-type obj)))
+
+(define (expand-macro mac form)
+  (apply (macro-transformer mac) (cdr form)))
+
+(define toplevel (caddr (bootinfo)))
+
+(define (lookup-toplevel-variable sym)
+  (let ((thing (assq-ref toplevel sym)))
+    (if thing
+	(if (variable? thing)
+	    thing
+	    (error "not a variable: " sym))
+	(error "undefined: " sym))))
+
+(define (lookup-toplevel-macro sym)
+  (let ((thing (assq-ref toplevel sym)))
+    (and (macro? thing) thing)))

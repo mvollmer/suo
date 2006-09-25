@@ -7,6 +7,21 @@
 
 (define suo-bootinfo-marker (list 'bootinfo))
 
+(define (integer->limbs n)
+  (define (->limbs x)
+    (if (zero? x)
+	'()
+	(cons (remainder x base)
+	      (->limbs (quotient x base)))))
+  (let* ((l (->limbs n))
+	 (v (make-u8vector (* 2 (length l)))))
+    (do ((i 0 (+ i 2))
+	 (l l (cdr l)))
+	((null? l))
+      (u8vector-set! v i      (quotient (car l) #x100))
+      (u8vector-set! v (1+ i) (remainder (car l) #x100)))
+    v))
+
 (define (dump-object obj)
   (pk 'dump)
 
@@ -70,6 +85,10 @@
 	       (ptr (alloc obj (1+ (length fields)))))
 	  (if (not (eqv? (length fields) (record-ref type 0)))
 	      (error "inconsistent record"))
+	  (if (and (eq? type variable-type)
+		   (eq? (if #f #f) (record-ref obj 0))
+		   (not (topexp-variable-init? obj)))
+	      (pk 'undefined (record-ref obj 1)))
 	  (apply emit-words ptr
 		 (+ (asm type) 3)
 		 (map asm fields))))
@@ -117,10 +136,14 @@
 		    15)
 		 (append (u32vector->list insns)
 			 (map asm (vector->list literals))))))
+       ((integer?)
+	;; bignum
+	(let ((suo-bignum (record bignum-type (integer->limbs obj))))
+	  (emit suo-bignum)
+	  ;; register the original OBJ as required
+	  (hashq-set! ptr-hash obj (hashq-ref ptr-hash suo-bignum))))
        (else
-	(error "unsupported value" obj (class-of obj)
-	       (keyword? obj)
-	       (symbol? obj)))))
+	(error "unsupported value: " obj))))
 
     (define (asm obj)
       (cond
@@ -131,7 +154,7 @@
 	   (cond ((and (<= 0 obj) (<= obj fixnum-max)) 0)
 		 ((and (<= fixnum-min obj) (<= obj -1)) #x100000000)
 		 (else
-		  (error "integer is not fixnum" obj)))
+		  (error "integer is not fixnum: " obj)))
 	   1))
        ((char? obj)
 	(+ (* 8 (char->integer obj)) 6))

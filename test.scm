@@ -22,7 +22,6 @@
 (load "suo-cross.scm")
 
 (suo:load-for-build "suo-base.scm")
-(suo:load-for-build "suo-asm.scm")
 (suo:load-for-build "suo-asm-ppc.scm")
 (suo:load-for-build "suo-util.scm")
 (suo:load-for-build "suo-compiler.scm")
@@ -30,8 +29,9 @@
 (import-build-types)
 
 (suo:load-for-image "suo-base.scm")
-(suo:load-for-image "suo-asm.scm")
 ;;(suo:load-for-image "suo-asm-ppc.scm")
+;;(suo:load-for-build "suo-util.scm")
+;;(suo:load-for-image "suo-compiler.scm")
 (suo:load-for-image "suo-boot.scm")
 
 ;;(suo:load-for-image "suo-test.scm")
@@ -48,7 +48,8 @@
     (or (and (pair? comp-exp) (eq? (car comp-exp) :quote))
 	(error "expected quote expression"))
     (write-image
-     (suo:eval-for-build 
-      `(dump-object (cons ',(cadr comp-exp) (list #f)))))))
+     (dump-object (cons (cadr comp-exp) (list #f))))))
 
 (make-bootstrap-image (pk 'top (suo:toplevel-expression)))
+
+(suo:check-undefineds)

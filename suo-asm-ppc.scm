@@ -889,17 +889,26 @@
   (cps-asm-op-to-r3 ctxt (cps-quote (if #f #f)))
   (cps-asm-r3-to-reg ctxt res))
 
+(define-primop (bytevec-length-16 (res) (a))
+  (cps-asm-op-to-r3 ctxt a)
+  (cps-asm-ref-r3-to-r3 ctxt 0)
+  ;;  10:   54 63 e9 3a     rlwinm  r3,r3,29,4,29
+  (cps-asm-word ctxt #x5463e93a)
+  ;; ori     r3,r3,1
+  (cps-asm-word ctxt #x60630001)
+  (cps-asm-r3-to-reg ctxt res))
+
 (define-primop (bytevec-ref-u16 (res) (vec idx))
   (cps-asm-op-to-r3 ctxt vec)
   ;; mr r4,r3
   (cps-asm-word ctxt #x7c641b78)
   (cps-asm-op-to-r3 ctxt idx)
-  ;;   0:   54 63 f0 be     rlwinm  r3,r3,30,2,31
+  ;;   0:   54 63 f8 7c     rlwinm  r3,r3,31,1,30
   ;;   4:   7c 63 22 14     add     r3,r3,r4
   ;;   8:   a0 63 00 04     lhz     r3,4(r3)
   ;;   c:   54 63 10 3a     rlwinm  r3,r3,2,0,29
   ;;  10:   60 63 00 01     ori     r3,r3,1
-  (cps-asm-word ctxt #x5463f0be)
+  (cps-asm-word ctxt #x5463f87c)
   (cps-asm-word ctxt #x7c632214)
   (cps-asm-word ctxt #xa0630004)
   (cps-asm-word ctxt #x5463103a)
@@ -911,8 +920,8 @@
   ;; mr r4,r3
   (cps-asm-word ctxt #x7c641b78)
   (cps-asm-op-to-r3 ctxt idx)
-  ;;   0:   54 63 f0 be     rlwinm  r3,r3,30,2,31
-  (cps-asm-word ctxt #x5463f0be)
+  ;;   0:   54 63 f8 7c     rlwinm  r3,r3,31,1,30
+  (cps-asm-word ctxt #x5463f87c)
   ;;   4:   7c 63 22 14     add     r4,r3,r4
   (cps-asm-word ctxt #x7c832214)
   (cps-asm-op-to-r3 ctxt val)

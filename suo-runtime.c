@@ -24,10 +24,10 @@ typedef unsigned int word;
 typedef   signed int sword;
 typedef         word val;
 
-val specials_and_regs[2+256];
-val *regs = specials_and_regs + 2;
+val specials_and_regs[3+256];
+val *regs = specials_and_regs + 3;
 
-#define HEAP_SIZE  (16*1024*1024)
+#define HEAP_SIZE  (32*1024*1024)
 #define SPACE_SIZE (HEAP_SIZE/2)
 
 val *spaces[2];
@@ -336,6 +336,8 @@ void gc_glue (void);
 #define PPC_ISYNC asm volatile ("sync; isync" : : : "memory")
 #define PPC_ICBI(where) asm volatile ("icbi 0,%0" : : "r"(where) : "memory")
 
+void rehash_hashq_vectors (val list);
+
 word *
 gc (word *params)
 {
@@ -353,6 +355,7 @@ gc (word *params)
 
   to_ptr = to_space;
   scan_words (regs, 256);
+  scan_words (&regs[-3], 1);
   scan_words (&params[GCPAR_R15], 1);
   for (ptr = to_space, count = 0; ptr < to_ptr; count++)
     ptr = scan (ptr);
@@ -389,7 +392,176 @@ gc (word *params)
   PPC_ICBI (ptr - 1);
   PPC_ISYNC;
 
+  rehash_hashq_vectors (regs[-3]);
+  
   return params;
+}
+
+/* Hashq tables
+
+   Since hashq tables use object addresses in the hash function, and
+   the GC moves objects around, hashq tables are implemented in the
+   run-time.
+
+   The following operations are provided as syscalls; none of them
+   allocates memory.
+
+   - alist_to_hashq_vector alist vec
+
+   Destructively put the cells of a alist into a vector.  No checks
+   for duplicate keys are done.  The original elements of the vector
+   will form the tails of the new overflow lists.
+
+   - hashq_vector_to_alist vec
+
+   Collect the overflow lists from a vector into one alist.  The new
+   elements of the vector will be the tails of the old overflow lists.
+
+   - hashq_vector_ref vec key new-pair
+
+   Return the cell with the given key if it exists in vec.  If not,
+   return #f.  If new-pair is a pair, use it to create a new entry if
+   none is found.  new-pair must have a pair in its car that in turn
+   must have key in its car.  new-pair will be used as a new element
+   of the overflow list.  (This should probably not be a syscall.)
+
+   - hashq_vector_del vec key
+
+   Remove the cell with the given key if it exists and return it.
+   Return #f if it doesn't exist.
+*/
+
+#define HEAP_P(v)          ((v&3)==0)
+#define LOC(o,i)           (((val *)(o))+i)
+#define REF(o,i)           (((val *)(o))[i])
+#define SET(o,i,v)         (((val *)(o))[i]=(v))
+
+#define VECTOR_P(v)        (HEAP_P(v) && (REF(v,0)&0x8000000F) == 0x80000003)
+#define VECTOR_LENGTH(v)   ((REF(v,0)&~0x80000000)>>4)
+#define VECTOR_LOC(v,i)    LOC(v,(i)+1)
+#define VECTOR_REF(v,i)    REF(v,(i)+1)
+#define VECTOR_SET(v,i,e)  SET(v,(i)+1,e)
+
+#define PAIR_P(v)          (HEAP_P(v) && (REF(v,0)&3)!=3)
+#define CAR(p)             REF(p,0)
+#define CDR(p)             REF(p,1)
+#define CDR_LOC(p)         LOC(p,1)
+#define SET_CDR(p,v)       SET(p,1,v)
+
+#define EOL                2
+#define BOOL_T             10
+#define BOOL_F             18
+
+val
+hashq_vector_to_alist (val vec)
+{
+  int n = VECTOR_LENGTH (vec);
+  int i;
+  val result = EOL;
+
+  for (i = 0; i < n; i++)
+    {
+      val a = EOL, b = VECTOR_REF (vec, i);
+      while (PAIR_P (b))
+	{
+	  a = b;
+	  b = CDR (b);
+	}
+      if (PAIR_P (a))
+	{
+	  SET_CDR (a, result);
+	  result = VECTOR_REF (vec, i);
+	  VECTOR_SET (vec, i, b);
+	}
+    }
+
+  return result;
+}
+
+val
+alist_to_hashq_vector (val alist, val vec)
+{
+  int n = VECTOR_LENGTH (vec);
+
+  while (PAIR_P (alist))
+    {
+      val s = alist;
+      val c = CAR (s);
+
+      alist = CDR (alist);
+
+      if (PAIR_P (c))
+	{
+	  val key = CAR (c);
+	  int h = key % n;
+	  SET_CDR (s, VECTOR_REF (vec, h));
+	  VECTOR_SET (vec, h, s);
+	}
+    }
+
+  return BOOL_F;
+}
+
+val
+hashq_vector_ref (val vec, val key, val new_pair)
+{
+  int n = VECTOR_LENGTH (vec);
+  int h = key % n;
+  val s;
+
+  for (s = VECTOR_REF (vec, h); PAIR_P (s); s = CDR (s))
+    {
+      val c = CAR (s);
+      if (PAIR_P (c) && CAR (c) == key)
+	return c;
+    }
+
+  if (PAIR_P (new_pair))
+    {
+      SET_CDR (new_pair, VECTOR_REF (vec, h));
+      VECTOR_SET (vec, h, new_pair);
+    }
+
+  return BOOL_F;
+}
+
+val
+hashq_vector_del (val vec, val key)
+{
+  int n = VECTOR_LENGTH (vec);
+  int h = key % n;
+  val *s;
+
+  for (s = VECTOR_LOC (vec, h); PAIR_P (*s); s = CDR_LOC (*s))
+    {
+      val c = CAR (*s);
+      if (PAIR_P (c) && CAR (c) == key)
+	{
+	  *s = CDR (*s);
+	  return BOOL_T;
+	}
+    }
+
+  return BOOL_F;
+}
+
+void
+rehashq_vector (val vec)
+{
+  fprintf (stderr, "GC: rehashing %08x\n", vec);
+  alist_to_hashq_vector (hashq_vector_to_alist (vec), vec);
+}
+
+void
+rehash_hashq_vectors (val list)
+{
+  while (PAIR_P (list))
+    {
+      val vec = CAR (list);
+      if (VECTOR_P (vec))
+	rehashq_vector (vec);
+      list = CDR (list);
+    }
 }
 
 void
@@ -462,6 +634,36 @@ sys (int n_args,
 
       return (val)((res << 2) | 1);
     }
+  else if (arg1 == ((4<<2)|1))
+    {
+      /* hashq_vector_ref (vec, key, new_pair) */
+      return hashq_vector_ref (arg2, arg3, arg4);
+    }
+  else if (arg1 == ((5<<2)|1))
+    {
+      /* hashq_vector_del (vec, key) */
+      return hashq_vector_del (arg2, arg3);
+    }
+  else if (arg1 == ((6<<2)|1))
+    {
+      /* hashq_vector_to_alist (vec) */
+      return hashq_vector_to_alist (arg2);
+    }
+  else if (arg1 == ((7<<2)|1))
+    {
+      /* alist_to_hashq_vector (alist, vec) */
+      return alist_to_hashq_vector (arg2, arg3);
+    }
+  else if (arg1 == ((8<<2)|1))
+    {
+      /* get_reg (i) */
+      return regs[((sword)arg2) >> 2];
+    }
+  else if (arg1 == ((9<<2)|1))
+    {
+      /* set_reg (i, v) */
+      return regs[((sword)arg2) >> 2] = arg3;
+    }
 
   fprintf (stderr, "syscall");
   if (n_args > 0)
@@ -485,6 +687,7 @@ sys (int n_args,
   return 0x0000000a;
 }
 
+
 void
 go (val closure, val arglist, val *free, val *end)
 {
@@ -497,6 +700,7 @@ go (val closure, val arglist, val *free, val *end)
   for (i = 0; i < 256; i++)
     regs[i] = 1; /* fixnum zero */
 
+  regs[-3] = EOL; // hashq vectors
   regs[-2] = (val)gc_glue;
   regs[-1] = (val)sys;
   regs[0] = closure;

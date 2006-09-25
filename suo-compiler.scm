@@ -360,7 +360,7 @@
 	(c (cps-quote suo-bootinfo-marker)))
 
        ((:define ?var ?val)
-	(error "wrong 'define' placement"))
+	(error "wrong 'define' placement: " exp))
 
        ((:quote ?val)
 	(c (cps-quote ?val)))
