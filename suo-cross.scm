@@ -177,9 +177,15 @@
   (let ((f (make-fluid)))
     (fluid-set! f val)
     (lambda args
-      (if (null? args)
-	  (fluid-ref f)
-	  (fluid-set! f (car args))))))
+      (cond ((null? args)
+	     (fluid-ref f))
+	    ((null? (cdr args))
+	     (fluid-set! f (car args)))
+	    (else
+	     f)))))
+
+(define (suo:call/p parameter value func)
+  (with-fluid* (parameter #f 'get-fluid) value func))
 
 (define (host-string-chars str)
   (apply u8vector (map char->integer (string->list str))))
@@ -188,6 +194,40 @@
 
 (define (topexp-variable-init? var)
   (memq var topexp-variable-inits))
+
+(define (suo:make-bytevec n)
+  (make-u8vector n))
+
+(define (suo:bytevec? obj)
+  (u8vector? obj))
+
+(define (suo:bytevec-length-8 v)
+  (u8vector-length v))
+
+(define (suo:bytevec-ref-u8 v i)
+  (u8vector-ref v i))
+
+(define (suo:bytevec-set-u8! v i val)
+  (u8vector-set! v i val))
+
+(define (suo:bytevec-length-16 v)
+  (quotient (u8vector-length v) 2))
+
+(define (suo:bytevec-ref-u16 v i)
+  (+ (* (u8vector-ref v (* 2 i)) #x100)
+     (u8vector-ref v (1+ (* 2 i)))))
+
+(define (suo:bytevec-set-u16! v i val)
+  (u8vector-set! v (* 2 i) (quotient val #x100))
+  (u8vector-set! v (1+ (* 2 i)) (remainder val #x100)))
+
+(define (suo:bytevec-u32->list bv)
+  (do ((i 0 (1+ i))
+       (res '() (cons (+ (* (suo:bytevec-ref-u16 bv (* 2 i)) #x10000)
+			 (suo:bytevec-ref-u16 bv (1+ (* 2 i))))
+		      res)))
+      ((= i (quotient (suo:bytevec-length-16 bv) 2))
+       (reverse! res))))
 
 (define build-pre-defines
   '(lambda
@@ -200,8 +240,7 @@
     let let* letrec
     set!
     apply
-    dynamic-wind
-    make-parameter
+    make-parameter call/p dynamic-wind
     sys:halt
     
     lookup-toplevel-macro expand-macro
@@ -255,13 +294,15 @@
     variable-type macro-type box-type closure-type
 
     ;; Code
-    code code? code-insns code-literals
+    code? code
+
+    ;; Bytevecs
+    make-bytevec bytevec?
+    bytevec-length-8 bytevec-ref-u8 bytevec-set-u8!
+    bytevec-length-16 bytevec-ref-u16 bytevec-set-u16!
 
     ;; XXX
     topexp-variable-init?
-    make-u32vector u32vector-ref u32vector-set! u32vector-length
-    u32vector->list
-    u8vector u8vector? make-u8vector u8vector->list u8vector-length
     make-hash-table 
     make-hashq-table hashq-ref hashq-set!
     host-string-chars
@@ -412,20 +453,25 @@
 (define all-suo-symbols '())
 (define all-suo-keywords '())
 
-(define (integer->limbs n)
-  (define (->limbs x)
-    (if (zero? x)
-	'()
-	(cons (remainder x #x10000)
-	      (->limbs (quotient x #x10000)))))
-  (let* ((l (->limbs n))
-	 (v (make-u8vector (* 2 (length l)))))
-    (do ((i 0 (+ i 2))
-	 (l l (cdr l)))
-	((null? l))
-      (u8vector-set! v i      (quotient (car l) #x100))
-      (u8vector-set! v (1+ i) (remainder (car l) #x100)))
-    v))
+(define (integer->bignum x)
+
+  (define (positive->bignum x)
+    (define (->limbs x)
+      (if (zero? x)
+	  '(0)
+	  (cons (remainder x #x10000)
+		(->limbs (quotient x #x10000)))))
+    (let* ((l (->limbs x))
+	   (v (suo:make-bytevec (* 2 (length l)))))
+      (do ((i 0 (+ i 1))
+	   (l l (cdr l)))
+	  ((null? l))
+	(suo:bytevec-set-u16! v i (car l)))
+      (suo:eval-for-build `(limbs->bignum ',v))))
+
+  (if (> x 0)
+      (positive->bignum x)
+      (error "no negative bignums yet, sorry")))
 
 (define (dump-object obj)
   (pk 'dump)
@@ -527,7 +573,7 @@
 	  (hashq-set! ptr-hash obj (hashq-ref ptr-hash suo-keyword))))
        ((suo:code? obj)
 	(let* ((insns (suo:code-insns obj))
-	       (insn-words (u32vector-length insns))
+	       (insn-words (quotient (suo:bytevec-length-8 insns) 4))
 	       (literals (suo:code-literals obj))
 	       (literal-words (vector-length literals))
 	       (ptr (alloc obj (+ 1 insn-words literal-words))))
@@ -536,11 +582,11 @@
 		    (* insn-words (* 256 16))
 		    (* literal-words 16)
 		    15)
-		 (append (u32vector->list insns)
+		 (append (suo:bytevec-u32->list insns)
 			 (map asm (vector->list literals))))))
        ((integer? obj)
 	;; bignum
-	(let ((suo-bignum (suo:record suo:bignum-type (integer->limbs obj))))
+	(let ((suo-bignum (integer->bignum obj)))
 	  (emit suo-bignum)
 	  ;; register the original OBJ as required
 	  (hashq-set! ptr-hash obj (hashq-ref ptr-hash suo-bignum))))
@@ -586,8 +632,11 @@
 					   suo:toplevel))))
 	      bootinfo-idxs)
 
-    (let ((mem2 (make-u32vector idx)))
-      (do ((i 0 (1+ i)))
-	  ((= i idx))
-	(u32vector-set! mem2 i (u32vector-ref mem i)))
-      mem2)))
+    (u32subvector mem 0 idx)))
+
+(define (u32subvector vec start end)
+  (let ((vec2 (make-u32vector (- end start))))
+    (do ((i start (1+ i)))
+	((= i end))
+      (u32vector-set! vec2 i (u32vector-ref vec i)))
+    vec2))

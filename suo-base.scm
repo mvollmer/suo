@@ -98,11 +98,11 @@
 (define-macro (define head . body)
   (if (pair? head)
       `(define ,(car head) (lambda ,(cdr head) 
-;;;			     (primop syscall 0 ,(host-string-chars
-;;;						 (symbol->string (car head))))
-;;;			     (let ()
+;;			     (primop syscall 0 ,(host-string-chars
+;;						 (symbol->string (car head))))
+;;			     (let ()
 			       ,@body))
-;;;                                    )
+;;	 )
       `(:define ,head ,(car body))))
 
 (define-macro (define-macro head . body)
@@ -522,6 +522,13 @@ the result list."
       (primop make-bytevec n)
       (error:wrong-type n)))
 
+(define (bytevec-subvector v start end)
+  (let ((s (make-bytevec (- end start))))
+    (do ((i start (1+ i)))
+	((= i end))
+      (bytevec-set-u8! s (- i start) (bytevec-ref-u8 v i)))
+    s))
+
 (define (bytevec-length-8 bv)
   (if (bytevec? bv)
       (primop bytevec-length-8 bv)
@@ -565,11 +572,21 @@ the result list."
       (bytevec-set-u16! v i (car vals)))))
 
 (define (bytevec-subvector-u16 v start end)
-  (let ((s (make-bytevec (* (- end start) 2))))
-    (do ((i start (1+ i)))
-	((= i end))
-      (bytevec-set-u16! s (- i start) (bytevec-ref-u16 v i)))
-    s))
+  (bytevec-subvector v (* 2 start) (* 2 end)))
+
+(define (bytevec-length-32 bv)
+  (quotient (bytevec-length-16 bv) 2))
+
+(define (bytevec-ref-u32 bv i)
+  (+ (* (bytevec-ref-u16 bv (* 2 i)) #x10000)
+     (bytevec-ref-u16 bv (1+ (* 2 i)))))
+
+(define (bytevec-set-u32! bv i val)
+  (bytevec-set-u16! bv (* 2 i) (quotient val #x10000))
+  (bytevec-set-u16! bv (1+ (* 2 i)) (remainder val #x10000)))
+
+(define (bytevec-subvector-u32 v start end)
+  (bytevec-subvector v (* 4 start) (* 4 end)))
 
 ;;; Characters
 
@@ -595,7 +612,7 @@ the result list."
   (record-with-type? val string-type))
 
 (define (make-string n)
-  (make-record string-type (make-bytevec n)))
+  (record string-type (make-bytevec n)))
 
 (define (string-chars str)
   (if (string? str)
@@ -788,7 +805,7 @@ the result list."
 
 (define (fixnum->bignum n)
   (:primitive split-fixnum (hi lo) (n)
-	      ((make-record bignum-type (bytevec-u16 lo hi)))))
+	      ((record bignum-type (bytevec-u16 lo hi)))))
 
 (define (make-bignum-limbs n)
   (make-bytevec (* 2 n)))
@@ -817,7 +834,7 @@ the result list."
 	     (+ (bytevec-ref-u16 x 0) (* (- k #x10000) #x10000)))
 	    (else
 	     (pk-dbg 'trunc-to (1+ i))
-	     (make-record bignum-type (bytevec-subvector-u16 x 0 (1+ i))))))))
+	     (record bignum-type (bytevec-subvector-u16 x 0 (1+ i))))))))
 
 (define (normalize-bignum b)
   (limbs->bignum (bignum-limbs b)))
@@ -986,7 +1003,7 @@ the result list."
     (pk-dbg 'q q)
     (pk-dbg 'v v)
     (let* ((v-n (non-zero-bignum-length v))
-	   (d (quotient #xFFFF (bignum-ref v (1- v-n))))
+	   (d (quotient #x10000 (1+ (bignum-ref v (1- v-n)))))
 	   (v (->bignum (* d v)))
 	   (q (->bignum (* d q)))
 	   (q-n (+ (bignum-length q) 1))
@@ -1106,6 +1123,25 @@ the result list."
     (if (>= i n)
 	(reverse res)
 	(loop (cons i res) (1+ i)))))
+
+(define (even? a)
+  (zero? (remainder a 2)))
+
+(define (odd? a)
+  (not (even? a)))
+
+(define (square x)
+  (* x x))
+
+(define (expt a b)
+  (cond ((< b 0)
+	 (error:out-of-range b))
+	((zero? b)
+	 1)
+	((even? b)
+	 (square (expt a (quotient b 2))))
+	(else
+	 (* a (expt a (1- b))))))
 
 (define (number? x)
   ;;(fixnum? x))
@@ -1309,7 +1345,11 @@ the result list."
       (output-string (print-state-port state) (symbol->string s))))
 
 (define (print-code val state)
-  (output-string (print-state-port state) "#<code>"))
+  (output-string (print-state-port state) "#<code ")
+  (print (code-insn-length val) state)
+  (output-string (print-state-port state) " ")
+  (print (code-lit-length val) state)
+  (output-string (print-state-port state) ">"))
 
 (define print-depth (make-parameter 0))
 
@@ -1350,6 +1390,10 @@ the result list."
 			(else
 			 (output-string port "#<...>"))))))
       (output-string (print-state-port state) "#")))
+
+(define (pretty-print val)
+  ;; beauty is in the eye of the beholder
+  (display val))
 
 (define (display val)
   (print val (make-print-state (current-output-port) #f)))
@@ -1591,6 +1635,53 @@ the result list."
 (define (code? val)
   (primif (if-code? val) #t #f))
 
+(define (code-insn-length code)
+  (if (code? code)
+      (primop code-insn-length code)
+      (error:wrong-type)))
+
+(define (code-lit-length code)
+  (if (code? code)
+      (primop code-lit-length code)
+      (error:wrong-type)))
+
+(define (make-code insn-length lit-length)
+  (pk 'make-code insn-length lit-length)
+  (if (fixnum? insn-length)
+      (if (fixnum? lit-length)
+	  (primop make-code insn-length lit-length)
+	  (error:wrong-type lit-length))
+      (error:wrong-type insn-length)))
+
+(define (code-insn-set-u16! code idx val)
+  (if (code? code)
+      (if (and (<= 0 idx) (< idx (* 2 (code-insn-length code))))
+	  (if (and (<= 0 val) (< val #x10000))
+	      (primop bytevec-set-u16 code idx val)
+	      (error:out-of-range val))
+	  (error:out-of-range idx))
+      (error:wrong-type code)))
+
+(define (code-lit-set! code idx val)
+  (if (code? code)
+      (if (and (<= 0 idx) (< idx (code-lit-length code)))
+	  (primop vector-set code (+ (code-insn-length code) idx) val)
+	  (error:out-of-range idx))
+      (error:wrong-type code)))
+
+(define (code insns lits)
+  (let* ((insn-length (bytevec-length-32 insns))
+	 (insn-length-16 (* 2 insn-length))
+	 (lit-length (vector-length lits))
+	 (code (make-code insn-length lit-length)))
+    (do ((i 0 (1+ i)))
+	((= i insn-length-16))
+      (code-insn-set-u16! code i (bytevec-ref-u16 insns i)))
+    (do ((i 0 (1+ i)))
+	((= i lit-length))
+      (code-lit-set! code i (vector-ref lits i)))
+    code))
+
 ;;; equal?
 
 (define (equal? a b)
@@ -1799,6 +1890,9 @@ the result list."
 (define (variable? obj)
   (record-with-type? obj variable-type))
 
+(define (variable init name)
+  (record variable-type init name))
+
 (define (variable-ref obj)
   (if (variable? obj)
       (record-ref obj 0)
@@ -1827,13 +1921,18 @@ the result list."
 
 (define toplevel (caddr (bootinfo)))
 
+(define (register-toplevel-variable sym)
+  (let ((var (variable (if #f #f) sym)))
+    (set! toplevel (acons sym var toplevel))
+    var))
+
 (define (lookup-toplevel-variable sym)
   (let ((thing (assq-ref toplevel sym)))
     (if thing
 	(if (variable? thing)
 	    thing
 	    (error "not a variable: " sym))
-	(error "undefined: " sym))))
+	(register-toplevel-variable sym))))
 
 (define (lookup-toplevel-macro sym)
   (let ((thing (assq-ref toplevel sym)))

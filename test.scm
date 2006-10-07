@@ -1,5 +1,5 @@
 (use-modules (oop goops)
-	     ;;(srfi srfi-39)
+	     (srfi srfi-39)
 	     (ice-9 pretty-print)
 	     (oop goops)
 	     (ice-9 common-list))
@@ -29,9 +29,9 @@
 (import-build-types)
 
 (suo:load-for-image "suo-base.scm")
-;;(suo:load-for-image "suo-asm-ppc.scm")
-;;(suo:load-for-build "suo-util.scm")
-;;(suo:load-for-image "suo-compiler.scm")
+(suo:load-for-image "suo-asm-ppc.scm")
+(suo:load-for-image "suo-util.scm")
+(suo:load-for-image "suo-compiler.scm")
 (suo:load-for-image "suo-boot.scm")
 
 ;;(suo:load-for-image "suo-test.scm")

@@ -428,7 +428,8 @@ gc (word *params)
    - hashq_vector_del vec key
 
    Remove the cell with the given key if it exists and return it.
-   Return #f if it doesn't exist.
+   Return #f if it doesn't exist.  (This should probably not be a
+   syscall.)
 */
 
 #define HEAP_P(v)          ((v&3)==0)
@@ -548,7 +549,6 @@ hashq_vector_del (val vec, val key)
 void
 rehashq_vector (val vec)
 {
-  fprintf (stderr, "GC: rehashing %08x\n", vec);
   alist_to_hashq_vector (hashq_vector_to_alist (vec), vec);
 }
 

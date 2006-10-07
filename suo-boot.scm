@@ -1,6 +1,9 @@
 (display "Hello, Suo!")
 (newline)
 
+(define big+ #x806e0000)
+;;(define big- -2154692608)
+
 (define (<< a n)
   (bignum-shift-limbs a n))
 
@@ -22,7 +25,7 @@
     (case key
       ((:quote)
        (cadr form))
-      ((:set)
+      ((:set :define)
        (let* ((sym (cadr form))
 	      (val (mock-eval (caddr form)))
 	      (var (lookup-toplevel-variable sym)))
@@ -31,7 +34,7 @@
        (error "unsupported special: " key)))))
 
 (define (mock-eval form)
-  (let ((form (macroexpand form)))
+  (let ((form (compile form)))
     (cond
      ((symbol? form)
       (variable-ref (lookup-toplevel-variable form)))

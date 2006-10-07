@@ -32,7 +32,7 @@
 		     (if (,pred-name x)
 			 (record-ref x ,i)
 			 (error:wrong-type x)))
-		   (define (,(symbol-append 'set- name '- f '!) x)
+		   (define (,(symbol-append 'set- name '- f '!) x y)
 		     (if (,pred-name x y)
 			 (record-set! x ,i y)
 			 (error:wrong-type x)))))
@@ -122,18 +122,3 @@
 		       => (lambda (r) (apply ,v r)))))
 	       body-vars
 	       clauses)))))
-
-(define (u32subvector vec start end)
-  (let ((vec2 (make-u32vector (- end start))))
-    (do ((i start (1+ i)))
-	((= i end))
-      (u32vector-set! vec2 i (u32vector-ref vec i)))
-    vec2))
-
-(define (pkx vec)
-  (do ((i 0 (1+ i)))
-      ((= i (uniform-vector-length vec)))
-    (display (number->string (uniform-vector-ref vec i) 16))
-    (display " "))
-  (newline)
-  vec)

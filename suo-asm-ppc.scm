@@ -41,12 +41,13 @@
   `(define-primitive (,(car head) () ,@(cdr head)) ,@body))
 
 (define (cps-asm-primop ctxt type results args extra-cont-labels)
+  (pk2 'primop type)
   (let ((func (or (assq-ref primitives type)
 		  (error "unsupported" type))))
     (func ctxt results args extra-cont-labels)))
 
 (define (cps-asm-make-context)
-  (let ((words (make-u32vector 10240 0))
+  (let ((words (make-bytevec (* 4 10240)))
 	(idx 0)
 	(fixups '())
 	(literals '()))
@@ -54,12 +55,12 @@
     (lambda (op . args)
 
       (define (emit-word w)
-	(u32vector-set! words idx w)
+	(bytevec-set-u32! words idx w)
 	(set! idx (+ idx 1)))
     
       (define (fixup-low-s2 idx val)
-	(u32vector-set! words idx (+ (u32vector-ref words idx)
-				     (s2val val))))
+	(bytevec-set-u32! words idx (+ (bytevec-ref-u32 words idx)
+				       (s2val val))))
 
       (define (fixup! proc)
 	(set! fixups (cons proc fixups)))
@@ -92,7 +93,7 @@
 
       (define (finish)
 	(for-each (lambda (f) (f)) fixups)
-	(code (u32subvector words 0 idx)
+	(code (bytevec-subvector-u32 words 0 idx)
 	      (list->vector literals)))
 
       (case op
@@ -110,6 +111,9 @@
 	 (finish))
 	(else
 	 (error "unsupported op" op))))))
+
+(define (pk2 . args)
+  (car (last-pair args)))
 
 (define (cps-asm-word ctxt word)
   (ctxt 'emit-word word))
@@ -148,6 +152,15 @@
 	(else
 	 ;; lwz r3,litoff(r15)
 	 (cps-asm-word-with-s2-litoff ctxt #x806f0000
+					 (cps-quote-value op)))))
+
+(define (cps-asm-op-to-r4 ctxt op)
+  (cond ((cps-reg? op)
+	 ;; lwz r4,regoff(r14)
+	 (cps-asm-word ctxt (+ #x808e0000 (reg-off op))))
+	(else
+	 ;; lwz r4,litoff(r15)
+	 (cps-asm-word-with-s2-litoff ctxt #x808f0000
 					 (cps-quote-value op)))))
 
 (define (cps-asm-r3-to-reg ctxt reg)
@@ -358,9 +371,7 @@
   (cps-asm-r3-to-reg ctxt res))
 
 (define-primop (record-ref (res) (rec idx))
-  (cps-asm-op-to-r3 ctxt rec)
-  ;; mr r4,r3
-  (cps-asm-word ctxt #x7c641b78)
+  (cps-asm-op-to-r4 ctxt rec)
   (cps-asm-op-to-r3 ctxt idx)
   ;;   4:   7c 63 22 14     add     r3,r3,r4
   (cps-asm-word ctxt #x7c632214)
@@ -369,9 +380,7 @@
   (cps-asm-r3-to-reg ctxt res))
 
 (define-primop (record-set (res) (rec idx val))
-  (cps-asm-op-to-r3 ctxt rec)
-  ;; mr r4,r3
-  (cps-asm-word ctxt #x7c641b78)
+  (cps-asm-op-to-r4 ctxt rec)
   (cps-asm-op-to-r3 ctxt idx)
   ;;   4:   7c 63 22 14     add     r4,r3,r4
   (cps-asm-word ctxt #x7c832214)
@@ -467,9 +476,7 @@
   (cps-asm-r3-to-reg ctxt res))
 
 (define-primop (vector-ref (res) (vec idx))
-  (cps-asm-op-to-r3 ctxt vec)
-  ;; mr r4,r3
-  (cps-asm-word ctxt #x7c641b78)
+  (cps-asm-op-to-r4 ctxt vec)
   (cps-asm-op-to-r3 ctxt idx)
   ;;   4:   7c 63 22 14     add     r3,r3,r4
   (cps-asm-word ctxt #x7c632214)
@@ -478,9 +485,7 @@
   (cps-asm-r3-to-reg ctxt res))
 
 (define-primop (vector-set (res) (vec idx val))
-  (cps-asm-op-to-r3 ctxt vec)
-  ;; mr r4,r3
-  (cps-asm-word ctxt #x7c641b78)
+  (cps-asm-op-to-r4 ctxt vec)
   (cps-asm-op-to-r3 ctxt idx)
   ;;   4:   7c 63 22 14     add     r4,r3,r4
   (cps-asm-word ctxt #x7c832214)
@@ -491,9 +496,7 @@
   (cps-asm-r3-to-reg ctxt res))
 
 (define-primif (if-eq? (v1 v2) (else-label))
-  (cps-asm-op-to-r3 ctxt v1)
-  ;; mr r4,r3
-  (cps-asm-word ctxt #x7c641b78)
+  (cps-asm-op-to-r4 ctxt v1)
   (cps-asm-op-to-r3 ctxt v2)
   ;; cmpw cr7,r3,r4
   (cps-asm-word ctxt #x7f832000)
@@ -514,9 +517,7 @@
   (cps-asm-word ctxt #x38000000)
   ;; mtxer r0
   (cps-asm-word ctxt #x7c0103a6)
-  (cps-asm-op-to-r3 ctxt arg1)
-  ;; mr r4,r3
-  (cps-asm-word ctxt #x7c641b78)
+  (cps-asm-op-to-r4 ctxt arg1)
   (cps-asm-op-to-r3 ctxt arg2)
   ;; subi r3,r3,1
   (cps-asm-word ctxt #x3863ffff)
@@ -575,9 +576,7 @@
   (cps-asm-word ctxt #x38000000)
   ;; mtxer r0
   (cps-asm-word ctxt #x7c0103a6)
-  (cps-asm-op-to-r3 ctxt arg1)
-  ;; mr r4,r3
-  (cps-asm-word ctxt #x7c641b78)
+  (cps-asm-op-to-r4 ctxt arg1)
   (cps-asm-op-to-r3 ctxt arg2)
   ;; subi r3,r3,1
   (cps-asm-word ctxt #x3863ffff)
@@ -609,9 +608,7 @@
   (cps-asm-word ctxt #x38000000)
   ;; mtxer r0
   (cps-asm-word ctxt #x7c0103a6)
-  (cps-asm-op-to-r3 ctxt arg1)
-  ;; mr r4,r3
-  (cps-asm-word ctxt #x7c641b78)
+  (cps-asm-op-to-r4 ctxt arg1)
   (cps-asm-op-to-r3 ctxt arg2)
   ;; subi r3,r3,1
   (cps-asm-word ctxt #x3863ffff)
@@ -668,9 +665,7 @@
   (cps-asm-r3-to-reg ctxt r))
 
 (define-primop (quotient-fixnum (res) (arg1 arg2))
-  (cps-asm-op-to-r3 ctxt arg1)
-  ;; mr r4,r3
-  (cps-asm-word ctxt #x7c641b78)
+  (cps-asm-op-to-r4 ctxt arg1)
   (cps-asm-op-to-r3 ctxt arg2)
   ;;    0:   7c 63 16 70     srawi   r3,r3,2
   ;;    4:   7c 84 16 70     srawi   r4,r4,2
@@ -685,9 +680,7 @@
   (cps-asm-r3-to-reg ctxt res))
 
 (define-primop (remainder-fixnum (res) (arg1 arg2))
-  (cps-asm-op-to-r3 ctxt arg1)
-  ;; mr r4,r3
-  (cps-asm-word ctxt #x7c641b78)
+  (cps-asm-op-to-r4 ctxt arg1)
   (cps-asm-op-to-r3 ctxt arg2)
   ;;    0:   7c 63 16 70     srawi   r3,r3,2
   ;;    4:   7c 84 16 70     srawi   r4,r4,2
@@ -706,9 +699,7 @@
   (cps-asm-r3-to-reg ctxt res))
 
 (define-primif (if-< (v1 v2) (else-label))
-  (cps-asm-op-to-r3 ctxt v1)
-  ;; mr r4,r3
-  (cps-asm-word ctxt #x7c641b78)
+  (cps-asm-op-to-r4 ctxt v1)
   (cps-asm-op-to-r3 ctxt v2)
   ;; cmpw cr7,r3,r4
   (cps-asm-word ctxt #x7f832000)
@@ -753,18 +744,14 @@
   (cps-asm-r3-to-reg ctxt res))
 
 (define-primop (set-car (res) (a b))
-  (cps-asm-op-to-r3 ctxt a)
-  ;; mr r4,r3
-  (cps-asm-word ctxt #x7c641b78)
+  (cps-asm-op-to-r4 ctxt a)
   (cps-asm-op-to-r3 ctxt b)
   (cps-asm-store-r3-to-r4 ctxt 0)
   (cps-asm-op-to-r3 ctxt (cps-quote (if #f #f)))
   (cps-asm-r3-to-reg ctxt res))
 
 (define-primop (set-cdr (res) (a b))
-  (cps-asm-op-to-r3 ctxt a)
-  ;; mr r4,r3
-  (cps-asm-word ctxt #x7c641b78)
+  (cps-asm-op-to-r4 ctxt a)
   (cps-asm-op-to-r3 ctxt b)
   (cps-asm-store-r3-to-r4 ctxt 1)
   (cps-asm-op-to-r3 ctxt (cps-quote (if #f #f)))
@@ -856,9 +843,7 @@
   (cps-asm-r3-to-reg ctxt res))
 
 (define-primop (bytevec-ref-u8 (res) (vec idx))
-  (cps-asm-op-to-r3 ctxt vec)
-  ;; mr r4,r3
-  (cps-asm-word ctxt #x7c641b78)
+  (cps-asm-op-to-r4 ctxt vec)
   (cps-asm-op-to-r3 ctxt idx)
   ;;   0:   54 63 f0 be     rlwinm  r3,r3,30,2,31
   ;;   4:   7c 63 22 14     add     r3,r3,r4
@@ -873,9 +858,7 @@
   (cps-asm-r3-to-reg ctxt res))
 
 (define-primop (bytevec-set-u8 (res) (vec idx val))
-  (cps-asm-op-to-r3 ctxt vec)
-  ;; mr r4,r3
-  (cps-asm-word ctxt #x7c641b78)
+  (cps-asm-op-to-r4 ctxt vec)
   (cps-asm-op-to-r3 ctxt idx)
   ;;   0:   54 63 f0 be     rlwinm  r3,r3,30,2,31
   (cps-asm-word ctxt #x5463f0be)
@@ -899,9 +882,7 @@
   (cps-asm-r3-to-reg ctxt res))
 
 (define-primop (bytevec-ref-u16 (res) (vec idx))
-  (cps-asm-op-to-r3 ctxt vec)
-  ;; mr r4,r3
-  (cps-asm-word ctxt #x7c641b78)
+  (cps-asm-op-to-r4 ctxt vec)
   (cps-asm-op-to-r3 ctxt idx)
   ;;   0:   54 63 f8 7c     rlwinm  r3,r3,31,1,30
   ;;   4:   7c 63 22 14     add     r3,r3,r4
@@ -916,9 +897,7 @@
   (cps-asm-r3-to-reg ctxt res))
 
 (define-primop (bytevec-set-u16 (res) (vec idx val))
-  (cps-asm-op-to-r3 ctxt vec)
-  ;; mr r4,r3
-  (cps-asm-word ctxt #x7c641b78)
+  (cps-asm-op-to-r4 ctxt vec)
   (cps-asm-op-to-r3 ctxt idx)
   ;;   0:   54 63 f8 7c     rlwinm  r3,r3,31,1,30
   (cps-asm-word ctxt #x5463f87c)
@@ -952,3 +931,80 @@
   (cps-asm-word ctxt #x2f83000f)
   ;; bne cr7,lab
   (cps-asm-word-with-s2-laboff ctxt #x409e0000 else-label))
+
+(define-primop (code-insn-length (res) (c))
+  (cps-asm-op-to-r3 ctxt c)
+  (cps-asm-ref-r3-to-r3 ctxt 0)
+  ;; 20:   54 63 b2 fa     rlwinm  r3,r3,22,11,29
+  ;; 24:   60 63 00 01     ori     r3,r3,1
+  (cps-asm-word ctxt #x5463b2fa)
+  (cps-asm-word ctxt #x60630001)
+  (cps-asm-r3-to-reg ctxt res))
+
+(define-primop (code-lit-length (res) (c))
+  (cps-asm-op-to-r3 ctxt c)
+  (cps-asm-ref-r3-to-r3 ctxt 0)
+  ;; 30:   54 63 f5 ba     rlwinm  r3,r3,30,22,29
+  ;; 34:   60 63 00 01     ori     r3,r3,1
+  (cps-asm-word ctxt #x5463f5ba)
+  (cps-asm-word ctxt #x60630001)
+  (cps-asm-r3-to-reg ctxt res))
+
+(define-primop (make-code (res) (insn-length lit-length))
+  ;; MARKER
+  (cps-asm-word ctxt #x7063DEAD)
+
+  ;; Step 1.  Compute length in bytes and allocate
+  (cps-asm-op-to-r3 ctxt insn-length)
+  (cps-asm-op-to-r4 ctxt lit-length)
+  ;;  40:   54 63 00 3a     rlwinm  r3,r3,0,0,29
+  ;;  44:   54 84 00 3a     rlwinm  r4,r4,0,0,29
+  ;;  48:   38 63 00 04     addi    r3,r3,4
+  ;;  4c:   7c 64 1a 14     add     r3,r4,r3
+  (cps-asm-word ctxt #x5463003a)
+  (cps-asm-word ctxt #x5484003a)
+  (cps-asm-word ctxt #x38630004)
+  (cps-asm-word ctxt #x7c641a14)
+  (cps-asm-alloc-r3-bytes-to-r4 ctxt)
+  ;; mr r3,r4
+  (cps-asm-word ctxt #x7c832378)
+  (cps-asm-r3-to-reg ctxt res)
+
+  ;; Step 2.  Compute tag word and store it.
+  (cps-asm-op-to-r3 ctxt insn-length)
+  (cps-asm-op-to-r4 ctxt lit-length)
+;;   60:   3c 00 80 00     lis     r0,-32768
+;;   64:   54 63 50 26     rlwinm  r3,r3,10,0,19
+;;   68:   54 84 10 36     rlwinm  r4,r4,2,0,27
+;;   6c:   60 00 00 0f     ori     r0,r0,15
+;;   70:   7c 63 03 78     or      r3,r3,r0
+;;   74:   7c 83 1b 78     or      r3,r4,r3
+  (cps-asm-word ctxt #x3c008000)  
+  (cps-asm-word ctxt #x54635026)  
+  (cps-asm-word ctxt #x54841036)  
+  (cps-asm-word ctxt #x6000000f)  
+  (cps-asm-word ctxt #x7c630378)  
+  (cps-asm-word ctxt #x7c831b78)  
+  (cps-asm-op-to-r4 ctxt res)
+  (cps-asm-store-r3-to-r4 ctxt 0)
+
+  ;; Step 3.  Initialize lits with #f.
+  (cps-asm-op-to-r3 ctxt insn-length)
+  (cps-asm-unfix-r3 ctxt)
+  ;; add r4,r4,r3
+  (cps-asm-word ctxt #x7c841a14)
+  (cps-asm-op-to-r3 ctxt (cps-quote #f))
+  (cps-asm-move-rX-to-rY ctxt 3 0)
+  (cps-asm-op-to-r3 ctxt lit-length)
+  (let ((out (cps-asm-make-label ctxt))
+	(loop (cps-asm-make-label ctxt)))
+    (cps-asm-def-label ctxt loop)
+    ;; addic. r3,r3,-4
+    (cps-asm-word ctxt #x3463fffc)
+    ;; ble out
+    (cps-asm-word-with-s2-laboff ctxt #x40810000 out)
+    ;; stwu r0,4(r4)
+    (cps-asm-word ctxt #x94040004)
+    ;; XXX - b loop
+    (cps-asm-word ctxt #x4bfffff4)
+    (cps-asm-def-label ctxt out)))
