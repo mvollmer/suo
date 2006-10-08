@@ -990,7 +990,8 @@
 
   ;; Step 3.  Initialize lits with #f.
   (cps-asm-op-to-r3 ctxt insn-length)
-  (cps-asm-unfix-r3 ctxt)
+  ;;  40:   54 63 00 3a     rlwinm  r3,r3,0,0,29
+  (cps-asm-word ctxt #x5463003a)
   ;; add r4,r4,r3
   (cps-asm-word ctxt #x7c841a14)
   (cps-asm-op-to-r3 ctxt (cps-quote #f))
