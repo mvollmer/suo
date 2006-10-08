@@ -20,6 +20,14 @@ perror_exit (const char *msg)
   exit (1);
 }
 
+void
+error_exit (const char *msg)
+{
+  fputs (msg, stderr);
+  fputs ("\n", stderr);
+  exit (1);
+}
+
 typedef unsigned int word;
 typedef   signed int sword;
 typedef         word val;
@@ -46,10 +54,10 @@ init_heap ()
 #define UNSWIZZLE(p,b)   (((word)p)+((word)b))
 
 /* Correct all pointers in MEM from offsets into proper pointers by
-   adding MEM to them.
+   adding OFF to them.
 */
 void
-unswizzle_objects (val *mem, word n)
+unswizzle_objects (val *mem, size_t off, word n)
 {
   int count = 0;
 
@@ -69,7 +77,7 @@ unswizzle_objects (val *mem, word n)
 	  if (((sword)(v)) >= 0)
 	    {
 	      /* record header */
-	      *ptr = UNSWIZZLE (*ptr, mem);
+	      *ptr = UNSWIZZLE (*ptr, off);
 	      val *desc = (val *)(*ptr & ~3);
 	      type = "record";
 	      size = ((sword)desc[1]) >> 2;
@@ -116,7 +124,7 @@ unswizzle_objects (val *mem, word n)
 	    {
 	      val v = *ptr;
 	      if ((v & 3) == 0)
-		*ptr = UNSWIZZLE (v, mem);
+		*ptr = UNSWIZZLE (v, off);
 	      ptr++;
 	      size--;
 	    }
@@ -397,6 +405,66 @@ gc (word *params)
   return params;
 }
 
+struct image_header {
+  word magic;
+  word origin;
+  word start;
+};
+
+#define MAGIC_1 0xABCD0001
+
+char *suspend_image;
+
+void
+suspend (word cont)
+{
+  val *ptr;
+  size_t count;
+
+  int fd;
+  struct image_header head;
+  size_t image_size;
+
+  if (suspend_image == NULL)
+    return;
+
+  // XXX - once we do the GC, we can't return to Scheme.  So let's
+  //       hope the saving succeeds.
+
+  active_space = 1 - active_space;
+  to_space = spaces[active_space];
+
+  to_ptr = to_space;
+  scan_words (&regs[-3], 1);
+  scan_words (&cont, 1);
+  for (ptr = to_space, count = 0; ptr < to_ptr; count++)
+    ptr = scan (ptr);
+
+  rehash_hashq_vectors (regs[-3]);
+
+  fd = open (suspend_image, O_WRONLY|O_CREAT, 0666);
+  if (fd < 0)
+    perror_exit (suspend_image);
+
+  head.magic = MAGIC_1;
+  head.origin = (word)to_space;
+  head.start = (word)cont;
+  if (write (fd, &head, sizeof (head)) != sizeof (head))
+    perror_exit (suspend_image);
+  
+  image_size = (to_ptr - to_space) * sizeof(word);
+  if (write (fd, to_space, image_size) != image_size)
+    perror_exit (suspend_image);
+
+  if (close (fd) < 0)
+    perror_exit (suspend_image);
+    
+  if (verbose)
+    fprintf (stderr, "SUSPEND: wrote %s, %d objects, %d words\n",
+	     suspend_image, count, image_size / sizeof(word));
+  exit (0);
+}
+
 /* Hashq tables
 
    Since hashq tables use object addresses in the hash function, and
@@ -664,6 +732,12 @@ sys (int n_args,
       /* set_reg (i, v) */
       return regs[((sword)arg2) >> 2] = arg3;
     }
+  else if (arg1 == ((10<<2)|1))
+    {
+      /* suspend (cont) */
+      suspend (arg2);
+      return 10;
+    }
 
   fprintf (stderr, "syscall");
   if (n_args > 0)
@@ -689,16 +763,24 @@ sys (int n_args,
 
 
 void
-go (val closure, val arglist, val *free, val *end)
+go (val closure, val *free, val *end)
 {
   int i;
-  register val *r14 asm ("r14") = regs;
-  register val *r15 asm ("r15") = (val *)((val *)closure)[1];
-  register val *r16 asm ("r16") = free;
-  register val *r17 asm ("r17") = end;
+  val arglist;
+  register val *r14 asm ("r14");
+  register val *r15 asm ("r15");
+  register val *r16 asm ("r16");
+  register val *r17 asm ("r17");
 
   for (i = 0; i < 256; i++)
     regs[i] = 1; /* fixnum zero */
+
+  arglist = (val)free;
+  *free++ = BOOL_T;
+  *free++ = EOL;
+
+  if (free >= end)
+    error_exit ("too tight");
 
   regs[-3] = EOL; // hashq vectors
   regs[-2] = (val)gc_glue;
@@ -706,6 +788,10 @@ go (val closure, val arglist, val *free, val *end)
   regs[0] = closure;
   regs[1] = arglist;
 
+  r14 = regs;
+  r15 = (val *)((val *)closure)[1];
+  r16 = free;
+  r17 = end;
   asm ("mr 3,15\n\t addi 3,3,4\n\t mtctr 3\n\t bctr"
        :
        : "r" (r14), "r" (r15), "r" (r16), "r" (r17));
@@ -723,7 +809,10 @@ find_markers (val *mem, size_t n)
 int
 main (int argc, char **argv)
 {
+  ssize_t n;
   val *space;
+  struct image_header head;
+  size_t image_size;
 
   if (argc > 1 && !strcmp (argv[1], "-v"))
     {
@@ -732,11 +821,16 @@ main (int argc, char **argv)
       argc--;
     }
 
-  if (argc != 2)
+  if (argc != 2 && argc != 3)
     {
-      write (2, "usage: suo <image>\n", 20);
+      write (2, "usage: suo <image> [<suspend-image>]\n", 20);
       exit (1);
     }
+
+  if (argc > 2)
+    suspend_image = argv[2];
+  else
+    suspend_image = NULL;
 
   init_heap ();
   space = spaces[active_space];
@@ -749,18 +843,32 @@ main (int argc, char **argv)
   if (fstat (fd, &buf) < 0)
     perror_exit (argv[1]);
 
-  if (buf.st_size > SPACE_SIZE * sizeof(val))
-    perror_exit ("too big");
+  if (buf.st_size < sizeof(head))
+    error_exit ("too small");
 
-  ssize_t n = read (fd, space, buf.st_size);
-  if (n < 0)
+  image_size = buf.st_size - sizeof(head);
+
+  if (image_size > SPACE_SIZE * sizeof(val))
+    error_exit ("too big");
+
+  n = read (fd, &head, sizeof (head));
+  if (n < 0 || n != sizeof (head))
     perror_exit (argv[1]);
+  
+  if (head.magic != MAGIC_1)
+    error_exit ("wrong magic");
 
-  unswizzle_objects (space, n/4);
+  n = read (fd, space, image_size);
+  if (n < 0 || n != image_size)
+    perror_exit (argv[1]);
+  close (fd);
+  
+  unswizzle_objects (space, ((size_t)space) - head.origin, n/4);
 
   find_markers (space, n/4);
 
-  go (space[0], space[1], space + n/4, space + SPACE_SIZE);
+  go (((val)space) + head.start - head.origin,
+      space + n/4, space + SPACE_SIZE);
 
   return 0;
 }

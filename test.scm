@@ -38,6 +38,7 @@
 
 (define (write-image mem)
   (let* ((port (open-output-file "image")))
+    (uniform-vector-write #u32(#xABCD0001 0 0) port)
     (uniform-vector-write mem port)))
 
 (define (make-bootstrap-image exp)
@@ -48,7 +49,7 @@
     (or (and (pair? comp-exp) (eq? (car comp-exp) :quote))
 	(error "expected quote expression"))
     (write-image
-     (dump-object (cons (cadr comp-exp) (list #f))))))
+     (dump-object (cadr comp-exp)))))
 
 (make-bootstrap-image (pk 'top (suo:toplevel-expression)))
 

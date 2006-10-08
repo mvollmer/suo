@@ -62,6 +62,14 @@
 			    vals)))))))
   (repl))
 
+(define (suspend)
+  (let ((hashq-vectors (get-hashq-vectors)))
+    (call/cc (lambda (k)
+	       (primop syscall 10 (lambda () (k #t)))
+	       (error "can't suspend")))
+    (set-hashq-vectors hashq-vectors)
+    #t))
+
 (display (length toplevel))
 (display " toplevel bindings\n")
 

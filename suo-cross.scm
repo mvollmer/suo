@@ -1,43 +1,77 @@
-;;;; suo-cross -- Part of Suo in plain Scheme
+;;;; suo-cross -- a part of Suo in plain Scheme, and support for
+;;;;              writing images
 
-;; When bootstrapping Suo with a second Scheme implementation, we just
-;; load a number of files with the toplevel definitions for Suo into
-;; the 'build environment'.  These definitions start with basic things
-;; like 'cond' and end with the compiler.  These files are called "the
-;; suo boot files".
-;;
-;; After the compiler has been put into the build environment in this
-;; way, it is used to compile the 'suo image files'.  The result of
-;; this compilation is an image with a boot procedure.  When this
-;; image is loaded by the suo runtime, the boot procedure is executed
-;; and will carry out the actions specified in the suo boot files.
-;;
-;; The build environment is special: before loading the boot files
-;; into it, it already contains a carefully selected set of bindings
-;; and attempts to redefine those bindings will be ignored.  In this
-;; way, the boot files can contain definitions that are right for Suo,
-;; but need to be different for the build environment.
-;;
-;; The pre-defined bindings are things like 'if', 'cons', 'car',
-;; 'record-ref', etc.  For Suo, they are defined in terms of
-;; primitives understood by the compiler and code-generator.  For the
-;; build environment, we want to use the native definitions or provide
-;; suitable definitions in this file.
-;;
-;; While compiling the suo image files to get the suo image, the
-;; compiler creates the 'image environment'.  This environment
-;; contains macros and functions for the suo runtime environment and
-;; the macros in it are therefore not useable at compile time.  The
-;; compiler looks up macros in the build environment when compiling
-;; the image files.  Thus, the boot files need to provide all macros
-;; used by the image files.
+;;; Overview of the bootstrap process
 
-;;; Representation of suo objects as Scheme values
+;; Bootstrapping Suo happens roughly like this:
+;;
+;; - An empty environment is created in the hosting Scheme system.
+;;   This is called the 'boot environment'.
+;;
+;; - A carefully selected set of bindings is created in the boot
+;;   environnment to prime it.  Essentially, the boot environment can
+;;   then support evaluating Suo source code.
+;;
+;; - The Suo source code files that contain the compiler are evaluated
+;;   in the boot environment.  This fills the boot environment to a
+;;   point where the host Scheme can execute the Suo compiler.
+;;   Redefinitions of bindings that already exist in the boot
+;;   environment are ignored.  That way, we can load the same source
+;;   files that are later compiled to form the Suo image.  For
+;;   example, the boot environment will contain definitions for
+;;   'cons', 'car', 'cdr', and 'pair?' that use pair objects of the
+;;   host Scheme.  When loading the Suo compiler into the boot
+;;   environment, the loaded files can be the ones that define Suo
+;;   completely, including its own primitives for pairs, but they are
+;;   ignored and the Suo compiler in the boot environment will use
+;;   host pairs instead.
+;;
+;; - Another empty environment is created, the 'image environment'.
+;;
+;; - A few bindings are introduced into this environment for some
+;;   objects that the compiler (or the image writer) uses in generated
+;;   code and that need to be available to Suo as well.  Examples are
+;;   the objects that represent types, such as the object that
+;;   represents the type of symbols.
+;;
+;; - The compiler is used to compile a set of Suo source files.  These
+;;   source files define the initial Suo image.  They contain the
+;;   compiler, of course, and a read-eval-print loop.
+;;
+;; - The result of the compilations of the last step is a procedure
+;;   that when incoked carries out the the toplevel actions of the
+;;   compiled files.  That procedure is written to a file using the
+;;   Suo binary layout of objects.
+;;
+;; - The Suo runtime then loads the image file created in the last
+;;   step and starts the boot procedure, which eventually launches
+;;   into the repl.
+;;
+;; - From there on, the image is changed using the repl and the Suo
+;;   runtime can suspend and restart sessions.
 
-;; fixnum, characters, singletons, pairs, vectors, strings - directly
-;; records - record-record (no bit records)
-;; bytevecs - u8vector
-;; code - code-record
+;;; Representation of Suo values in the boot environment.
+
+;; The Suo compiler is written for Suo; it uses Suo specific data
+;; types such as bytevecs and the Suo variant of records, for example.
+;; When executing it in the boot environment, we need to provide the
+;; necessary functions for dealing with these data types.  Thus, we
+;; implement all of the basic Suo data types in plain Scheme here, and
+;; then pre-define the corresponding functions in the boot
+;; environment.
+;;
+;; Numbers, characters, singletons like '#f' and '()', pairs, vectors,
+;; and strings are implemented directly by using the host Scheme data
+;; tyes.  The compiler uses nothing Suo specific about them.
+;;
+;; Records are implemented using, errm, records, but with records from
+;; different kind.  The fields of the Suo record are simply stored as
+;; a Scheme vector.
+;;
+;; Bytevecs are implemented as SRFI 4 u8vectors.
+;;
+;; Code objects are implemented as records with explicit bytevec and
+;; vector for the instructions and literals, respectively.
 
 (define suo:record-record-type
   (make-record-type 'record-record '(type fields)
@@ -120,17 +154,13 @@
 ;; 'lookup-toplevel-variable'.  It also uses 'expand-macro' to invoke
 ;; a macro transformer function.
  
-;;; The build environment
+;;; The boot environment
 
 ;; Things are fairly simple for toplevel variable definitions.  When
-;; creating the suo-like environment in the build system by loading
-;; the suo boot files, a toplevel variable definition is either
-;; ignored (when a definition for the same name already exists), or a
-;; new variable is installed.
-;;
-;; Macros are more complicated.  A macro that is defined when loading
-;; the suo boot files is put both into the suo-like environment (when
-;; no definition for its name exists), and made available ...
+;; creating the suo-like boot environment by loading the suo boot
+;; files, a toplevel variable definition is either ignored (when a
+;; definition for the same name already exists), or a new variable is
+;; installed.
 
 (define suo:toplevel '())
 (define suo:build-macros '())
@@ -240,7 +270,7 @@
     let let* letrec
     set!
     apply
-    make-parameter call/p dynamic-wind
+    make-parameter call/p
     sys:halt
     
     lookup-toplevel-macro expand-macro
@@ -254,8 +284,6 @@
 
     ;; Pairs
     pair? cons car cdr set-car! set-cdr!
-    ;; map for-each cadr caddr append memv memq
-    ;; acons assq assq-ref
 
     ;; Characters
     char? integer->char char->integer
@@ -301,12 +329,8 @@
     bytevec-length-8 bytevec-ref-u8 bytevec-set-u8!
     bytevec-length-16 bytevec-ref-u16 bytevec-set-u16!
 
-    ;; XXX
-    topexp-variable-init?
-    make-hash-table 
-    make-hashq-table hashq-ref hashq-set!
-    host-string-chars
-    ash expt))
+    ;; Hashq tables
+    make-hashq-table hashq-ref hashq-set!))
 
 (define build-module (make-module 1031))
 

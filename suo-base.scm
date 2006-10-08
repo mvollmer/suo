@@ -1732,57 +1732,6 @@ the result list."
 (define-macro (bootinfo)
   `(:bootinfo))
 
-;;; Symbols
-
-(define symbols (let ((t (make-hash-table 213)))
-		  (for-each (lambda (sym)
-			      (hash-set! t (symbol->string sym) sym))
-			    (car (bootinfo)))
-		  t))
-
-(define (symbol? val)
-  (record-with-type? val symbol-type))
-
-(define (string->symbol str)
-  (if (string? str)
-      (or (hash-ref symbols str)
-	  (let ((sym (record symbol-type str)))
-	    (hash-set! symbols str sym)
-	    sym))
-      (error:wrong-type str)))
-
-(define (symbol->string sym)
-  (if (record-with-type? sym symbol-type)
-      (record-ref sym 0)
-      (error:wrong-type sym)))
-
-(define (symbol-append . syms)
-  (string->symbol (apply string-append (map symbol->string syms))))
-
-(define -gensym-counter- 0)
-
-(define (gensym)
-  (set! -gensym-counter- (+ -gensym-counter- 1))
-  (string->symbol (string-append "G" (number->string -gensym-counter-))))
-
-(define dot-symbol (string->symbol "."))
-
-;;; Keywords
-
-(define keywords (let ((t (make-hashq-table 213)))
-		   (for-each (lambda (key)
-			       (hashq-set! t (keyword->symbol key) key))
-			     (cadr (bootinfo)))
-		   t))
-
-(define (keyword? val)
-  (record-with-type? val keyword-type))
-
-(define (keyword->symbol key)
-  (if (record-with-type? key keyword-type)
-      (record-ref key 0)
-      (error:wrong-type key)))
-
 ;;; Hash tables
 
 (define (mix-hash n . vals)
@@ -1884,6 +1833,57 @@ the result list."
 
 (define (set-hashq-vectors v)
   (primop syscall 9 -3 v))
+
+;;; Symbols
+
+(define symbols (let ((t (make-hash-table 213)))
+		  (for-each (lambda (sym)
+			      (hash-set! t (symbol->string sym) sym))
+			    (car (bootinfo)))
+		  t))
+
+(define (symbol? val)
+  (record-with-type? val symbol-type))
+
+(define (string->symbol str)
+  (if (string? str)
+      (or (hash-ref symbols str)
+	  (let ((sym (record symbol-type str)))
+	    (hash-set! symbols str sym)
+	    sym))
+      (error:wrong-type str)))
+
+(define (symbol->string sym)
+  (if (record-with-type? sym symbol-type)
+      (record-ref sym 0)
+      (error:wrong-type sym)))
+
+(define (symbol-append . syms)
+  (string->symbol (apply string-append (map symbol->string syms))))
+
+(define -gensym-counter- 0)
+
+(define (gensym)
+  (set! -gensym-counter- (+ -gensym-counter- 1))
+  (string->symbol (string-append "G" (number->string -gensym-counter-))))
+
+(define dot-symbol (string->symbol "."))
+
+;;; Keywords
+
+(define keywords (let ((t (make-hashq-table 213)))
+		   (for-each (lambda (key)
+			       (hashq-set! t (keyword->symbol key) key))
+			     (cadr (bootinfo)))
+		   t))
+
+(define (keyword? val)
+  (record-with-type? val keyword-type))
+
+(define (keyword->symbol key)
+  (if (record-with-type? key keyword-type)
+      (record-ref key 0)
+      (error:wrong-type key)))
 
 ;;; Variables, macros and name spaces
 
