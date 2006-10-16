@@ -21,20 +21,10 @@
 
 (load "suo-cross.scm")
 
-(suo:load-for-build "suo-base.scm")
-(suo:load-for-build "suo-asm-ppc.scm")
-(suo:load-for-build "suo-util.scm")
-(suo:load-for-build "suo-compiler.scm")
-
-(import-build-types)
-
-(suo:load-for-image "suo-base.scm")
-(suo:load-for-image "suo-asm-ppc.scm")
-(suo:load-for-image "suo-util.scm")
-(suo:load-for-image "suo-compiler.scm")
-(suo:load-for-image "suo-boot.scm")
-
-;;(suo:load-for-image "suo-test.scm")
+(boot-load "suo-base.scm")
+(boot-load "suo-asm-ppc.scm")
+(boot-load "suo-util.scm")
+(boot-load "suo-compiler.scm")
 
 (define (write-image mem)
   (let* ((port (open-output-file "image")))
@@ -42,15 +32,37 @@
     (uniform-vector-write mem port)))
 
 (define (make-bootstrap-image exp)
-  (let ((comp-exp (suo:eval-for-build
+  (let ((comp-exp (boot-eval
 		   `(compile '(lambda ()
 				,exp
 				(primop syscall))))))
-    (or (and (pair? comp-exp) (eq? (car comp-exp) :quote))
-	(error "expected quote expression"))
+    (or (constant? comp-exp)
+	(error "expected constant"))
     (write-image
-     (dump-object (cadr comp-exp)))))
+     (dump-object (constant-value comp-exp)))))
 
-(make-bootstrap-image (pk 'top (suo:toplevel-expression)))
+(define (compile-compiler)
+  (image-load "suo-base.scm")
+  (image-load "suo-asm-ppc.scm")
+  (image-load "suo-util.scm")
+  (image-load "suo-compiler.scm")
+  (image-load "suo-boot.scm")
+  (make-bootstrap-image (image-expression)))
 
-(suo:check-undefineds)
+(define (compile-minimal)
+  (boot-eval '(set cps-verbose #t))
+  (make-bootstrap-image
+   '(begin
+      (primop syscall 9 -6 (lambda ()
+ 			     (primop syscall 0 255)
+ 			     (primop syscall)))
+      (let loop ()
+	((lambda a a) 1 2 3 4 5 6 7)
+	(loop))
+      12)))
+
+(compile-compiler)
+;;(compile-minimal)
+
+(boot-eval '(dump-sigs-n-calls))
+(check-undefined-variables)

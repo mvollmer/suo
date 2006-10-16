@@ -226,6 +226,23 @@
 			(* y (expt 2 16))
 			(* x (expt 2 21)))))
   
+ (define (cps-asm-prologue ctxt sig)
+   (let ((lab (cps-asm-make-label ctxt)))
+     (cps-asm-op-to-r3 ctxt (cps-quote sig))
+     (cps-asm-op-to-r4 ctxt (cps-reg 0))
+     ;; cmpw cr7,r3,r4
+     (cps-asm-word ctxt #x7f832000)
+     ;; beq cr7,lab
+     (cps-asm-word-with-s2-laboff ctxt #x419e0000 lab)
+     ;; call adjust_call_sig
+     (cps-asm-r3-to-reg ctxt (cps-reg -5))
+     (cps-asm-op-to-r3 ctxt (cps-reg -4))
+     ;; mtctr r3
+     (cps-asm-word ctxt #x7c6903a6)
+     ;; bctrl
+     (cps-asm-word ctxt #x4e800421)
+     (cps-asm-def-label ctxt lab)))
+
 (define-primop (syscall (res) args)
   (for-each (lambda (a r)
 	      (cps-asm-op-to-r3 ctxt a)

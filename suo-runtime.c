@@ -32,8 +32,8 @@ typedef unsigned int word;
 typedef   signed int sword;
 typedef         word val;
 
-val specials_and_regs[3+256];
-val *regs = specials_and_regs + 3;
+val specials_and_regs[6+256];
+val *regs = specials_and_regs + 6;
 
 #define HEAP_SIZE  (32*1024*1024)
 #define SPACE_SIZE (HEAP_SIZE/2)
@@ -364,6 +364,7 @@ gc (word *params)
   to_ptr = to_space;
   scan_words (regs, 256);
   scan_words (&regs[-3], 1);
+  scan_words (&regs[-6], 1);
   scan_words (&params[GCPAR_R15], 1);
   for (ptr = to_space, count = 0; ptr < to_ptr; count++)
     ptr = scan (ptr);
@@ -442,7 +443,7 @@ suspend (word cont)
 
   rehash_hashq_vectors (regs[-3]);
 
-  fd = open (suspend_image, O_WRONLY|O_CREAT, 0666);
+  fd = open (suspend_image, O_WRONLY|O_CREAT|O_TRUNC, 0666);
   if (fd < 0)
     perror_exit (suspend_image);
 
@@ -668,7 +669,7 @@ sys (int n_args,
   if (n_args == 0)
     {
       if (verbose)
-	fprintf (stderr, "HALT after %d GCs.\n", gc_count);
+	fprintf (stderr, "PANIC after %d GCs.\n", gc_count);
       exit (0);
     }
 
@@ -761,12 +762,12 @@ sys (int n_args,
   return 0x0000000a;
 }
 
+void adjust_call_sig ();
 
 void
 go (val closure, val *free, val *end)
 {
   int i;
-  val arglist;
   register val *r14 asm ("r14");
   register val *r15 asm ("r15");
   register val *r16 asm ("r16");
@@ -775,18 +776,15 @@ go (val closure, val *free, val *end)
   for (i = 0; i < 256; i++)
     regs[i] = 1; /* fixnum zero */
 
-  arglist = (val)free;
-  *free++ = BOOL_T;
-  *free++ = EOL;
-
-  if (free >= end)
-    error_exit ("too tight");
-
+  regs[-6] = BOOL_F; // error:wrong-num-args code
+  regs[-5] = BOOL_F; // target_sig for adjust_call_sig
+  regs[-4] = (val)adjust_call_sig;
   regs[-3] = EOL; // hashq vectors
   regs[-2] = (val)gc_glue;
   regs[-1] = (val)sys;
-  regs[0] = closure;
-  regs[1] = arglist;
+  regs[0] = (2<<3)|1;
+  regs[1] = closure;
+  regs[2] = BOOL_T;  // cont of boot procedure
 
   r14 = regs;
   r15 = (val *)((val *)closure)[1];

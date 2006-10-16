@@ -68,7 +68,10 @@
 	       (primop syscall 10 (lambda () (k #t)))
 	       (error "can't suspend")))
     (set-hashq-vectors hashq-vectors)
+    (set-wrong-num-args-hook)
     #t))
+
+(set-wrong-num-args-hook)
 
 (display (length toplevel))
 (display " toplevel bindings\n")

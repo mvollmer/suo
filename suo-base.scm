@@ -2,9 +2,9 @@
 
 (define (macroexpand1 form)
   (if (and (pair? form) (symbol? (car form)))
-      (let ((def (lookup-toplevel-macro (car form))))
-	(if def
-	    (expand-macro def form)
+      (let ((transformer (lookup-toplevel-macro-transformer (car form))))
+	(if transformer
+	    (apply transformer (cdr form))
 	    form))
       form))
 
@@ -222,6 +222,9 @@
 (define (error:wrong-num-args)
   (error "wrong number of arguments"))
 
+(define (set-wrong-num-args-hook)
+  (primop syscall 9 -6 error:wrong-num-args))
+
 (define (error:wrong-type val)
   (error "wrong type: " val))
 
@@ -244,11 +247,11 @@
 
 (define (last-straw-error-handler msg rest)
   (if handling-error
-      (sys:halt)
+      (sys:panic)
       (begin
 	(set! handling-error #t)
 	(display-error msg rest)
-	(sys:halt))))
+	(sys:panic))))
 
 (define error-handlers (make-parameter '()))
 
@@ -1149,7 +1152,7 @@ the result list."
 
 ;;; Syscalls
 
-(define (sys:halt)
+(define (sys:panic)
   (primop syscall))
 
 (define (sys:peek . vals)
@@ -1916,9 +1919,6 @@ the result list."
       (record-ref obj 0)
       (error:wrong-type obj)))
 
-(define (expand-macro mac form)
-  (apply (macro-transformer mac) (cdr form)))
-
 (define toplevel (caddr (bootinfo)))
 
 (define (register-toplevel-variable sym)
@@ -1934,6 +1934,6 @@ the result list."
 	    (error "not a variable: " sym))
 	(register-toplevel-variable sym))))
 
-(define (lookup-toplevel-macro sym)
+(define (lookup-toplevel-macro-transformer sym)
   (let ((thing (assq-ref toplevel sym)))
-    (and (macro? thing) thing)))
+    (and (macro? thing) (macro-transformer thing))))
