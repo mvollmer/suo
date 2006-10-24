@@ -26,20 +26,20 @@
 (boot-load "suo-util.scm")
 (boot-load "suo-compiler.scm")
 
-(define (write-image mem)
-  (let* ((port (open-output-file "image")))
+(define (write-image mem file)
+  (let* ((port (open-output-file file)))
     (uniform-vector-write #u32(#xABCD0001 0 0) port)
     (uniform-vector-write mem port)))
 
-(define (make-bootstrap-image exp)
+(define (make-bootstrap-image exp file)
   (let ((comp-exp (boot-eval
 		   `(compile '(lambda ()
 				,exp
 				(primop syscall))))))
     (or (constant? comp-exp)
 	(error "expected constant"))
-    (write-image
-     (dump-object (constant-value comp-exp)))))
+    (write-image (dump-object (constant-value comp-exp))
+		 file)))
 
 (define (compile-compiler)
   (image-load "suo-base.scm")
@@ -47,19 +47,13 @@
   (image-load "suo-util.scm")
   (image-load "suo-compiler.scm")
   (image-load "suo-boot.scm")
-  (make-bootstrap-image (image-expression)))
+  (make-bootstrap-image (image-expression) "compiler"))
 
 (define (compile-minimal)
-  (boot-eval '(set cps-verbose #t))
+  (boot-eval '(set! cps-verbose #t))
   (make-bootstrap-image
-   '(begin
-      (primop syscall 9 -6 (lambda ()
- 			     (primop syscall 0 255)
- 			     (primop syscall)))
-      (let loop ()
-	((lambda a a) 1 2 3 4 5 6 7)
-	(loop))
-      12)))
+   '12
+   "minimal"))
 
 (compile-compiler)
 ;;(compile-minimal)

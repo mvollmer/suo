@@ -30,6 +30,19 @@
 	      (val (mock-eval (caddr form)))
 	      (var (lookup-toplevel-variable sym)))
 	 (variable-set! var val)))
+      ((:define-macro)
+       (let* ((sym (cadr form))
+	      (val (mock-eval (caddr form))))
+	 (register-toplevel-macro-transformer sym val)))
+      ((:begin)
+       (let loop ((body (cdr form)))
+	 (cond ((null? body)
+		(if #f #f))
+	       ((null? (cdr body))
+		(mock-eval (car body)))
+	       (else
+		(mock-eval (car body))
+		(loop (cdr body))))))
       (else
        (error "unsupported special: " key)))))
 
@@ -54,7 +67,13 @@
 	(apply display-error args)
 	(k #f))
       (lambda ()
-	(call/v (lambda () (mock-eval (read)))
+	(call/v (lambda ()
+		  (let ((form (read)))
+		    (if (eof-object? form)
+			(begin 
+			  (suspend)
+			  (values))
+			(mock-eval form))))
 		(lambda vals
 		  (for-each (lambda (v)
 			      (write v)

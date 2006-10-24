@@ -226,7 +226,7 @@
 
 (boot-import record? record-with-type?
 	     record-type record-length record-ref record-set!
-	     record-type-type make-record make-record-type)
+	     record-type-type record make-record make-record-type)
 
 ;; Code objects are implemented as records with explicit bytevec and
 ;; vector for the instructions and literals, respectively.
@@ -255,7 +255,7 @@
 
 (define suo:macro-type (suo:make-record-type 2 'macro))
 
-(define suo:closure-type (suo:make-record-type 2 'closure))
+(define suo:closure-type (suo:make-record-type 3 'closure))
 
 (define suo:string-type (suo:make-record-type 1 'string))
 
@@ -287,6 +287,10 @@
 
 (define (suo:bytevec-length-16 v)
   (quotient (u8vector-length v) 2))
+
+(define (suo:bytevec-ref-u16 v i)
+  (+ (* (u8vector-ref v (* 2 i)) #x100)
+     (u8vector-ref v (1+ (* 2 i)))))
 
 (define (suo:bytevec-ref-u16 v i)
   (+ (* (u8vector-ref v (* 2 i)) #x100)

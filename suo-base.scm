@@ -515,6 +515,15 @@ the result list."
 	((null? l2) l1)
 	(else (union (cdr l1) (adjoin (car l1) l2)))))
 
+(define (intersection l1 l2)
+  "Return a new list that is the intersection of L1 and L2.
+Only elements that occur in both lists occur in the result list."
+  (if (null? l2) l2
+      (let loop ((l1 l1) (result '()))
+	(cond ((null? l1) (reverse result))
+	      ((memv (car l1) l2) (loop (cdr l1) (cons (car l1) result)))
+	      (else (loop (cdr l1) result))))))
+
 ;;; Byte vectors
 
 (define (bytevec? val)
@@ -1188,6 +1197,12 @@ the result list."
 
 ;;; Ports
 
+(define the-eof-object-type (make-record-type 0 'eof-object))
+(define the-eof-object (record the-eof-object-type))
+
+(define (eof-object? obj)
+  (eq? obj the-eof-object))
+
 (define (output-char port ch)
   (port 0 ch))
 
@@ -1198,7 +1213,7 @@ the result list."
       (output-char port (string-ref str i)))))
 
 (define (input-char port)
-  (port 1 #f))
+  (port 1 the-eof-object))
 
 (define (putback-char port ch)
   (port 2 ch))
@@ -1276,7 +1291,15 @@ the result list."
     (if (print-state-writing? state)
 	(begin
 	  (output-string port "#\\")
-	  (output-char port ch))
+	  (case ch
+	    ((#\space)
+	     (output-string port "space"))
+	    ((#\tab)
+	     (output-string port "tab"))
+	    ((#\newline)
+	     (output-string port "newline"))
+	    (else
+	     (output-char port ch))))
 	(output-char port ch))))
 
 (define (print-number n state)
@@ -1413,32 +1436,14 @@ the result list."
 (define (parse-state-port state)
   state)
 
-(define (parse-reduce p f i state)
-  (let ((ch (input-char (parse-state-port state))))
-    (if (p ch)
-	(parse-reduce p f (f ch i) state)
-	(begin
-	  (putback-char (parse-state-port state) ch)
-	  i))))
-
-(define (parse-gather p state)
-  (reverse (parse-reduce p cons '() state)))
-
-(define (parse-skip p state)
-  (parse-reduce p (lambda (ch v) #t) #f state))
-
-(define (parse-comment state)
-  (let ((ch (input-char (parse-state-port state))))
-    (if (not (eq? ch #\newline))
-	(parse-comment state))))
-
 (define (whitespace? ch)
   (or (eq? ch #\space)
       (eq? ch #\tab)
       (eq? ch #\newline)))
 
 (define (delimiter? ch)
-  (or (whitespace? ch)
+  (or (eof-object? ch)
+      (whitespace? ch)
       (eq? ch #\()
       (eq? ch #\))
       (eq? ch #\;)))
@@ -1453,13 +1458,30 @@ the result list."
 	  (else
 	   (putback-char (parse-state-port state) ch)))))
 
+(define (parse-comment state)
+  (let ((ch (input-char (parse-state-port state))))
+    (if (not (eq? ch #\newline))
+	(parse-comment state))))
+
 (define (parse-token state)
-  (let ((str (list->string
-	      (parse-gather (lambda (ch) 
-			      (not (delimiter? ch)))
-			    state))))
-    (or (string->number str)
-	(string->symbol str))))
+  (let loop ((chars '()))
+    (define (make-token)
+      (list->string (reverse chars)))
+    (let ((ch (input-char (parse-state-port state))))
+      (cond ((eof-object? ch)
+	     (if (null? chars)
+		 ch
+		 (make-token)))
+	    ((delimiter? ch)
+	     (putback-char (parse-state-port state) ch)
+	     (make-token))
+	    (else
+	     (loop (cons ch chars)))))))
+
+(define (parse-number-or-symbol state)
+  (let ((tok (parse-token state)))
+    (or (string->number tok)
+	(string->symbol tok))))
 
 (define (must-parse ch state)
   (parse-whitespace state)
@@ -1474,6 +1496,8 @@ the result list."
 	(begin
 	  (putback-char (parse-state-port state) ch)
 	  (let ((elt (parse state)))
+	    (if (eof-object? elt)
+		(error "unexpected end of input"))
 	    (if (eq? dot-symbol elt)
 		(let ((elt (parse state)))
 		  (must-parse #\) state)
@@ -1489,8 +1513,31 @@ the result list."
 	    ((eq? ch #\\)
 	     (let ((ch (input-char port)))
 	       (loop (input-char port) (cons ch chars))))
+	  ((eof-object? ch)
+	   (error "unexpected end of input in string literal"))
 	    (else
 	     (loop (input-char port) (cons ch chars)))))))
+
+(define (parse-char state)
+  (let ((ch (input-char (parse-state-port state))))
+    (if (delimiter? ch)
+	ch
+	(begin
+	  (putback-char (parse-state-port state) ch)
+	  (let ((tok (parse-token state)))
+	    (if (eof-object? tok)
+		(error "unexpected end of input in character literal"))
+	    (if (= (string-length tok) 1)
+		(string-ref tok 0)
+		(case (string->symbol tok)
+		  ((space)   #\space)
+		  ((newline) #\newline)
+		  ((tab)     #\tab)
+		  (else
+		   (error "unrecognized character name: " tok)))))))))
+
+(define (parse-keyword state)
+  (symbol->keyword (parse state)))
 
 (define (parse-sharp state)
   (let ((ch (input-char (parse-state-port state))))
@@ -1500,23 +1547,40 @@ the result list."
 	   #t)
 	  ((eq? ch #\f)
 	   #f)
+	  ((eq? ch #\\)
+	   (parse-char state))
+	  ((eof-object? ch)
+	   (error "unexpected end of input in # construct"))
 	  (else
 	   (error "unsupported # construct: #" ch)))))
 
 (define (parse state)
   (parse-whitespace state)
   (let ((ch (input-char (parse-state-port state))))
-    (cond ((eq? ch #\()
+    (cond ((eof-object? ch)
+	   ch)
+	  ((eq? ch #\()
 	   (parse-list state))
 	  ((eq? ch #\")
 	   (parse-string state))
+	  ((eq? ch #\:)
+	   (parse-keyword state))
 	  ((eq? ch #\#)
 	   (parse-sharp state))
 	  ((eq? ch #\')
 	   (list 'quote (parse state)))
+	  ((eq? ch #\`)
+	   (list 'quasiquote (parse state)))
+	  ((eq? ch #\,)
+	   (let ((ch (input-char (parse-state-port state))))
+	     (if (eq? ch #\@)
+		 (list 'unquote-splicing (parse state))
+		 (begin
+		   (putback-char (parse-state-port state) ch)
+		   (list 'unquote (parse state))))))
 	  (else
 	   (putback-char (parse-state-port state) ch)
-	   (parse-token state)))))
+	   (parse-number-or-symbol state)))))
 
 (define (read)
   (parse (make-parse-state (current-input-port))))
@@ -1888,6 +1952,34 @@ the result list."
       (record-ref key 0)
       (error:wrong-type key)))
 
+(define (symbol->keyword sym)
+  (if (symbol? sym)
+      (or (hashq-ref keywords sym)
+	  (let ((key (record keyword-type sym)))
+	    (hashq-set! keywords sym key)
+	    key))
+      (error:wrong-type sym)))
+
+;;; Closures
+
+(define (closure? obj)
+  (record-with-type? obj closure-type))
+
+(define (closure-code clos)
+  (if (closure? clos)
+      (record-ref clos 0)
+      (error:wrong-type clos)))
+
+(define (closure-values clos)
+  (if (closure? clos)
+      (record-ref clos 1)
+      (error:wrong-type clos)))
+
+(define (closure-debug-info clos)
+  (if (closure? clos)
+      (record-ref clos 2)
+      (error:wrong-type clos)))
+
 ;;; Variables, macros and name spaces
 
 (define (variable? obj)
@@ -1914,6 +2006,9 @@ the result list."
 (define (macro? obj)
   (record-with-type? obj macro-type))
 
+(define (macro transformer name)
+  (record macro-type transformer name))
+
 (define (macro-transformer obj)
   (if (macro? obj)
       (record-ref obj 0)
@@ -1925,6 +2020,12 @@ the result list."
   (let ((var (variable (if #f #f) sym)))
     (set! toplevel (acons sym var toplevel))
     var))
+
+(define (register-toplevel-macro-transformer sym transformer)
+  (pk 'macro sym transformer)
+  (let ((mac (macro transformer sym)))
+    (set! toplevel (acons sym mac toplevel))
+    mac))
 
 (define (lookup-toplevel-variable sym)
   (let ((thing (assq-ref toplevel sym)))
