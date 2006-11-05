@@ -677,32 +677,46 @@ Only elements that occur in both lists occur in the result list."
 	      '()
 	      (positive-number->char-list q b)))))
 
-(define (digit? ch)
-  (and (<= (char->integer #\0) (char->integer ch))
-       (<= (char->integer ch) (char->integer #\9))))
-
-(define (string->number str)
-  (let loop ((chars (string->list str))
-	     (num 0)
-	     (start? #t)
-	     (valid? #f)
-	     (sign 1))
-    (cond ((null? chars)
-	   (if valid?
-	       (* num sign)
-	       #f))
-	  ((and start? (whitespace? (car chars)))
-	   (loop (cdr chars) num #t #f sign))
-	  ((and start? (eq? (car chars) #\-))
-	   (loop (cdr chars) num #f #f -1))
-	  ((and start? (eq? (car chars) #\+))
-	   (loop (cdr chars) num #f #f 1))
-	  ((digit? (car chars))
-	   (loop (cdr chars) (+ (* 10 num) (- (char->integer (car chars))
-					      (char->integer #\0)))
-		 #f #t sign))
+(define (digit->integer ch)
+  (let ((d (char->integer ch)))
+    (cond ((and (<= (char->integer #\0) d)
+		(<= d (char->integer #\9)))
+	   (- d (char->integer #\0)))
+	  ((and (<= (char->integer #\a) d)
+		(<= d (char->integer #\z)))
+	   (+ (- d (char->integer #\a)) 10))
+	  ((and (<= (char->integer #\A) d)
+		(<= d (char->integer #\Z)))
+	   (+ (- d (char->integer #\A)) 10))
 	  (else
 	   #f))))
+
+(define (digit? ch base)
+  (let ((d (digit->integer ch)))
+    (and d (< d base))))
+
+(define (string->number str . opt-base)
+  (let ((base (if (null? opt-base) 10 (car opt-base))))
+    (let loop ((chars (string->list str))
+	       (num 0)
+	       (start? #t)
+	       (valid? #f)
+	       (sign 1))
+      (cond ((null? chars)
+	     (if valid?
+		 (* num sign)
+		 #f))
+	    ((and start? (whitespace? (car chars)))
+	     (loop (cdr chars) num #t #f sign))
+	    ((and start? (eq? (car chars) #\-))
+	     (loop (cdr chars) num #f #f -1))
+	    ((and start? (eq? (car chars) #\+))
+	     (loop (cdr chars) num #f #f 1))
+	    ((digit? (car chars) base)
+	     (loop (cdr chars) (+ (* base num) (digit->integer (car chars)))
+		   #f #t sign))
+	    (else
+	     #f)))))
 
 (define (string-set-substring! str idx sub)
   (let ((n (string-length sub)))
@@ -1483,6 +1497,11 @@ Only elements that occur in both lists occur in the result list."
     (or (string->number tok)
 	(string->symbol tok))))
 
+(define (parse-hex state)
+  (let ((tok (parse-token state)))
+    (or (string->number tok 16)
+	(error "not a hexadecimal number: " tok))))
+
 (define (must-parse ch state)
   (parse-whitespace state)
   (if (not (eq? ch (input-char (parse-state-port state))))
@@ -1549,6 +1568,8 @@ Only elements that occur in both lists occur in the result list."
 	   #f)
 	  ((eq? ch #\\)
 	   (parse-char state))
+	  ((eq? ch #\x)
+	   (parse-hex state))
 	  ((eof-object? ch)
 	   (error "unexpected end of input in # construct"))
 	  (else
@@ -1578,6 +1599,8 @@ Only elements that occur in both lists occur in the result list."
 		 (begin
 		   (putback-char (parse-state-port state) ch)
 		   (list 'unquote (parse state))))))
+	  ((delimiter? ch)
+	   (error "unexpected delimiter: " ch))
 	  (else
 	   (putback-char (parse-state-port state) ch)
 	   (parse-number-or-symbol state)))))
@@ -1713,7 +1736,6 @@ Only elements that occur in both lists occur in the result list."
       (error:wrong-type)))
 
 (define (make-code insn-length lit-length)
-  (pk 'make-code insn-length lit-length)
   (if (fixnum? insn-length)
       (if (fixnum? lit-length)
 	  (primop make-code insn-length lit-length)
@@ -1736,6 +1758,13 @@ Only elements that occur in both lists occur in the result list."
 	  (error:out-of-range idx))
       (error:wrong-type code)))
 
+(define (code-lit-ref code idx)
+  (if (code? code)
+      (if (and (<= 0 idx) (< idx (code-lit-length code)))
+	  (primop vector-ref code (+ (code-insn-length code) idx))
+	  (error:out-of-range idx))
+      (error:wrong-type code)))
+
 (define (code insns lits)
   (let* ((insn-length (bytevec-length-32 insns))
 	 (insn-length-16 (* 2 insn-length))
@@ -1748,6 +1777,9 @@ Only elements that occur in both lists occur in the result list."
 	((= i lit-length))
       (code-lit-set! code i (vector-ref lits i)))
     code))
+
+(define (code-debug-info code)
+  (code-lit-ref code 0))
 
 ;;; equal?
 

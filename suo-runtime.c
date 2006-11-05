@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <string.h>
+#include <signal.h>
 
 #define DEBUG 0
 
@@ -32,8 +33,8 @@ typedef unsigned int word;
 typedef   signed int sword;
 typedef         word val;
 
-val specials_and_regs[6+256];
-val *regs = specials_and_regs + 6;
+val specials_and_regs[8+256];
+val *regs = specials_and_regs + 8;
 
 #define HEAP_SIZE  (32*1024*1024)
 #define SPACE_SIZE (HEAP_SIZE/2)
@@ -365,6 +366,8 @@ gc (word *params)
   scan_words (regs, 256);
   scan_words (&regs[-3], 1);
   scan_words (&regs[-6], 1);
+  scan_words (&regs[-7], 1);
+  scan_words (&regs[-8], 1);
   scan_words (&params[GCPAR_R15], 1);
   for (ptr = to_space, count = 0; ptr < to_ptr; count++)
     ptr = scan (ptr);
@@ -429,8 +432,9 @@ suspend (word cont)
   if (suspend_image == NULL)
     return;
 
-  // XXX - once we do the GC, we can't return to Scheme.  So let's
-  //       hope the saving succeeds.
+  // XXX - Once we do the GC, we can't return to Scheme.  So let's
+  //       hope the saving succeeds.  We could simply restart with CONT,
+  //       tho.
 
   active_space = 1 - active_space;
   to_space = spaces[active_space];
@@ -776,6 +780,8 @@ go (val closure, val *free, val *end)
   for (i = 0; i < 256; i++)
     regs[i] = 1; /* fixnum zero */
 
+  regs[-8] = BOOL_F; // interrupt val
+  regs[-7] = BOOL_F; // interrupt flag
   regs[-6] = BOOL_F; // error:wrong-num-args code
   regs[-5] = BOOL_F; // target_sig for adjust_call_sig
   regs[-4] = (val)adjust_call_sig;
@@ -784,7 +790,7 @@ go (val closure, val *free, val *end)
   regs[-1] = (val)sys;
   regs[0] = (2<<3)|1;
   regs[1] = closure;
-  regs[2] = BOOL_T;  // cont of boot procedure
+  regs[2] = BOOL_F;  // cont of boot procedure
 
   r14 = regs;
   r15 = (val *)((val *)closure)[1];
@@ -793,6 +799,14 @@ go (val closure, val *free, val *end)
   asm ("mr 3,15\n\t addi 3,3,4\n\t mtctr 3\n\t bctr"
        :
        : "r" (r14), "r" (r15), "r" (r16), "r" (r17));
+}
+
+void
+sighandler (int sig)
+{
+  write (2, "SIG\n", 4);
+  regs[-7] = regs[-8];
+  signal (sig, sighandler);
 }
 
 void
@@ -828,7 +842,7 @@ main (int argc, char **argv)
   if (argc > 2)
     suspend_image = argv[2];
   else
-    suspend_image = NULL;
+    suspend_image = argv[1];
 
   init_heap ();
   space = spaces[active_space];
@@ -864,6 +878,8 @@ main (int argc, char **argv)
   unswizzle_objects (space, ((size_t)space) - head.origin, n/4);
 
   find_markers (space, n/4);
+
+  signal (SIGINT, sighandler);
 
   go (((val)space) + head.start - head.origin,
       space + n/4, space + SPACE_SIZE);

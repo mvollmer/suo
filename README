@@ -17,7 +17,7 @@ The name
 
 The word "suo" is Finnish, and I choose a Finnish word because I
 started hacking on this after moving to Helsinki.  "Suo" is the
-beginning of "Suomi" (Finland) and literally means swamp.  Well, it
+beginning of "Suomi" (Finland) and literally means "swamp".  Well, it
 was short, started with "s" like "Scheme" and seemed appropriate for a
 project that likely is not going anywhere fast...
 
@@ -40,7 +40,6 @@ copying GC that manages all memory except a small set of 'registers'.
   - pairs
   - records
   - vectors
-  - strings
   - bytevectors
   - code
 
@@ -182,3 +181,5 @@ r14 to r30 are non-volatile and used for the state as follows:
   r16 points to the next free byte
 
   r17 points just after the last free byte
+
+  r18 - r30 are regular registers used in the generated code

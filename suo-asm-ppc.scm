@@ -43,14 +43,14 @@
 (define (cps-asm-primop ctxt type results args extra-cont-labels)
   (pk2 'primop type)
   (let ((func (or (assq-ref primitives type)
-		  (error "unsupported" type))))
+		  (error "unsupported primitive: " type))))
     (func ctxt results args extra-cont-labels)))
 
-(define (cps-asm-make-context)
+(define (cps-asm-make-context debug-info)
   (let ((wydes (make-bytevec (* 4 10240)))
 	(idx 0)
 	(fixups '())
-	(literals '()))
+	(literals (list debug-info)))
 
     (lambda (op . args)
 
@@ -270,6 +270,32 @@
   (cps-asm-u16 ctxt #x3860 (s2val (length args)))
   ;; bctrl
   (cps-asm-u16 ctxt #x4e80 #x0421)
+  (cps-asm-r3-to-reg ctxt res))
+
+(define (cps-asm-panic ctxt)
+  (cps-asm-op-to-r3 ctxt (cps-reg -1))
+  ;; mtctr r3
+  (cps-asm-u16 ctxt #x7c69 #x03a6)
+  ;; li r3,0
+  (cps-asm-u16 ctxt #x3860 #x0000)
+  ;; bctrl
+  (cps-asm-u16 ctxt #x4e80 #x0421))
+  
+(define-primop (get-reg (res) (idx))
+  (cps-asm-op-to-r4 ctxt idx)
+  ;;   c:   7c 8e 22 14     add     r4,r14,r4
+  ;;  10:   80 64 ff ff     lwz     r3,-1(r4)
+  (cps-asm-u16 ctxt #x7c8e #x2214)
+  (cps-asm-u16 ctxt #x8064 #xffff)
+  (cps-asm-r3-to-reg ctxt res))
+
+(define-primop (set-reg (res) (idx val))
+  (cps-asm-op-to-r4 ctxt idx)
+  (cps-asm-op-to-r3 ctxt val)
+  ;;   c:   7c 8e 22 14     add     r4,r14,r4
+  ;;  10:   90 64 ff ff     stw     r3,-1(r4)
+  (cps-asm-u16 ctxt #x7c8e #x2214)
+  (cps-asm-u16 ctxt #x9064 #xffff)
   (cps-asm-r3-to-reg ctxt res))
 
 (define (cps-asm-alloc-to-r4 ctxt words)

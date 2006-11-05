@@ -70,7 +70,7 @@
 
 (define-record cps-app func args restp)
 
-(define-record cps-func name args restp debug-info body)
+(define-record cps-func name args restp source parent-cont body)
 
 (define-record cps-fix funcs cont)
 
@@ -112,10 +112,11 @@
 	   `(fun ,(cps-render func)
 		 ,(cps-render cont)))
 	  
-	  ((cps-func name args restp debug-info body)
+	  ((cps-func name args restp source parent-cont body)
 	   `(,(cps-render name)
 	     ,(map cps-render args)
 	     ,restp
+	     ,(cps-render parent-cont)
 	     ,(cps-render body)))
 	  
 	  ((cps-set var value cont)
@@ -133,20 +134,108 @@
 	(else
 	 obj)))
 
-(define (cps-print obj)
-  (pretty-print (cps-render obj))
-  (newline))
+(define (cps-print-val obj)
+  (record-case obj
+    ((cps-var name)
+     (display name))
+    ((cps-quote value)
+     (display "'")
+     (display value))
+    ((cps-reg idx)
+     (display idx))
+    (else
+     (display (cps-render obj)))))
+
+(define (cps-print-stat obj indent)
+
+  (define (nl)
+    (newline)
+    (do ((i 0 (1+ i)))
+	((= i indent))
+      (display " ")))
+
+  (define (print-val-list vals restp)
+    (display "(")
+    (let loop ((v vals)
+	       (first #t))
+      (cond ((not (null? v))
+	     (if (not first)
+		 (display " "))
+	     (if (and (null? (cdr v)) restp)
+		 (display ". "))
+	     (cps-print-val (car v))
+	     (loop (cdr v) #f))))
+    (display ")"))
+
+  (record-case obj
+
+    ((cps-app func args restp)
+     (nl)
+     (if restp
+	 (display "(app* ")
+	 (display "(app "))
+     (cps-print-val func)
+     (for-each (lambda (a)
+		 (display " ")
+		 (cps-print-val a))
+	       args)
+     (display ")"))
+	  
+    ((cps-fun func cont)
+     (nl)
+     (display "(fun (")
+     (cps-print-val (cps-func-name func))
+     (display " ")
+     (print-val-list (cps-func-args func) (cps-func-restp func))
+     (cps-print-stat (cps-func-body func) (+ indent 6))
+     (display ")")
+     (cps-print-stat cont (+ indent 2))
+     (display ")"))
+
+    ((cps-set var value cont)
+     (nl)
+     (display "(set ")
+     (cps-print-val var)
+     (display " ")
+     (cps-print-val value)
+     (display ")")
+     (cps-print-stat cont indent))
+
+    ((cps-primop type results args conts)
+     (nl)
+     (display "(prim ")
+     (display type)
+     (display " ")
+     (print-val-list results #f)
+     (display " ")
+     (print-val-list args #f)
+     (if (= (length conts) 1)
+	 (begin
+	   (display ")")
+	   (cps-print-stat (car conts) indent))
+	 (begin
+	   (for-each (lambda (c)
+		       (nl)
+		       (display " (begin")
+		       (cps-print-stat c (+ indent 3))
+		       (display ")"))
+		     conts)
+	   (display ")"))))
+    
+    (else
+     (nl)
+     (display (cps-render obj)))))
 
 (define (pk-cps . args)
   (apply pk (map cps-render args))
   (car (last-pair args)))
 
-(define genvar
-  (let ((counter 0))
-    (lambda ()
-      (set! counter (1+ counter))
-      (cps-var (string->symbol (string-append "v" (number->string counter)))
-	       counter))))
+(define genvar-counter 0)
+
+(define (genvar)
+  (set! genvar-counter (1+ genvar-counter))
+  (cps-var (string->symbol (string-append "v" (number->string genvar-counter)))
+	   genvar-counter))
 
 ;;; Code generation hooks for the compiler
 
@@ -197,6 +286,16 @@
 	      (list (genvar))
 	      (list variable (cps-quote 0) value)
 	      (list cont)))
+
+;;; Parameters
+
+(define-macro (define-param name)
+  `(define ,name (make-parameter #f)))
+
+(define-macro (with-param param-val . body)
+  (let* ((param-exp (car param-val))
+	 (value-exp (cadr param-val)))
+    `(call/p ,param-exp ,value-exp (lambda () ,@body))))
 
 ;;; Conversion into CPS
 
@@ -254,13 +353,16 @@
     (pk 'all--calls (list->vector all-calls))
     (pk 'all--clos (apply + all-calls))))
 
-(define (cps-func* label args restp debug-info body)
+(define (cps-func* label args restp source parent-cont body)
   (log-signature (length args) restp)
-  (cps-func label args restp debug-info body))
+  (cps-func label args restp source parent-cont body))
 
 (define (cps-app* func args restp)
   (log-call (length args) restp)
   (cps-app func args restp))
+
+(define cps-source (make-parameter #f))
+(define cps-parent-cont (make-parameter #f))
 
 (define (cps-convert exp)
 
@@ -283,7 +385,7 @@
     (or (lookup-sym sym env)
 	(lookup-toplevel-variable sym)))
 
-  (define (conv-func func-label args debug-info body env)
+  (define (conv-func func-label args body env)
     (let* ((cont-arg (genvar))
 	   (restp (dotted-list? args))
 	   (flat-args (flatten-dotted-list args))
@@ -292,15 +394,17 @@
       (cps-func* func-label
 		(cons* cont-arg arg-vars)
 		restp
-		debug-info
-		(conv (cons :begin body)
-		      body-env
-		      (lambda (z)
-			(cps-app* cont-arg (list z) #f))))))
+		(cps-source) (cps-quote #f)
+		(with-param (cps-parent-cont cont-arg)
+		  (conv (cons :begin body)
+			body-env
+			(lambda (z)
+			  (cps-app* cont-arg (list z) #f)))))))
 
   (define (is-tail-call? obj result-var)
     ;; must be of the form (app K (result-var) #f)
-    (and (cps-app? obj)
+    (and ;; #f
+	 (cps-app? obj)
 	 (= 1 (length (cps-app-args obj)))
 	 (eq? result-var
 	      (car (cps-app-args obj)))
@@ -309,7 +413,7 @@
   (define (tail-call-cont obj)
     (cps-app-func obj))
     
-  (define (make-cont env c z)
+  (define (make-cont source env c z)
     (let* ((cont-label (genvar))
 	   (result-var (genvar))
 	   (cont-body (c result-var)))
@@ -318,56 +422,60 @@
 	  (cps-fun (cps-func* cont-label
 			     (list result-var)
 			     #f
-			     (cps-quote 'cont-debug-info)
+			     source
+			     (cps-parent-cont)
 			     cont-body)
 		   (z cont-label)))))
 	  
   (define (conv-apply func args restp env c)
-    (conv* args env
-	   (lambda (z-args)
-	     (conv func env
-		   (lambda (z-func)
-		     (make-cont env c
-				(lambda (z-cont)
-				  (cps-app* z-func
-					   (cons* z-cont z-args)
-					   restp))))))))
+    (let ((source (cps-source)))
+      (conv* args env
+	     (lambda (z-args)
+	       (conv func env
+		     (lambda (z-func)
+		       (make-cont source env c
+				  (lambda (z-cont)
+				    (cps-app* z-func
+					      (cons* z-cont z-args)
+					      restp)))))))))
 
   (define (conv-call/v producer consumer env c)
-    (conv producer env
-	   (lambda (z-producer)
-	     (conv consumer env
-		   (lambda (z-consumer)
-		     (make-cont
-		      env c
-		      (lambda (z-cont)
-			(let ((producer-cont (genvar))
-			      (results (genvar)))
-			  (cps-fun (cps-func* producer-cont
-					     (list results)
-					     #t
-					     (cps-quote 'debug-info)
-					     (cps-app* z-consumer
-						      (list z-cont
-							    results)
-						      #t))
-				   (cps-app* z-producer
-					    (list producer-cont)
-					    #f))))))))))
+    (let ((source (cps-source)))
+      (conv producer env
+	    (lambda (z-producer)
+	      (conv consumer env
+		    (lambda (z-consumer)
+		      (make-cont
+		       source env c
+		       (lambda (z-cont)
+			 (let ((producer-cont (genvar))
+			       (results (genvar)))
+			   (cps-fun (cps-func* producer-cont
+					       (list results)
+					       #t
+					       'call/v z-cont
+					       (cps-app* z-consumer
+							 (list z-cont
+							       results)
+							 #t))
+				    (cps-app* z-producer
+					      (list producer-cont)
+					      #f)))))))))))
 
   (define (conv-call/cc func env c)
-    (let ((cont-func-label (genvar))
+    (let ((source (cps-source))
+	  (cont-func-label (genvar))
 	  (cont-func-cont (genvar))
 	  (cont-func-args (genvar)))
       (conv func env
 	    (lambda (z-func)
-	      (make-cont env c
+	      (make-cont source env c
 			 (lambda (z-cont)
 			   (cps-fun (cps-func* cont-func-label
 					      (list cont-func-cont
 						    cont-func-args)
 					      #t
-					      z-cont
+					      'call/cc z-cont
 					      (cps-app* z-cont
 						       (list cont-func-args)
 						       #t))
@@ -376,94 +484,102 @@
 					     #f))))))))
 
   (define (conv-primitive type results args conts env c)
-    (conv* args env
-	   (lambda (args-z)
-	     (make-cont env c
-			(lambda (z-cont)
-			  (let ((app-c (lambda (z)
-					 (cps-app* z-cont
-						  (list z)
-						  #f))))
-			    (let* ((result-vars (map (lambda (a) (genvar))
-						     results))
-				   (cont-env (extend-env* results result-vars
-							  env)))
-			      (cps-primop type 
-					  result-vars
-					  args-z
-					  (map (lambda (cont)
-						 (conv cont cont-env app-c))
-					       conts)))))))))
+    (let ((source (cps-source)))
+      (let* ((result-vars (map (lambda (a) (genvar))
+			       results))
+	     (cont-env (extend-env* results result-vars env)))
+	(conv* args env
+	       (lambda (args-z)
+		 (if (= (length conts) 1)
+		     (cps-primop type
+				 result-vars
+				 args-z
+				 (list (conv (car conts) cont-env c)))
+		     (make-cont source env c
+				(lambda (z-cont)
+				  (let ((app-c (lambda (z)
+						 (cps-app* z-cont
+							   (list z)
+							   #f))))
+				    (cps-primop 
+				     type
+				     result-vars
+				     args-z
+				     (map (lambda (cont)
+					    (conv cont cont-env app-c))
+					  conts)))))))))))
 
   ;; Apply C to a cps-value representing the result of evaluating EXP.
   ;; C should return a cps-instruction that consumes the cps-value.
   ;;
   (define (conv exp env c)
 
-    (pattern-case exp
+    (with-param (cps-source exp)
 
-       ((:bootinfo)
-	(c (cps-quote bootinfo-marker)))
+      (pattern-case exp
 
-       ((:define ?var ?val)
-	(error "wrong 'define' placement: " exp))
+	  ((:bootinfo)
+	   (c (cps-quote bootinfo-marker)))
 
-       ((:quote ?val)
-	(c (cps-quote ?val)))
+	  ((:define ?var ?val)
+	   (error "wrong 'define' placement: " exp))
+	  
+	  ((:quote ?val)
+	   (c (cps-quote ?val)))
+	  
+	  ((:lambda ?args . ?body)
+	   (let ((func (genvar)))
+	     (cps-fun (conv-func func ?args ?body env)
+		      (c func))))
 
-       ((:lambda ?args . ?body)
-	(let ((func (genvar)))
-	  (cps-fun (conv-func func ?args (cps-quote exp) ?body env)
-		   (c func))))
+	  ((:begin . ?body)
+	   ;; XXX - allow multiple return values
+	   (conv* ?body env
+		  (lambda (zs)
+		    (if (null? zs)
+			(c (cps-quote (if #f #f)))
+			(c (car (last-pair zs)))))))
 
-       ((:begin . ?body)
-	;; XXX - allow multiple return values
-	(conv* ?body env
-	       (lambda (zs)
-		 (if (null? zs)
-		     (c (cps-quote (if #f #f)))
-		     (c (car (last-pair zs)))))))
+	  ((:primitive ?type ?results ?args ?conts)
+	   (conv-primitive ?type ?results ?args ?conts env c))
 
-       ((:primitive ?type ?results ?args ?conts)
-	(conv-primitive ?type ?results ?args ?conts env c))
+	  ((:set ?var ?value)
+	   (conv ?value
+		 env
+		 (lambda (z)
+		   (let ((var (lookup-variable ?var env))
+			 (cont (c (cps-quote (if #f #f)))))
+		     (if (cps-var? var)
+			 (cps-set var z cont)
+			 (cps-gen-variable-set (cps-quote var) z cont))))))
 
-       ((:set ?var ?value)
-	(conv ?value
-	      env
-	      (lambda (z)
-		(let ((var (lookup-variable ?var env))
-		      (cont (c (cps-quote (if #f #f)))))
-		  (if (cps-var? var)
-		      (cps-set var z cont)
-		      (cps-gen-variable-set (cps-quote var) z cont))))))
-
-       ((:call/cc ?func)
-	(conv-call/cc ?func env c))
-
-       ((:call/v ?producer ?consumer)
-	(conv-call/v ?producer ?consumer env c))
+	  ((:call/cc ?func)
+	   (conv-call/cc ?func env c))
+	  
+	  ((:call/v ?producer ?consumer)
+	   (conv-call/v ?producer ?consumer env c))
 	
-       ((:apply ?func . ?args)
-	(conv-apply ?func ?args #t env c))
+	  ((:apply ?func . ?args)
+	   (conv-apply ?func ?args #t env c))
 	
-       ((?func . ?args)
-	(let ((transformer (and (symbol? ?func)
-				(lookup-macro-transformer ?func env))))
-	  (if transformer
-	      (conv (apply transformer ?args) env c)
-	      (conv-apply ?func ?args #f env c))))
+	  ((?func . ?args)
+	   (let ((transformer (and (symbol? ?func)
+				   (lookup-macro-transformer ?func env))))
+	     (if transformer
+		 (conv (apply transformer ?args) env c)
+		 (conv-apply ?func ?args #f env c))))
 
-       (else
-	(if (symbol? exp)
-	    (let ((var (lookup-variable exp env)))
-	      (if (cps-var? var)
-		  (c var)
-		  (let* ((result-var (genvar))
-			 (cont (c result-var)))
-		    (cps-gen-variable-ref result-var (cps-quote var)
-					  cont))))
-	    (c (cps-quote exp))))))
-  
+	  (else
+	   (if (symbol? exp)
+	       (let ((var (lookup-variable exp env)))
+		 (if (cps-var? var)
+		     (c var)
+		     (let* ((result-var (genvar))
+			    (cont (c result-var)))
+		       (cps-gen-variable-ref result-var (cps-quote var)
+					     cont))))
+	       (c (cps-quote exp)))))))
+
   ;; Apply C to a list cps-values that represent the results of
   ;; evaluating EXPS, a list of expressions.  C should return a
   ;; cps-instruction that consumes the cps-values.
@@ -516,11 +632,11 @@
      (union (cps-used-vars func)
 	    (map-union cps-used-vars args)))
 
-    ((cps-func label args restp debug-info body)
+    ((cps-func label args restp source parent-cont body)
      (let ((v (hashq-ref used-vars cps)))
        (or v
 	   (begin
-	     (let ((v (union (cps-used-vars debug-info)
+	     (let ((v (union (cps-used-vars parent-cont)
 			     (cps-used-vars body))))
 	       (hashq-set! used-vars cps v)
 	       v)))))
@@ -554,7 +670,7 @@
     ((cps-app func args restp)
      '())
 
-    ((cps-func label args restp debug-info body)
+    ((cps-func label args restp source parent-cont body)
      (union (list label)
 	    (union args
 		   (cps-bound-vars body))))
@@ -588,8 +704,8 @@
      (union (cps-used-vars func)
 	    (map-union cps-used-vars args)))
 
-    ((cps-func label args restp debug-info body)
-     (set-difference (union (cps-free-vars debug-info)
+    ((cps-func label args restp source parent-cont body)
+     (set-difference (union (cps-free-vars parent-cont)
 			    (cps-free-vars body))
 		     args))
 
@@ -621,7 +737,7 @@
     ((cps-app func args restp)
      '())
 
-    ((cps-func label args restp debug-info body)
+    ((cps-func label args restp source parent-cont body)
      (cps-modified-vars body))
 
     ((cps-fun func cont)
@@ -647,8 +763,8 @@
      (+ 1 (cps-count-nodes func)
 	(apply + (map cps-count-nodes args))))
 
-    ((cps-func label args restp debug-info body)
-     (+ 1 (cps-count-nodes body)))
+    ((cps-func label args restp source parent-cont body)
+     (+ 1 (cps-count-nodes parent-cont) (cps-count-nodes body)))
 
     ((cps-fun func cont)
      (+ 1 (cps-count-nodes cont)
@@ -664,16 +780,6 @@
 	(length results)
 	(apply + (map cps-count-nodes args))
 	(apply + (map cps-count-nodes conts))))))
-
-;;; Parameters
-
-(define-macro (define-param name)
-  `(define ,name (make-parameter #f)))
-
-(define-macro (with-param param-val . body)
-  (let* ((param-exp (car param-val))
-	 (value-exp (cadr param-val)))
-    `(call/p ,param-exp ,value-exp (lambda () ,@body))))
 
 ;;; Dynamic attributes
 
@@ -736,7 +842,7 @@
 	      (map cps-boxify args)
 	      restp))
 
-    ((cps-func label args restp debug-info body)
+    ((cps-func label args restp source parent-cont body)
 
      (define (make-boxing-body c)
        (let loop ((modified-args (intersection args
@@ -764,7 +870,7 @@
 				        (loop (cdr free))))))))))
 
      (cps-func label args restp
-	       (cps-boxify debug-info)
+	       source (cps-boxify parent-cont)
 	       (make-boxing-body 
 		(lambda ()
 		  (make-unboxing-body
@@ -793,19 +899,31 @@
 ;; Calling convention: all arguments are passed in registers, rest
 ;; arguments are handled during code generation.
 
-;; Create a closure record for CODE and VALUES, bind it to RESULT and
+;; Create a closure record for FUNC and VALUES, bind it to RESULT and
 ;; continue with CONT.  No type checking.
 ;;
-(define (cps-gen-make-closure result code values debug-info cont)
-  (let ((vector-var (genvar)))
+;; FUNC can be among the VALUES.  In that case, the freshly created
+;; closure record is used instead of FUNC.
+;;
+(define (cps-gen-make-closure result func values parent-cont cont)
+  (let ((vector-var (genvar))
+	(func-index (list-index values func)))
     (cps-primop 'vector
 		(list vector-var)
-		values
+		(map (lambda (v) (if (eq? v func) (cps-quote #f) v)) values)
 		(list (cps-primop 'record
 				  (list result)
 				  (list (cps-quote closure-type)
-					code vector-var debug-info)
-				  (list cont))))))
+					func vector-var parent-cont)
+				  (list (if func-index
+					    (cps-primop
+					     'vector-set
+					     (list (genvar))
+					     (list vector-var
+						   (cps-quote func-index)
+						   result)
+					     (list cont))
+					    cont)))))))
 
 ;; Get the code object out of the closure record CLOSURE and continue
 ;; with CONT.
@@ -830,10 +948,7 @@
 					 (cps-quote #f)
 					 closure)
 				   #f)
-			  (cps-primop 'syscall
-				      (list result)
-				      '()
-				      (list cont)))))))
+			  (cps-app (cps-quote #f) '() #f))))))
 
 ;; Put all values in the closure record CLOSURE into the VARIABLES and
 ;; continue with CONT.  No type checking.
@@ -871,13 +986,6 @@
 	closure
 	(cps-app code-var (cons closure converted-args) restp))))
 
-    ((cps-func label args restp debug-info body)
-     (cps-func label
-	       (map cps-closure-convert args)
-	       restp
-	       (cps-closure-convert debug-info)
-	       (cps-closure-convert body)))
-
     ((cps-fun func cont)
      (let* ((closure-arg (genvar))
 	    (closure-var (genvar))
@@ -895,6 +1003,7 @@
        (cps-fun (cps-func (cps-func-name func)
 			  (cons closure-arg (cps-func-args func))
 			  (cps-func-restp func)
+			  (cps-func-source func)
 			  #f
 			  (do-closure
 			   (lambda ()
@@ -903,7 +1012,7 @@
 				      (cps-func-name func)
 				      (map cps-closure-convert free-vars)
 				      (cps-closure-convert
-				       (cps-func-debug-info func))
+				       (cps-func-parent-cont func))
 				      (with-attr (cps-replacement
 						  (cps-func-name func)
 						  closure-var)
@@ -949,14 +1058,14 @@
 	      (map cps-register-allocate args)
 	      restp))
     
-    ((cps-func label args restp debug-info body)
+    ((cps-func label args restp source parent-cont body)
      (with-param (cps-next-register 1)
        (allocate-regs args
 		      (lambda ()
 			(cps-func label
 				  (map cps-register-allocate args)
 				  restp
-				  debug-info
+				  source parent-cont
 				  (cps-register-allocate body))))))
     
     ((cps-fun func cont)
@@ -997,15 +1106,19 @@
      cps)
 
     ((cps-app func args restp)
-     (cps-asm-shuffle (cps-asm-context)
-		      (append (list (cps-quote (call-signature args restp)))
-			      (map cps-code-generate args)
-			      (list (cps-code-generate func)))
-		      (map cps-reg (iota (+ (length args) 2))))
-     (cps-asm-go (cps-asm-context) (cps-reg (+ (length args) 1))))
+     (if (and (cps-quote? func) (not (cps-quote-value func)))
+	 (cps-asm-panic (cps-asm-context))
+	 (begin
+	   (cps-asm-shuffle (cps-asm-context)
+			    (append (list 
+				     (cps-quote (call-signature args restp)))
+				    (map cps-code-generate args)
+				    (list (cps-code-generate func)))
+			    (map cps-reg (iota (+ (length args) 2))))
+	   (cps-asm-go (cps-asm-context) (cps-reg (+ (length args) 1))))))
 
-    ((cps-func label args restp debug-info body)
-     (let ((ctxt (cps-asm-make-context)))
+    ((cps-func label args restp source parent-cont body)
+     (let ((ctxt (cps-asm-make-context source)))
        (cps-asm-prologue ctxt (call-signature args restp))
        (with-param (cps-asm-context ctxt)
          (cps-code-generate body))
@@ -1036,9 +1149,10 @@
 (define (cps-dbg tag cps)
   (cond (cps-verbose
 	 (pk tag)
-	 (cps-print cps))))
+	 (cps-print-stat cps 0)
+	 (newline))))
 
-(define (cps-compile cps debug-info)
+(define (cps-compile cps)
   (cps-dbg 'cps cps)
   (set! used-vars-calls 0)
   (let ((boxed (cps-boxify cps)))
@@ -1051,13 +1165,14 @@
 	(record closure-type
 		(cps-code-generate regs)
 		#()
-		debug-info)))))
+		#f)))))
 
 ;; Takes EXP and returns a new expression that has the same effect as
 ;; EXP when evaluated.
 
 (define (compile exp)
+  (set! genvar-counter 0)
   (let ((exp (macroexpand exp)))
     (if (and (pair? exp) (eq? (car exp) :lambda))
-	`(:quote ,(cps-compile (cps-convert exp) exp))
+	`(:quote ,(cps-compile (cps-convert exp)))
 	exp)))

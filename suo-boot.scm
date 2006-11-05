@@ -64,6 +64,7 @@
    (lambda (k)
      (with-error-handler
       (lambda args
+	(:call/cc trace-conts)
 	(apply display-error args)
 	(k #f))
       (lambda ()
@@ -91,6 +92,24 @@
     #t))
 
 (set-wrong-num-args-hook)
+
+(define (trace-conts k)
+  (if (closure? k)
+      (let ((src (code-debug-info (closure-code k))))
+	(if (not (or (eq? src 'call/cc) (eq? src 'call/v)))
+	    (pk src))
+	(trace-conts (closure-debug-info k)))))
+
+(define (loop)
+  (:primitive get-reg (res) (-7)
+	      ((:primitive set-reg (unused) (-7 #f)
+			   ((if res (res))))))
+  (loop))
+
+(define (loop)
+  (:primitive get-reg (res) (-7)
+	      ((if res (res))))
+  (loop))
 
 (display (length toplevel))
 (display " toplevel bindings\n")

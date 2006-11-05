@@ -52,7 +52,10 @@
 (define (compile-minimal)
   (boot-eval '(set! cps-verbose #t))
   (make-bootstrap-image
-   '12
+   '(begin
+      (primop syscall 0 1)
+      (primop syscall 0 2)
+      12)
    "minimal"))
 
 (compile-compiler)
