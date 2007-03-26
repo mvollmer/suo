@@ -68,9 +68,9 @@
 
 (define-record cps-reg idx)
 
-(define-record cps-app func args restp)
+(define-record cps-app func args restp contp)
 
-(define-record cps-func name args restp source parent-cont body)
+(define-record cps-func name args restp contp source parent-cont body)
 
 (define-record cps-fix funcs cont)
 
@@ -99,10 +99,10 @@
 	  ((cps-reg idx)
 	   idx)
 	  
-	  ((cps-app func args restp)
+	  ((cps-app func args restp contp)
 	   `(app ,(cps-render func)
 		 ,@(map cps-render args)
-		 ,restp))
+		 ,restp ,contp))
 	  
 	  ((cps-fix funcs cont)
 	   `(fix ,(map cps-render funcs)
@@ -112,10 +112,10 @@
 	   `(fun ,(cps-render func)
 		 ,(cps-render cont)))
 	  
-	  ((cps-func name args restp source parent-cont body)
+	  ((cps-func name args restp contp source parent-cont body)
 	   `(,(cps-render name)
 	     ,(map cps-render args)
-	     ,restp
+	     ,restp ,contp
 	     ,(cps-render parent-cont)
 	     ,(cps-render body)))
 	  
@@ -169,11 +169,14 @@
 
   (record-case obj
 
-    ((cps-app func args restp)
+    ((cps-app func args restp contp)
      (nl)
+     (display "(app")
      (if restp
-	 (display "(app* ")
-	 (display "(app "))
+	 (display "*"))
+     (if contp
+	 (display "@"))
+     (display " ")
      (cps-print-val func)
      (for-each (lambda (a)
 		 (display " ")
@@ -181,6 +184,13 @@
 	       args)
      (display ")"))
 	  
+    ((cps-func name args restp contp source parent-cont body)
+     (nl)
+     (cps-print-val name)
+     (display " ")
+     (print-val-list args restp)
+     (cps-print-stat body (+ indent 6)))
+
     ((cps-fun func cont)
      (nl)
      (display "(fun (")
@@ -353,13 +363,13 @@
     (pk 'all--calls (list->vector all-calls))
     (pk 'all--clos (apply + all-calls))))
 
-(define (cps-func* label args restp source parent-cont body)
+(define (cps-func* label args restp contp source parent-cont body)
   (log-signature (length args) restp)
-  (cps-func label args restp source parent-cont body))
+  (cps-func label args restp contp source parent-cont body))
 
-(define (cps-app* func args restp)
+(define (cps-app* func args restp contp)
   (log-call (length args) restp)
-  (cps-app func args restp))
+  (cps-app func args restp contp))
 
 (define cps-source (make-parameter #f))
 (define cps-parent-cont (make-parameter #f))
@@ -393,13 +403,13 @@
 	   (body-env (extend-env* flat-args arg-vars env)))
       (cps-func* func-label
 		(cons* cont-arg arg-vars)
-		restp
+		restp #f
 		(cps-source) (cps-quote #f)
 		(with-param (cps-parent-cont cont-arg)
 		  (conv (cons :begin body)
 			body-env
 			(lambda (z)
-			  (cps-app* cont-arg (list z) #f)))))))
+			  (cps-app* cont-arg (list z) #f #t)))))))
 
   (define (is-tail-call? obj result-var)
     ;; must be of the form (app K (result-var) #f)
@@ -421,7 +431,7 @@
 	  (z (tail-call-cont cont-body))
 	  (cps-fun (cps-func* cont-label
 			     (list result-var)
-			     #f
+			     #f #t
 			     source
 			     (cps-parent-cont)
 			     cont-body)
@@ -437,7 +447,7 @@
 				  (lambda (z-cont)
 				    (cps-app* z-func
 					      (cons* z-cont z-args)
-					      restp)))))))))
+					      restp #f)))))))))
 
   (define (conv-call/v producer consumer env c)
     (let ((source (cps-source)))
@@ -452,15 +462,15 @@
 			       (results (genvar)))
 			   (cps-fun (cps-func* producer-cont
 					       (list results)
-					       #t
+					       #t #t
 					       'call/v z-cont
 					       (cps-app* z-consumer
 							 (list z-cont
 							       results)
-							 #t))
+							 #t #f))
 				    (cps-app* z-producer
 					      (list producer-cont)
-					      #f)))))))))))
+					      #f #f)))))))))))
 
   (define (conv-call/cc func env c)
     (let ((source (cps-source))
@@ -474,14 +484,14 @@
 			   (cps-fun (cps-func* cont-func-label
 					      (list cont-func-cont
 						    cont-func-args)
-					      #t
+					      #t #f
 					      'call/cc z-cont
 					      (cps-app* z-cont
 						       (list cont-func-args)
-						       #t))
+						       #t #t))
 				    (cps-app* z-func
 					     (list z-cont cont-func-label)
-					     #f))))))))
+					     #f #f))))))))
 
   (define (conv-primitive type results args conts env c)
     (let ((source (cps-source)))
@@ -500,7 +510,7 @@
 				  (let ((app-c (lambda (z)
 						 (cps-app* z-cont
 							   (list z)
-							   #f))))
+							   #f #t))))
 				    (cps-primop 
 				     type
 				     result-vars
@@ -614,12 +624,7 @@
 (define (map-union func list)
   (union* (map func list)))
 
-(define used-vars-calls 0)
-
-(define used-vars (make-hash-table 103100))
-
 (define (cps-used-vars cps)
-  (set! used-vars-calls (1+ used-vars-calls))
   (record-case cps
 
     ((cps-var)
@@ -628,25 +633,17 @@
     ((cps-quote val)
      '())
 
-    ((cps-app func args restp)
+    ((cps-app func args restp contp)
      (union (cps-used-vars func)
 	    (map-union cps-used-vars args)))
 
-    ((cps-func label args restp source parent-cont body)
-     (let ((v (hashq-ref used-vars cps)))
-       (or v
-	   (begin
-	     (let ((v (union (cps-used-vars parent-cont)
-			     (cps-used-vars body))))
-	       (hashq-set! used-vars cps v)
-	       v)))))
+    ((cps-func label args restp contp source parent-cont body)
+     (union (cps-used-vars parent-cont)
+	    (cps-used-vars body)))
 
     ((cps-fun func cont)
-     (let ((used
-	    (union (cps-used-vars cont)
-		   (cps-used-vars func))))
-       (pk 'used (cps-render (cps-func-name func)) (length used))
-       used))
+     (union (cps-used-vars cont)
+	    (cps-used-vars func)))
 
     ((cps-set var value cont)
      (union (cps-used-vars value)
@@ -655,8 +652,6 @@
     ((cps-primop type results args conts)
      (union (map-union cps-used-vars args)
 	    (map-union cps-used-vars conts)))))
-
-(define bound-vars (make-hash-table 103100))
 
 (define (cps-bound-vars cps)
   (record-case cps
@@ -667,22 +662,17 @@
     ((cps-quote val)
      '())
 
-    ((cps-app func args restp)
+    ((cps-app func args restp contp)
      '())
 
-    ((cps-func label args restp source parent-cont body)
+    ((cps-func label args restp contp source parent-cont body)
      (union (list label)
 	    (union args
 		   (cps-bound-vars body))))
 
     ((cps-fun func cont)
-     (let ((v (hashq-ref bound-vars cps)))
-       (or v
-	   (begin
-	     (let ((v (union (cps-bound-vars cont)
-			     (cps-bound-vars func))))
-	       (hashq-set! bound-vars cps v)
-	       v)))))
+     (union (cps-bound-vars cont)
+	    (cps-bound-vars func)))
 
     ((cps-set var value cont)
      (cps-bound-vars cont))
@@ -700,11 +690,11 @@
     ((cps-quote val)
      '())
 
-    ((cps-app func args restp)
+    ((cps-app func args restp contp)
      (union (cps-used-vars func)
 	    (map-union cps-used-vars args)))
 
-    ((cps-func label args restp source parent-cont body)
+    ((cps-func label args restp contp source parent-cont body)
      (set-difference (union (cps-free-vars parent-cont)
 			    (cps-free-vars body))
 		     args))
@@ -722,9 +712,6 @@
 			    (map-union cps-free-vars conts))
 		     results))))
   
-(define (cps-free-vars-2 cps)
-  (set-difference (cps-used-vars cps) (cps-bound-vars cps)))
-
 (define (cps-modified-vars cps)
   (record-case cps
 
@@ -734,10 +721,10 @@
     ((cps-quote val)
      '())
 
-    ((cps-app func args restp)
+    ((cps-app func args restp contp)
      '())
 
-    ((cps-func label args restp source parent-cont body)
+    ((cps-func label args restp contp source parent-cont body)
      (cps-modified-vars body))
 
     ((cps-fun func cont)
@@ -759,11 +746,11 @@
     ((cps-quote val)
      1)
 
-    ((cps-app func args restp)
+    ((cps-app func args restp contp)
      (+ 1 (cps-count-nodes func)
 	(apply + (map cps-count-nodes args))))
 
-    ((cps-func label args restp source parent-cont body)
+    ((cps-func label args restp contp source parent-cont body)
      (+ 1 (cps-count-nodes parent-cont) (cps-count-nodes body)))
 
     ((cps-fun func cont)
@@ -837,12 +824,12 @@
     ((cps-quote)
      cps)
 
-    ((cps-app func args restp)
+    ((cps-app func args restp contp)
      (cps-app (cps-boxify func)
 	      (map cps-boxify args)
-	      restp))
+	      restp contp))
 
-    ((cps-func label args restp source parent-cont body)
+    ((cps-func label args restp contp source parent-cont body)
 
      (define (make-boxing-body c)
        (let loop ((modified-args (intersection args
@@ -869,7 +856,7 @@
 								  val-var)
 				        (loop (cdr free))))))))))
 
-     (cps-func label args restp
+     (cps-func label args restp contp
 	       source (cps-boxify parent-cont)
 	       (make-boxing-body 
 		(lambda ()
@@ -883,7 +870,7 @@
 
     ((cps-set var value cont)
      (let ((box (cps-box-of var)))
-       (cps-gen-box-set box value
+       (cps-gen-box-set box (cps-boxify value)
 			(with-attr (cps-replacement var value)
 			  (cps-boxify cont)))))
 
@@ -926,29 +913,38 @@
 					    cont)))))))
 
 ;; Get the code object out of the closure record CLOSURE and continue
-;; with CONT.
+;; with CONT.  When ERROR-CONT is true, the generated code will check
+;; that CLOSURE is actually a closure record, and ERROR-CONT is used
+;; as the continuation for the call to 'error:not-a-closure'.  (This
+;; continuation is never invoked, but it is used to generate a
+;; backtrace.)
 ;;
-(define (cps-gen-closure-ref-code result closure cont)
-  (let* ((error-closure (record-ref 
-			 (lookup-toplevel-variable 'error:not-a-closure)
-			 0))
-	 (error-code (if (eq? error-closure (if #f #f))
-			 #f
-			 (record-ref error-closure 0))))
-    (cps-primop 'if-record?
-		'()
-		(list closure (cps-quote closure-type))
-		(list (cps-primop 'record-ref
-				  (list result)
-				  (list closure (cps-quote 0))
-				  (list cont))
-		      (if error-code
-			  (cps-app (cps-quote error-code)
-				   (list (cps-quote error-closure)
-					 (cps-quote #f)
-					 closure)
-				   #f)
-			  (cps-app (cps-quote #f) '() #f))))))
+(define (cps-gen-closure-ref-code result closure error-cont cont)
+  (if error-cont
+      (let* ((error-closure (record-ref 
+			     (lookup-toplevel-variable 'error:not-a-closure)
+			     0))
+	     (error-code (if (eq? error-closure (if #f #f))
+			     #f
+			     (record-ref error-closure 0))))
+	(cps-primop 'if-record?
+		    '()
+		    (list closure (cps-quote closure-type))
+		    (list (cps-primop 'record-ref
+				      (list result)
+				      (list closure (cps-quote 0))
+				      (list cont))
+			  (if error-code
+			      (cps-app (cps-quote error-code)
+				       (list (cps-quote error-closure)
+					     error-cont
+					     closure)
+				       #f #f)
+			      (cps-app (cps-quote #f) '() #f #f)))))
+      (cps-primop 'record-ref
+		  (list result)
+		  (list closure (cps-quote 0))
+		  (list cont))))
 
 ;; Put all values in the closure record CLOSURE into the VARIABLES and
 ;; continue with CONT.  No type checking.
@@ -977,14 +973,18 @@
     ((cps-quote)
      cps)
 
-    ((cps-app func args restp)
+    ((cps-app func args restp contp)
      (let ((closure (cps-closure-convert func))
 	   (converted-args (map cps-closure-convert args))
 	   (code-var (genvar)))
        (cps-gen-closure-ref-code
 	code-var
 	closure
-	(cps-app code-var (cons closure converted-args) restp))))
+	(if contp
+	    #f                          ; We trust continuation parameters.
+	    (car converted-args))       ; For user functions the first
+					; arg is the continuation.
+	(cps-app code-var (cons closure converted-args) restp contp))))
 
     ((cps-fun func cont)
      (let* ((closure-arg (genvar))
@@ -1003,6 +1003,7 @@
        (cps-fun (cps-func (cps-func-name func)
 			  (cons closure-arg (cps-func-args func))
 			  (cps-func-restp func)
+			  (cps-func-contp func)
 			  (cps-func-source func)
 			  #f
 			  (do-closure
@@ -1026,7 +1027,14 @@
 
 ;;; Register allocation
 
-;; Callig convention: all arguments as a list.
+(define cps-registers (let ((v (make-vector 256 #f)))
+			(do ((i 0 (1+ i)))
+			    ((= i 256) v)
+			  (vector-set! v i (cps-reg i)))))
+
+
+(define (get-reg idx)
+  (vector-ref cps-registers idx))
 
 (define-param cps-next-register)
 
@@ -1042,7 +1050,7 @@
 		 (cont))))
 	    (else
 	     (loop (1+ idx)
-		   (cons (cps-reg idx) regs)
+		   (cons (get-reg idx) regs)
 		   (cdr rest))))))
 
   (record-case cps
@@ -1053,18 +1061,18 @@
     ((cps-quote)
      cps)
     
-    ((cps-app func args restp)
+    ((cps-app func args restp contp)
      (cps-app (cps-register-allocate func)
 	      (map cps-register-allocate args)
-	      restp))
+	      restp contp))
     
-    ((cps-func label args restp source parent-cont body)
+    ((cps-func label args restp contp source parent-cont body)
      (with-param (cps-next-register 1)
        (allocate-regs args
 		      (lambda ()
 			(cps-func label
 				  (map cps-register-allocate args)
-				  restp
+				  restp contp
 				  source parent-cont
 				  (cps-register-allocate body))))))
     
@@ -1088,6 +1096,24 @@
 
 (define-param cps-asm-context)
 
+(define (cps-alloc-size cps)
+  
+  (record-case cps
+
+    ((cps-app func args restp contp)
+     0)
+
+    ((cps-fun func cont)
+     (cps-alloc-size cont))
+
+    ((cps-primop type results args conts)
+     (let* ((size (cps-primitive-alloc-size type args)))
+       (if (eq? size #t)
+	   0
+	   (+ size (apply max (map cps-alloc-size conts))))))))
+
+(define-param cps-need-alloc-check)
+
 (define (cps-code-generate cps)
 
   (define (call-signature args restp)
@@ -1105,7 +1131,7 @@
     ((cps-quote)
      cps)
 
-    ((cps-app func args restp)
+    ((cps-app func args restp contp)
      (if (and (cps-quote? func) (not (cps-quote-value func)))
 	 (cps-asm-panic (cps-asm-context))
 	 (begin
@@ -1114,12 +1140,14 @@
 				     (cps-quote (call-signature args restp)))
 				    (map cps-code-generate args)
 				    (list (cps-code-generate func)))
-			    (map cps-reg (iota (+ (length args) 2))))
-	   (cps-asm-go (cps-asm-context) (cps-reg (+ (length args) 1))))))
+			    (map get-reg (iota (+ (length args) 2))))
+	   (cps-asm-go (cps-asm-context) (get-reg (+ (length args) 1))))))
 
-    ((cps-func label args restp source parent-cont body)
+    ((cps-func label args restp contp source parent-cont body)
      (let ((ctxt (cps-asm-make-context source)))
-       (cps-asm-prologue ctxt (call-signature args restp))
+       (cps-asm-prologue ctxt
+			 (call-signature args restp)
+			 (cps-alloc-size body))
        (with-param (cps-asm-context ctxt)
          (cps-code-generate body))
        (cps-asm-finish ctxt)))
@@ -1134,11 +1162,18 @@
 	    (results (map cps-code-generate results))
 	    (args (map cps-code-generate args))
 	    (extra-cont-labels (map (lambda (cont) (cps-asm-make-label ctxt))
-				    (cdr conts))))
-       (cps-asm-primop ctxt type results args extra-cont-labels)
+				    (cdr conts)))
+	    (alloc-size (cps-primitive-alloc-size type args)))
+       (cps-primitive-asm ctxt type results args extra-cont-labels)
+       (if (eq? alloc-size #t)
+	   (cps-asm-alloc-check ctxt (cps-alloc-size (car conts)) #f))
        (cps-code-generate (car conts))
        (for-each (lambda (cont label)
 		   (cps-asm-def-label ctxt label)
+		   (if (eq? alloc-size #t)
+		       (cps-asm-alloc-check ctxt
+					    (cps-alloc-size (car conts))
+					    #f))
 		   (cps-code-generate cont))
 		 (cdr conts) extra-cont-labels)))))
 
@@ -1154,7 +1189,6 @@
 
 (define (cps-compile cps)
   (cps-dbg 'cps cps)
-  (set! used-vars-calls 0)
   (let ((boxed (cps-boxify cps)))
     (cps-dbg 'boxed boxed)
     (let ((clos (cps-closure-convert boxed)))

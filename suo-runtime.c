@@ -61,6 +61,8 @@ void
 unswizzle_objects (val *mem, size_t off, word n)
 {
   int count = 0;
+  int n_pairs = 0, n_vectors = 0, n_records = 0;
+  int n_bytevecs = 0, n_codes = 0, n_odds = 0;
 
   val *ptr;
   for (ptr = mem; ptr < mem + n;)
@@ -81,6 +83,7 @@ unswizzle_objects (val *mem, size_t off, word n)
 	      *ptr = UNSWIZZLE (*ptr, off);
 	      val *desc = (val *)(*ptr & ~3);
 	      type = "record";
+	      n_records++;
 	      size = ((sword)desc[1]) >> 2;
 	    }
 	  else
@@ -89,18 +92,21 @@ unswizzle_objects (val *mem, size_t off, word n)
 	      if ((v & 15) == 3)
 		{
 		  type = "vector";
+		  n_vectors++;
 		  size = v >> 4;
 		}
 	      else if ((v & 15) == 11)
 		{
 		  /* bytevec header */
 		  type = "bytevec";
+		  n_bytevecs++;
 		  size = -(((v >> 4) + 3) / 4);
 		}
 	      else if ((v & 15) == 15)
 		{
 		  /* code header */
 		  type = "code";
+		  n_codes++;
 		  size = (v >> 4) & 0xFF;
 		  ptr += (v >> 12);
 		}
@@ -114,6 +120,7 @@ unswizzle_objects (val *mem, size_t off, word n)
 	{
 	  /* pair */
 	  type = "pair";
+	  n_pairs++;
 	  size = 2;
 	}
 
@@ -121,6 +128,9 @@ unswizzle_objects (val *mem, size_t off, word n)
 
       if (size > 0)
 	{
+	  if (size % 2)
+	    n_odds++;
+
 	  while (size > 0)
 	    {
 	      val v = *ptr;
@@ -135,8 +145,16 @@ unswizzle_objects (val *mem, size_t off, word n)
     }
 
   if (verbose)
-    fprintf (stderr, "booting with %d objects, %d words.\n",
-	     count, ptr - mem);
+    {
+      fprintf (stderr, "booting with %d objects, %d words.\n",
+	       count, ptr - mem);
+      fprintf (stderr, "(%g words per object average)\n",
+	       ((double)(ptr - mem)) / count);
+      fprintf (stderr, "(%d pairs, %d vectors, %d records,\n",
+	       n_pairs, n_vectors, n_records);
+      fprintf (stderr, " %d bytevecs, %d codes, %d odd sized)\n",
+	       n_bytevecs, n_codes, n_odds);
+    }
 }
 
 /* The GC.  It must use only a constant amount of space in addition to
@@ -353,7 +371,14 @@ gc (word *params)
   val *ptr;
   size_t count;
   word lr_off = params[GCPAR_LR] - params[GCPAR_R15];
-  word size = params[GCPAR_R16] - params[GCPAR_R4];
+  word size = params[GCPAR_R4] - params[GCPAR_R16];
+
+  if (params[GCPAR_R17] == 0)
+    {
+      fprintf (stderr, "INTERRUPT\n");
+      params[GCPAR_R17] = spaces[active_space] + SPACE_SIZE;
+      return params;
+    }
 
   gc_count++;
 
@@ -377,8 +402,8 @@ gc (word *params)
 	     count, to_ptr - to_space, (to_ptr - to_space)*100.0/SPACE_SIZE);
 
   params[GCPAR_LR] = params[GCPAR_R15] + lr_off;
-  params[GCPAR_R4] = (word)to_ptr;
-  params[GCPAR_R16] = (word)(to_ptr + size);
+  params[GCPAR_R4] = (word)(to_ptr + size);
+  params[GCPAR_R16] = (word)to_ptr;
   params[GCPAR_R17] = (word)(to_space + SPACE_SIZE);
 
   if (params[GCPAR_R16] > params[GCPAR_R17])
@@ -666,6 +691,64 @@ dump (val v)
     }
 }
 
+char
+type_code (val tag_word)
+{
+  if ((tag_word & 3) == 3)
+    {
+      /* non-pair header */
+      if (((sword)(tag_word)) >= 0)
+	{
+	  /* record header */
+	  return 'r';
+	}
+      else
+	{
+	  tag_word &= ~ 0x80000000;
+	  if ((tag_word & 15) == 3)
+	    return 'v';
+	  else if ((tag_word & 15) == 11)
+	    return 'b';
+	  else if ((tag_word & 15) == 15)
+	    return 'c';
+	  else
+	    abort ();
+	}
+    }
+  else
+    return 'p';
+}
+
+void
+dump_arg (val v)
+{
+  if ((v & 3) == 1)
+    fprintf (stderr, " %d", ((sword)v) >> 2);
+  else if ((v & 7) == 6)
+    fprintf (stderr, " #\\%c", ((sword)v) >> 3);
+  else if (v == 2)
+    fprintf (stderr, " nil");
+  else if (v == 10)
+    fprintf (stderr, " #t");
+  else if (v == 18)
+    fprintf (stderr, " #f");
+  else if (v == 26)
+    fprintf (stderr, " unspec");
+  else if ((v & 3) == 0)
+    {
+      val t = *(val *)v;
+      if ((t & 0x8000000f) == 0x8000000b)
+	{
+	  val l = (t & ~0x80000000) >> 4;
+	  fprintf (stderr, " \"%.*s\"", l, ((val *)v)+1);
+	}
+      else
+	fprintf (stderr, " %c", type_code (t));
+    }
+  else
+    fprintf (stderr, " ?");
+}
+
 val
 sys (int n_args,
      val arg1, val arg2, val arg3, val arg4, val arg5, val arg6, val arg7)
@@ -743,12 +826,24 @@ sys (int n_args,
       suspend (arg2);
       return 10;
     }
+  else if (arg1 == ((11<<2)|1))
+    {
+      /* argdump */
+      int i, n;
+
+      n = ((regs[0]>>2)+1)>>1;
+      fprintf (stderr, "ARGS:");
+      for (i = 1; i < n+1; i++)
+	dump_arg (regs[i]);
+      fprintf (stderr, "\n");
+      return 10;
+    }
 
   fprintf (stderr, "syscall");
   if (n_args > 0)
-    dump (arg1);
+    dump_arg (arg1);
   if (n_args > 1)
-    dump (arg2);
+    dump_arg (arg2);
   if (n_args > 2)
     dump (arg3);
   if (n_args > 3)
@@ -802,11 +897,11 @@ go (val closure, val *free, val *end)
 }
 
 void
-sighandler (int sig)
+sighandler (int sig, struct sigcontext *ctxt)
 {
-  write (2, "SIG\n", 4);
-  regs[-7] = regs[-8];
-  signal (sig, sighandler);
+  printf ("INT\n");
+  ctxt->regs->gpr[17] = 0;
+  signal (sig, (void (*) (int))sighandler);
 }
 
 void
@@ -879,7 +974,7 @@ main (int argc, char **argv)
 
   find_markers (space, n/4);
 
-  signal (SIGINT, sighandler);
+  signal (SIGINT, (void (*) (int))sighandler);
 
   go (((val)space) + head.start - head.origin,
       space + n/4, space + SPACE_SIZE);

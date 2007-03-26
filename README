@@ -1,15 +1,19 @@
 This might at one time be SUO
 -----------------------------
 
-Suo is the name I have picked for yet another crazy attempt at
-implementing something Schemish.  This time it's an exercise in
-resisting the urge at premature optimization.  There will be no
-significant trickery until the system is big enough so that one can
-meaningfully measure the influence of certain optimization approaches.
-However, a second goal is to use as little external dependencies as
-possible.  That's why the compiler is going to directly generate
-machine code: not so much to get good performance, but to get close to
-the hardware.
+Suo is yet another crazy attempt at implementing something Schemish.
+This time it's an exercise in resisting the urge at premature
+optimization.  The plan was to have no significant trickery until the
+system is big enough so that one can meaningfully measure the
+influence of certain optimization approaches.
+
+This point has been reached; suo can compile its own compiler and can
+now grow bigger and smarter.
+
+The goal right now is to create something similar in spirit to the
+early hobbyist computers, like the C64, but with Scheme instead of
+basic, and running as a program on Unixy operating systems instead of
+directly on dedicated hardware.
 
 
 The name
@@ -25,11 +29,16 @@ project that likely is not going anywhere fast...
 Design notes
 ------------
 
-Suo will run as a Unix process.
+Suo will run as a Unix process and implement a traditional 'self
+modifying image' environment.  Everything is supposed to happen in the
+image; there are no fasl files, for example, and the suo operating
+system interface will not offer access to the file system at all.  A
+suo session can be suspended to disk and resumed.
 
 Everything starts with the definiton of the run-time type system and
 memory management.  First, there will be a simple single-generation
 copying GC that manages all memory except a small set of 'registers'.
+Later on, a generational copying GC is planned.
 
 - Immediates
   - Fixnums
@@ -119,48 +128,14 @@ The GC will initially be a simple copying one with two semi-spaces.
 
 The run-time will be written in C. It can suspend to disk and has
 simple IO.  Calls into the runtime will use the C calling convention.
-The following calls will initially be available:
-
-  - void gc (void);
-  - void suspend (void);
-  - fixnum read (fixnum fd, bytevec buf, fixnum n);
-  - fixnum write (fixnum fd, bytevec buf, fixnum n);
-
-
-The compiler will initially have these passes:
-
-  - conversion to continuation passing style
-  - closure conversion
-  - register allocation
-
-There will be no register spilling.  Instead, we will have an insane
-amount of registers that might even be run-time adjustable.  (Those
-registers are not in the CPU, of course.)
-
-The first version of the compiler will be a cross-compiler that runs
-in Guile and produces a memory image for the run-time.  Once the
-system is able to run its own compiler, the compiler will be able to
-run both in Suo as well as in Guile.
-
-X86 SPECIFICS
-
-- EBP points to 256 registers (positive offsets) and a couple special
-  ones (negative offsets).  The special registers are:
-
-  -1: syscall entry point, address of a C function that carries out
-      the syscalls.
-
-- ESI points to current code object
-
-- EDI points to the next free byte in the current semi-space
-
 
 PPC SPECIFICS
 
-The PowerPC has enough registers to use some of them fr CPS registers.
-We don't do this right now, tho, because the indirect approach is
-simpler and more uniform.  Syscalls are calls to C functions and we
-make this easy by staying within the rules of the PPC32 ABI.
+The PowerPC has enough registers to use some of them for CPS
+registers.  We don't do this right now, tho, because the indirect
+approach is simpler and more uniform.  Syscalls are calls to C
+functions and we make this easy by staying within the rules of the
+PPC32 ABI.
 
 r0 has some funny semantics that I don't understand and thus it is not
 used.  (Some instructions treat r0 as constant zero but not all. I

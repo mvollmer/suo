@@ -188,10 +188,6 @@
 
 (define suo:record? (record-predicate suo-record-record-type))
 
-(define (suo:record-with-type? obj type)
-  (and (suo:record? obj)
-       (eq? (suo:record-type obj) type)))
-
 (define (suo:record-length rec)
   (suo:record-ref (suo:record-type rec) 0))
 
@@ -217,12 +213,46 @@
 
 (define suo-record-set-type! (record-modifier suo-record-record-type 'type))
 
-(define suo:record-type-type (suo:record #f 2 'record-type))
+;; The type of record types.  It has three fields:
+;;
+;; n-fields - the number of fields as a fixnum
+;; name     - a arbitrary symbol used when printing, etc.
+;; ancestry - a vector with all parent types; see below for details
+;;
+;; The '(is-a OBJ TYPE)' relation consists in determining whether TYPE
+;; is among the types in the 'ancestry' vector of the type of OBJ.
+;; Since only single-inheritance is supported, the test doesn't
+;; require searching all of the ancestry vector.  If it is in the
+;; ancestry it can only be in one position and we can check that
+;; position directly.
+;;
+;; More concretely, the ancestry vector lists the parent types starting
+;; with the root type at position zero and ending with the type it
+;; belongs to in the last position.
+
+(define suo:record-type-type (suo:record #f 3 'record-type (vector #f)))
 (suo-record-set-type! suo:record-type-type
 		      suo:record-type-type)
+(vector-set! (suo:record-ref suo:record-type-type 2) 0 suo:record-type-type)
 
-(define (suo:make-record-type n-fields name)
-  (suo:record suo:record-type-type n-fields name))
+(define (suo:record-with-type? obj type)
+  (and (suo:record? obj)
+       (eq? (suo:record-type obj) type)))
+
+(define (suo:record-is-a? obj type)
+  (and (suo:record? obj)
+       (let ((ancestry (suo:record-ref (suo:record-type obj) 2))
+	     (pos (1- (vector-length (suo:record-ref type 2)))))
+	 (and (< pos (vector-length ancestry))
+	      (eq? type (vector-ref ancestry pos))))))
+
+(define (suo:make-record-type n-fields name parent-type)
+  (if parent-type
+      (error "inheritance not supported"))
+  (let* ((ancestry (vector #f))
+	 (type (suo:record suo:record-type-type n-fields name ancestry)))
+    (vector-set! ancestry 0 type)
+    type))
 
 (boot-import record? record-with-type?
 	     record-type record-length record-ref record-set!
@@ -249,21 +279,21 @@
 ;;; in "suo-base" since we need them to be identical (i.e., 'eq?') in
 ;;; the boot environment and the image environment.  See below.
 
-(define suo:box-type (suo:make-record-type 1 'box))
+(define suo:box-type (suo:make-record-type 1 'box #f))
 
-(define suo:variable-type (suo:make-record-type 2 'variable))
+(define suo:variable-type (suo:make-record-type 2 'variable #f))
 
-(define suo:macro-type (suo:make-record-type 2 'macro))
+(define suo:macro-type (suo:make-record-type 2 'macro #f))
 
-(define suo:closure-type (suo:make-record-type 3 'closure))
+(define suo:closure-type (suo:make-record-type 3 'closure #f))
 
-(define suo:string-type (suo:make-record-type 1 'string))
+(define suo:string-type (suo:make-record-type 1 'string #f))
 
-(define suo:symbol-type (suo:make-record-type 1 'symbol))
+(define suo:symbol-type (suo:make-record-type 1 'symbol #f))
 
-(define suo:keyword-type (suo:make-record-type 1 'keyword))
+(define suo:keyword-type (suo:make-record-type 1 'keyword #f))
 
-(define suo:bignum-type (suo:make-record-type 1 'bignum))
+(define suo:bignum-type (suo:make-record-type 1 'bignum #f))
 
 (boot-import box-type variable-type macro-type closure-type
              string-type symbol-type keyword-type bignum-type)
@@ -314,6 +344,14 @@
 (boot-import make-bytevec bytevec?
 	     bytevec-length-8 bytevec-ref-u8 bytevec-set-u8!
 	     bytevec-length-16 bytevec-ref-u16 bytevec-set-u16!)
+
+;; string-chars is used for low-level debugging.  It returns a bytevec
+;; with the characters of the given string.
+
+(define (suo:string-chars str)
+  (list->u8vector (map char->integer (string->list str))))
+
+(boot-import string-chars)
 
 ;;; Miscellaneous definitions for the boot environment
 
@@ -557,9 +595,11 @@
 
 (boot-import bootinfo)
 
-(define (suo-fixnum? n)
+(define (suo:fixnum? n)
   (and (integer? n)
        (<= -536870912 n 536870911)))
+
+(boot-import fixnum?)
 
 (define (integer->bignum x)
 
@@ -707,7 +747,7 @@
       (cond
        ((eq? obj bootinfo-marker)
 	#f)
-       ((suo-fixnum? obj)
+       ((suo:fixnum? obj)
 	(+ (* 4 obj)
 	   (if (< obj 0) #x100000000 0)
 	   1))

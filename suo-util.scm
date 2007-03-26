@@ -23,8 +23,8 @@
   (let* ((type-name (symbol-append name '/type))
 	 (pred-name (symbol-append name '?)))
     `(begin
-       (define ,type-name (make-record-type ,(length fields) ',name))
-       (define (,pred-name x) (record-with-type? x ,type-name))
+       (define ,type-name (make-record-type ,(length fields) ',name #f))
+       (define (,pred-name x) (record-is-a? x ,type-name))
        (define (,name ,@fields) (record ,type-name ,@fields))
        ,@(map (lambda (f i)
 		`(begin

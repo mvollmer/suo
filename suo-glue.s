@@ -4,14 +4,15 @@
 
 /* GC_GLUE - invoke the GC
 
-   This function is invoked when r16, the pointer to free memory, is
-   advanced past r17, the pointer to the end of the current semi-space.
-   At that point r4 points to the start of the object that failed to
-   be allocated.  Thus, r16-r4 is the number of bytes that must be
-   free after the GC, at least.
+   This function is invoked when the difference between r16, the
+   pointer to free memory, and r17, the pointer to the end of the
+   current semi-space, is too small.  At that point r4 points to the
+   location where r17 should have been.  Thus, r4-r16 is the number of
+   bytes that must be free after the GC, at least.
 
-   When GC_GLUE returns, the allocation must have succeeded.
-
+   When GC_GLUE returns, there is enough space between r16 and r17,
+   and r4 has the same relative position to r16 as before the call.
+    
    Steps:
     - save LR,r4,r15,r16,r17
     - invoke gc
@@ -152,9 +153,8 @@ push_one_up:
 have_rest_arg:
     /* Allocate a new pair into r4
     */
-    mr		4,16
-    addi	16,16,8
-    cmpw	16,17
+    addi	4,16,8
+    cmpw	4,17
     blt		have_pair
     lis  	3,gc_buf@ha
     la   	3,gc_buf@l(3)
@@ -172,6 +172,8 @@ have_rest_arg:
     lwz  	17,16(3)
     mtlr 	0
 have_pair:  
+    mr		16,4
+    addi        4,4,-8
     /* Store old rest arg in cdr of pair and the last fixed arg into
        the car, then store the pair as the last fixed arg and decrease
        call_sig.n.

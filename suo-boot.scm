@@ -69,9 +69,11 @@
 	(k #f))
       (lambda ()
 	(call/v (lambda ()
+		  (display "suo> ")
 		  (let ((form (read)))
 		    (if (eof-object? form)
 			(begin 
+			  (newline)
 			  (suspend)
 			  (values))
 			(mock-eval form))))

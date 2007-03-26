@@ -41,6 +41,10 @@
     (write-image (dump-object (constant-value comp-exp))
 		 file)))
 
+(define (compile-base)
+  (image-load "suo-base.scm")
+  (make-bootstrap-image (image-expression) "base"))
+
 (define (compile-compiler)
   (image-load "suo-base.scm")
   (image-load "suo-asm-ppc.scm")
@@ -52,12 +56,11 @@
 (define (compile-minimal)
   (boot-eval '(set! cps-verbose #t))
   (make-bootstrap-image
-   '(begin
-      (primop syscall 0 1)
-      (primop syscall 0 2)
-      12)
+   '(lambda (args body)
+      (cons* :lambda args (expand-body body)))
    "minimal"))
 
+;;(compile-base)
 (compile-compiler)
 ;;(compile-minimal)
 

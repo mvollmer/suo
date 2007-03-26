@@ -78,8 +78,11 @@
 			,(qq-expand (cdr x) depth)))))
       `'(,x)))
 
-(define-macro (lambda args . body)
+(define (lambda-transformer args body)
   (cons* :lambda args (expand-body body)))
+  
+(define-macro (lambda args . body)
+  (lambda-transformer args body))
 
 (define-macro (quote val)
   (list :quote val))
@@ -98,11 +101,10 @@
 (define-macro (define head . body)
   (if (pair? head)
       `(define ,(car head) (lambda ,(cdr head) 
-;;			     (primop syscall 0 ,(host-string-chars
-;;						 (symbol->string (car head))))
-;;			     (let ()
-			       ,@body))
-;;	 )
+;; 			     (primop syscall 0 ,(string-chars
+;; 						 (symbol->string (car head))))
+			     (let ()
+			       ,@body)))
       `(:define ,head ,(car body))))
 
 (define-macro (define-macro head . body)
@@ -272,6 +274,10 @@
   (for-each (lambda (a) (write a) (display " ")) args)
   (newline)
   (car (last-pair args)))
+
+(define-macro (assert form)
+  `(or ,form
+       (error "assertion failed: " ',form)))
 
 ;;; Testing and booleans
 
@@ -1211,7 +1217,7 @@ Only elements that occur in both lists occur in the result list."
 
 ;;; Ports
 
-(define the-eof-object-type (make-record-type 0 'eof-object))
+(define the-eof-object-type (make-record-type 0 'eof-object #f))
 (define the-eof-object (record the-eof-object-type))
 
 (define (eof-object? obj)
@@ -1651,9 +1657,11 @@ Only elements that occur in both lists occur in the result list."
 	    (error:wrong-num-args)))
       (error:wrong-type type)))
 
-(define (make-record-type n-fields name)
+(define (make-record-type-record n-fields name ancestry)
   (if (fixnum? n-fields)
-      (record record-type-type n-fields name)
+      (if (vector? ancestry)
+	  (record record-type-type n-fields name ancestry)
+	  (error:wrong-type ancestry))
       (error:wrong-type n-fields)))
 
 (define (record-type-n-fields rec)
@@ -1665,6 +1673,33 @@ Only elements that occur in both lists occur in the result list."
   (if (record-with-type? rec record-type-type)
       (record-ref rec 1)
       (error:wrong-type rec)))
+
+(define (record-type-ancestry rec)
+  (if (record-with-type? rec record-type-type)
+      (record-ref rec 2)
+      (error:wrong-type rec)))
+
+(define (make-record-type n-direct-fields name parent-type)
+  (let* ((n-effective-fields (+ n-direct-fields
+				(if parent-type
+				    (record-type-n-fields parent-type)
+				    0)))
+	 (ancestry (if parent-type
+		       (list->vector 
+			(append (vector->list
+				 (record-type-ancestry parent-type))
+				(list #f)))
+		       (vector #f)))
+	 (type (make-record-type-record n-effective-fields name ancestry)))
+    (vector-set! ancestry (1- (vector-length ancestry)) type)
+    type))
+
+(define (record-is-a? obj type)
+  (and (record? obj)
+       (let ((ancestry (record-type-ancestry (record-type obj)))
+	     (pos (1- (vector-length (record-type-ancestry type)))))
+	 (and (< pos (vector-length ancestry))
+	      (eq? type (vector-ref ancestry pos))))))
 
 (define (record->list rec)
   (do ((i (record-length rec) (1- i))
@@ -1792,7 +1827,7 @@ Only elements that occur in both lists occur in the result list."
       (and (pair? a) (pair? b)
 	   (pair-equal? a b))
       (and (vector? a) (vector? b)
-	   (pair-equal? a b))
+	   (vector-equal? a b))
       (and (record? a) (record-with-type? b (record-type a))
 	   (record-equal? a b))))
 
