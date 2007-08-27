@@ -56,8 +56,10 @@
 (define (compile-minimal)
   (boot-eval '(set! cps-verbose #t))
   (make-bootstrap-image
-   '(lambda (args body)
-      (cons* :lambda args (expand-body body)))
+   '(begin
+      (lambda (args body)
+	(cons* :lambda args (expand-body body)))
+      (bootinfo))
    "minimal"))
 
 ;;(compile-base)

@@ -268,35 +268,11 @@
 
 (define (cps-asm-shuffle ctxt from to)
 
-  (let ((dst-done '())
-	(r-sim (list->vector (map get-reg (iota 100))))
-	(t-sim (vector #f)))
-
-    (define (sim-move src dst)
-      (let ((r3 #f))
-	(if (eq? src 'tmp)
-	    (set! r3 (vector-ref t-sim 0))
-	    (set! r3 (if (cps-reg? src)
-			 (vector-ref r-sim (cps-reg-idx src))
-			 src)))
-	(if (eq? dst 'tmp)
-	    (vector-set! t-sim 0 r3)
-	    (vector-set! r-sim (cps-reg-idx dst) r3))))
-      
-    (define (check-sim sim)
-      (for-each (lambda (src dst)
-		  (if (not (eq? src (vector-ref sim (cps-reg-idx dst))))
-		      (begin
-			(pk 'from (map cps-render from))
-			(pk 'to (map cps-render to))
-			(pk 'sim (map cps-render (vector->list sim)))
-			(error "BANG " (cps-render src) (cps-render dst)))))
-		from to))
+  (let ((dst-done '()))
 
     (define (move src dst)
       (if cps-verbose
-	  (pk (cps-render src) '-> (cps-render dst) 'tmp (cps-render (vector-ref t-sim 0))))
-      (sim-move src dst)
+	  (pk (cps-render src) '-> (cps-render dst)))
       (if (eq? src 'tmp)
 	  (cps-asm-move-rX-to-rY ctxt 4 3)
 	  (cps-asm-op-to-r3 ctxt src))
@@ -348,9 +324,7 @@
  
     (for-each (lambda (src)
 		(handle-reg src '()))
-	      from)
-
-    (check-sim r-sim)))
+	      from)))
 
 (define (cps-asm-go ctxt to)
   (cps-asm-op-to-r3 ctxt to)
@@ -1290,3 +1264,5 @@
      ;; XXX - b loop
      (cps-asm-u16 ctxt #x4bff #xfff4)
      (cps-asm-def-label ctxt out))))
+
+(pk 'asm-ppc)

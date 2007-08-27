@@ -1,8 +1,56 @@
-;;; Basic Scheme syntax
+;;; Bootstrap declarations
+
+;;; undeclared (bootinfo-marker cps-asm-alloc-check cps-reg cps-quote
+;;; cps-render cps-asm-move-rX-to-rY cps-verbose get-reg
+;;; cps-quote-value cps-reg? cps-reg-idx s2val pk2 suspend compile
+;;; keyword->symbol set-hashq-vectors get-hashq-vectors hash
+;;; string-equal? symbol-equal? pair-equal? vector-equal?
+;;; record-equal? symbol-append vector->list vector vector-set!
+;;; record-type-n-fields list->vector symbol->keyword parse
+;;; string->symbol parse-comment record? code? vector? code-lit-length
+;;; code-insn-length symbol-name delimiter? vector-ref vector-length
+;;; record-type-name record-type record-length print max >=
+;;; whitespace? positive-number->char-list string-ref string-length
+;;; string-set! record-ref record record-with-type? remainder quotient
+;;; * < <= bytevec-set-u8! bytevec-ref-u8 = fixnum? equal? 1- zero? 1+
+;;; list-copy-with-tail last-pair write call-p sys:panic newline
+;;; for-each display gensym cons* + - cddr not error > memv pk append
+;;; cons list caddr map cadr null? eq? error:not-a-closure symbol?
+;;; apply cdr macro-lookup car pair?)
+
+;; (declare-variables pair? symbol? eq? null? zero?
+;; 		   > < = >= <= not
+;; 		   + - * /
+;; 		   car cdr cadr cddr caddr
+;; 		   cons cons* list append
+;; 		   apply map for-each memv
+;; 		   gensym
+;; 		   display newline
+;; 		   macro-lookup error error:not-a-closure pk)
+
+;; (undeclared bootinfo-marker cps-asm-alloc-check cps-reg cps-quote
+;; 	    cps-render cps-asm-move-rX-to-rY cps-verbose get-reg
+;; 	    cps-quote-value cps-reg? cps-reg-idx s2val pk2 suspend compile
+;; 	    eval set-symbol-definition! symbol-definition directory-find
+;; 	    set-hashq-vectors get-hashq-vectors hash string-equal?
+;; 	    symbol-equal? pair-equal? vector-equal? record-equal?
+;; 	    symbol-sibling symbol-suffix vector->list vector vector-set!
+;; 	    record-type-n-fields list->vector symbol->keyword parse
+;; 	    find-symbol parse-comment keyword->symbol record? code? vector?
+;; 	    keyword? code-lit-length code-insn-length symbol-name
+;; 	    directory-name symbol-directory print-weird-symbol-name
+;; 	    vector-ref vector-length record-type-name record-type
+;; 	    record-length print max whitespace? positive-number->char-list
+;; 	    string-ref string-length string-set! record-ref record
+;; 	    record-with-type? remainder quotient bytevec-set-u8!
+;; 	    bytevec-ref-u8 fixnum? equal? 1- 1+ list-copy-with-tail last-pair
+;; 	    write call-p sys:panic)
+
+;;; Basic Suo syntax
 
 (define (macroexpand1 form)
-  (if (and (pair? form) (symbol? (car form)))
-      (let ((transformer (lookup-toplevel-macro-transformer (car form))))
+  (if (and (pair? form) (pathname? (car form)))
+      (let ((transformer (macro-lookup (car form))))
 	(if transformer
 	    (apply transformer (cdr form))
 	    form))
@@ -160,8 +208,10 @@
     `(let ((,tmp ,test))
        (and ,tmp (,proc ,tmp)))))
 
-(define-macro (set! var val)
-  `(:set ,var ,val))
+(define-macro (set! place val)
+  (if (pair? place)
+      `((setter ,(car place)) ,val ,@(cdr place))
+      `(:set ,place ,val)))
 
 (define-macro (letrec bindings . body)
   (let ((vars (map car bindings))
@@ -265,7 +315,7 @@
 	(handler msg rest))))
 
 (define (with-error-handler handler thunk)
-  (call/p error-handlers (cons handler (error-handlers)) thunk))
+  (call-p error-handlers (cons handler (error-handlers)) thunk))
 
 ;;; Debugging
 
@@ -381,6 +431,13 @@
 	(apply func (map1 car lists))
 	(apply for-each func (map1 cdr lists)))))
 
+(define (or-map func lst)
+  (if (null? lst)
+      #f
+      (let ((val (func (car lst))))
+	(or val
+	    (or-map func (cdr lst))))))
+  
 (define (reverse-with-tail list tail)
   (if (null? list)
       tail
@@ -488,6 +545,15 @@
 
 (define (assq-ref alist key)
   (and=> (assq key alist) cdr))
+
+(define (assq-del alist key)
+  (cond ((null? alist)
+	 '())
+	((eq? key (car (car alist)))
+	 (cdr alist))
+	(else
+	 (cons (car alist)
+	       (assq-del (cdr alist) key)))))
 
 (define (assoc key alist)
   (cond ((null? alist)
@@ -740,6 +806,22 @@ Only elements that occur in both lists occur in the result list."
 	    (string-set-substring! res i (car s))
 	    (loop (cdr s) (+ i (string-length (car s)))))))))
 
+(define (string-index str ch)
+  (let ((n (string-length str)))
+    (let loop ((i 0))
+      (cond ((= i n)
+	     #f)
+	    ((eq? (string-ref str i) ch)
+	     i)
+	    (else
+	     (loop (1+ i)))))))
+
+(define (substring str start end)
+  (let ((res (make-string (- end start))))
+    (do ((i start (+ i 1)))
+	((= i end) res)
+      (string-set! res (- i start) (string-ref str i)))))
+    
 ;;; Functions
 
 (define (flatten-for-apply arg1 args+rest)
@@ -754,30 +836,30 @@ Only elements that occur in both lists occur in the result list."
 
 (define -dynamic-env- '())
 
-(define (call/cc func)
+(define (call-cc func)
   (let ((old-env -dynamic-env-))
-    (:call/cc (lambda (k)
+    (:call-cc (lambda (k)
 		(func (lambda results
 			(set! -dynamic-env- old-env)
 			(apply k results)))))))
 
-(define (call/v producer consumer)
-  (:call/v producer consumer))
+(define (call-v producer consumer)
+  (:call-v producer consumer))
 
 (define (values . results)
-  (call/cc (lambda (k) (apply k results))))
+  (call-cc (lambda (k) (apply k results))))
 
 (define-macro (let-values1 bindings . body)
   ;; bindings -> (sym1 sym2 ... producer)
   (let* ((n (length bindings))
 	 (producer (list-ref bindings (1- n)))
 	 (vals (list-head bindings (1- n))))
-    (pk `(call/v (lambda () ,producer) (lambda ,vals ,@body)))))
+    (pk `(call-v (lambda () ,producer) (lambda ,vals ,@body)))))
 
-(define (call/de env func)
-  (call/cc (lambda (k)
+(define (call-de env func)
+  (call-cc (lambda (k)
 	     (set! -dynamic-env- env)
-	     (call/v func k))))
+	     (call-v func k))))
 
 (define (dynamic-environment)
   -dynamic-env-)
@@ -796,8 +878,8 @@ Only elements that occur in both lists occur in the result list."
 				   (set-cdr! cell (car new-val))))))))
       parameter)))
 
-(define (call/p parameter value func)
-  (call/de (acons parameter value (dynamic-environment)) func))
+(define (call-p parameter value func)
+  (call-de (acons parameter value (dynamic-environment)) func))
 
 ;;; Numbers
 
@@ -1349,10 +1431,10 @@ Only elements that occur in both lists occur in the result list."
 	(n (record-length r)))
     (output-string port "#<")
     (print (record-type-name (record-type r)) state)
-    (do ((i 0 (+ i 1)))
-	((= i n))
-      (output-string port " ")
-      (print (record-ref r i) state))
+;;     (do ((i 0 (+ i 1)))
+;; 	((= i n))
+;;       (output-string port " ")
+;;       (print (record-ref r i) state))
     (output-string port ">")))
 
 (define (print-vector v state)
@@ -1380,15 +1462,45 @@ Only elements that occur in both lists occur in the result list."
       (output-char port (integer->digit (remainder (bytevec-ref-u8 v i) 16))))
     (output-string port "/")))
 
-(define (print-weird-symbol s state)
-  (output-char (print-state-port state) #\|)
-  (output-string (print-state-port state) (symbol->string s))
-  (output-char (print-state-port state) #\|))
+(define (print-symbol-name n state)
+  (let ((port (print-state-port state)))
+    (for-each (lambda (ch)
+		(if (delimiter? ch)
+		    (output-char port #\\))
+		(output-char port ch))
+	      (string->list n))))
 
 (define (print-symbol s state)
-  (if (string->number (symbol->string s))
-      (print-weird-symbol s state)
-      (output-string (print-state-port state) (symbol->string s))))
+  (print-symbol-name (symbol->string s) state))
+
+(define (print-keyword k state)
+  (output-char (print-state-port state) #\:)
+  (print (keyword->symbol k) state))
+
+(define (print-pathname p state)
+  (let ((o (pathname-parent-offset p))
+	(c (pathname-components p)))
+
+    (define (print-comps comps need-slash)
+      (cond ((not (null? comps))
+	     (if need-slash
+		 (output-char (print-state-port state) #\/))
+	     (print (car comps) state)
+	     (print-comps (cdr comps) #t))))
+      
+    (cond ((and (zero? o) (null? c))
+	   (output-char (print-state-port state) #\.))
+	  ((< o 0)
+	   (output-char (print-state-port state) #\/)
+	   (print-comps c #f))
+	  (else
+	   (do ((i 0 (1+ i))
+		(need-slash #f #t))
+	       ((= i o)
+		(print-comps c need-slash))
+	     (if need-slash
+		 (output-char (print-state-port state) #\/))
+	     (output-string (print-state-port state) ".."))))))
 
 (define (print-code val state)
   (output-string (print-state-port state) "#<code ")
@@ -1401,7 +1513,7 @@ Only elements that occur in both lists occur in the result list."
 
 (define (print val state)
   (if (< (print-depth) 10)
-      (call/p print-depth (+ 1 (print-depth))
+      (call-p print-depth (+ 1 (print-depth))
 	      (lambda ()
 		(let ((port (print-state-port state)))
 		  (cond ((eq? #t val)
@@ -1421,8 +1533,9 @@ Only elements that occur in both lists occur in the result list."
 			((symbol? val)
 			 (print-symbol val state))
 			((keyword? val)
-			 (output-string port ":")
-			 (print-symbol (keyword->symbol val) state))
+			 (print-keyword val state))
+			((pathname? val)
+			 (print-pathname val state))
 			((pair? val)
 			 (print-list val state))
 			((vector? val)
@@ -1461,13 +1574,18 @@ Only elements that occur in both lists occur in the result list."
       (eq? ch #\tab)
       (eq? ch #\newline)))
 
+(define (linear-whitespace? ch)
+  (or (eq? ch #\space)
+      (eq? ch #\tab)))
+
 (define (delimiter? ch)
   (or (eof-object? ch)
       (whitespace? ch)
       (eq? ch #\()
       (eq? ch #\))
+      (eq? ch #\')
       (eq? ch #\;)))
-      
+
 (define (parse-whitespace state)
   (let ((ch (input-char (parse-state-port state))))
     (cond ((whitespace? ch)
@@ -1498,10 +1616,10 @@ Only elements that occur in both lists occur in the result list."
 	    (else
 	     (loop (cons ch chars)))))))
 
-(define (parse-number-or-symbol state)
+(define (parse-number-or-pathname state)
   (let ((tok (parse-token state)))
     (or (string->number tok)
-	(string->symbol tok))))
+	(string->pathname tok))))
 
 (define (parse-hex state)
   (let ((tok (parse-token state)))
@@ -1523,7 +1641,9 @@ Only elements that occur in both lists occur in the result list."
 	  (let ((elt (parse state)))
 	    (if (eof-object? elt)
 		(error "unexpected end of input"))
-	    (if (eq? dot-symbol elt)
+	    (if (and (pathname? elt)
+		     (zero? (pathname-parent-offset elt))
+		     (null? (pathname-components elt)))
 		(let ((elt (parse state)))
 		  (must-parse #\) state)
 		  elt)
@@ -1554,12 +1674,12 @@ Only elements that occur in both lists occur in the result list."
 		(error "unexpected end of input in character literal"))
 	    (if (= (string-length tok) 1)
 		(string-ref tok 0)
-		(case (string->symbol tok)
-		  ((space)   #\space)
-		  ((newline) #\newline)
-		  ((tab)     #\tab)
-		  (else
-		   (error "unrecognized character name: " tok)))))))))
+		(cond
+		 ((equal? tok "space")   #\space)
+		 ((equal? tok "newline") #\newline)
+		 ((equal? tok "tab")     #\tab)
+		 (else
+		  (error "unrecognized character name: " tok)))))))))
 
 (define (parse-keyword state)
   (symbol->keyword (parse state)))
@@ -1609,10 +1729,33 @@ Only elements that occur in both lists occur in the result list."
 	   (error "unexpected delimiter: " ch))
 	  (else
 	   (putback-char (parse-state-port state) ch)
-	   (parse-number-or-symbol state)))))
+	   (parse-number-or-pathname state)))))
 
 (define (read)
   (parse (make-parse-state (current-input-port))))
+
+(define (read-line)
+  (let loop ((res '())
+	     (in-comment #f)
+	     (escaped #f))
+    (let ((ch (input-char (current-input-port))))
+      (cond ((eof-object? ch)
+	     (if (null? res)
+		 ch
+		 (reverse res)))
+	    ((and (eq? ch #\newline)
+		  (not escaped))
+	     (reverse res))
+	    ((eq? ch #\\)
+	     (loop res in-comment #t))
+	    ((or in-comment
+		 (whitespace? ch))
+	     (loop res in-comment #f))
+	    ((eq? ch #\;)
+	     (loop res #t #f))
+	    (else
+	     (putback-char (current-input-port) ch)
+	     (loop (cons (read) res) in-comment escaped))))))
 
 ;;; Records
 
@@ -1705,6 +1848,97 @@ Only elements that occur in both lists occur in the result list."
   (do ((i (record-length rec) (1- i))
        (l '() (cons (record-ref rec (1- i)) l)))
       ((zero? i) l)))
+
+;;; Closures
+
+(define (closure? obj)
+  (record-with-type? obj closure-type))
+
+(define (closure-code clos)
+  (if (closure? clos)
+      (record-ref clos 0)
+      (error:wrong-type clos)))
+
+(define (closure-values clos)
+  (if (closure? clos)
+      (record-ref clos 1)
+      (error:wrong-type clos)))
+
+(define (closure-debug-info clos)
+  (if (closure? clos)
+      (record-ref clos 2)
+      (error:wrong-type clos)))
+
+(define (setter clos)
+  (if (closure? clos)
+      (record-ref clos 3)
+      (error:wrong-type clos)))
+
+(define (init-setter-setter proc)
+  (record-set! proc 3
+	       (lambda (setter clos)
+		 (if (closure? clos)
+		     (record-set! clos 3 setter)
+		     (error:wrong-type clos)))))
+
+(init-setter-setter setter)		      
+
+;; (define-record NAME FIELD...) defines a new record type and
+;; associated procedures.
+;;
+;; (NAME VALUE...) is a constructor and returns a new object with
+;; fields initialized according to the arguments of the constructor.
+;; VALUE... is a list with one member for each field of the record.
+;;
+;; (NAME? obj) is the predicate.
+;;
+;; (NAME-FIELD obj) is a getter for FIELD.
+;;
+;; (set-NAME-FIELD! obj val) is a setter for FIELD.
+;;
+;; NAME-type is the type of the record.
+
+(define-macro (define-record name . fields)
+  (pk name fields)
+  (pk
+  (let* ((type-name (symbol-append name 'type))
+	 (pred-name (symbol-append name '?)))
+    `(begin
+       (define ,type-name (make-record-type ,(length fields) ',name #f))
+       (define (,pred-name x) (record-is-a? x ,type-name))
+       (define (,name ,@fields) (record ,type-name ,@fields))
+       ,@(map (lambda (f i)
+		(let ((reader-name (symbol-append name '- f)))
+		  `(begin
+		     (define (,reader-name x)
+		       (if (,pred-name x)
+			   (record-ref x ,i)
+			   (error:wrong-type x)))
+		     (set! (setter ,reader-name) 
+			   (lambda (y x)
+			     (if (,pred-name x)
+				 (record-set! x ,i y)
+				 (error:wrong-type x)))))))
+	      fields (iota (length fields)))))))
+
+(define-macro (record-case exp . clauses)
+  ;; clause -> ((NAME FIELD...) BODY...)
+  (let ((tmp (gensym)))
+    (define (record-clause->cond-clause clause)
+      (let ((pattern (car clause)))
+	(if (eq? pattern 'else)
+	    clause
+	    (let* ((name (car pattern))
+		   (args (cdr pattern))
+		   (body (cdr clause)))
+	      `((,(symbol-append name '?) ,tmp)
+		((lambda ,args ,@body)
+		 ,@(map (lambda (i)
+			  `(record-ref ,tmp ,i))
+			(iota (length args)))))))))
+    `(let ((,tmp ,exp))
+       (cond ,@(map record-clause->cond-clause clauses)
+	     (else (error "unsupported record instance" ,tmp))))))
 
 ;;; Vectors
 
@@ -1968,16 +2202,29 @@ Only elements that occur in both lists occur in the result list."
 (define (set-hashq-vectors v)
   (primop syscall 9 -3 v))
 
-;;; Symbols
+(define (hashq-fold init proc vec)
+  (let ((alst (hashq->alist! vec)))
+    (let loop ((lst alst)
+	       (res init))
+      (cond ((null? lst)
+	     (alist->hashq! alst vec)
+	     res)
+	    (else
+	     (loop (cdr lst) (proc (car lst) res)))))))
 
-(define symbols (let ((t (make-hash-table 213)))
-		  (for-each (lambda (sym)
-			      (hash-set! t (symbol->string sym) sym))
-			    (car (bootinfo)))
-		  t))
+;;; Symbols
 
 (define (symbol? val)
   (record-with-type? val symbol-type))
+
+(define boot-symbols (car (bootinfo)))
+
+(define symbols (make-hash-table 511))
+
+(define (symbol->string sym)
+  (if (record-with-type? sym symbol-type)
+      (record-ref sym 0)
+      (error:wrong-type sym)))
 
 (define (string->symbol str)
   (if (string? str)
@@ -1987,73 +2234,159 @@ Only elements that occur in both lists occur in the result list."
 	    sym))
       (error:wrong-type str)))
 
-(define (symbol->string sym)
-  (if (record-with-type? sym symbol-type)
-      (record-ref sym 0)
-      (error:wrong-type sym)))
-
 (define (symbol-append . syms)
   (string->symbol (apply string-append (map symbol->string syms))))
+
+(define (init-symbols)
+  (for-each (lambda (sym)
+	      (hash-set! symbols (symbol->string sym) sym))
+	    boot-symbols))
+
+(init-symbols)
 
 (define -gensym-counter- 0)
 
 (define (gensym)
   (set! -gensym-counter- (+ -gensym-counter- 1))
-  (string->symbol (string-append "G" (number->string -gensym-counter-))))
-
-(define dot-symbol (string->symbol "."))
+  (string->symbol (string-append " G" (number->string -gensym-counter-))))
 
 ;;; Keywords
 
-(define keywords (let ((t (make-hashq-table 213)))
-		   (for-each (lambda (key)
-			       (hashq-set! t (keyword->symbol key) key))
-			     (cadr (bootinfo)))
-		   t))
+(define boot-keywords (cadr (bootinfo)))
+
+(define keywords (make-hashq-table 31))
+
+(define (init-keywords)
+  (for-each (lambda (key)
+	      (hashq-set! keywords (keyword->symbol key) key))
+	    boot-keywords))
+
+(init-keywords)
 
 (define (keyword? val)
   (record-with-type? val keyword-type))
 
 (define (keyword->symbol key)
-  (if (record-with-type? key keyword-type)
+  (if (keyword? key)
       (record-ref key 0)
       (error:wrong-type key)))
 
 (define (symbol->keyword sym)
   (if (symbol? sym)
-      (or (hashq-ref keywords sym)
-	  (let ((key (record keyword-type sym)))
-	    (hashq-set! keywords sym key)
-	    key))
-      (error:wrong-type sym)))
+      (let ((key (hashq-ref keywords sym)))
+	(or key
+	    (let ((key (record keyword-type sym)))
+	      (hashq-set! keywords sym key)
+	      key)))
+      (error:wrong-type)))
 
-;;; Closures
+;;; Pathnames
 
-(define (closure? obj)
-  (record-with-type? obj closure-type))
+;; A pathname is a list symbols (called the pathname's components) and
+;; a flag that specifies whether it should be interpreted from the
+;; root location (called a "absolute pathname") or from the current
+;; location (called a "relative pathname").  Thus, a absolute pathname
+;; with a empty list of symbols refers to the root, and a empty
+;; relative pathname refers to the current location.
+;;
+;; A relative pathname has a 'parent offset' that specifies how many
+;; hierarchy levels one should go up before starting to lookup the
+;; first component.  This parent offset is written and read as a
+;; sequence of ".." pseudo components.  Real components can not be
+;; symbols with the name "..".
+;;
+;; The realtive pathname with no compontents is written and read as
+;; ".".
+;;
+;; A naked symbol is recognized as a relative pathname with that
+;; symbol as its component.
 
-(define (closure-code clos)
-  (if (closure? clos)
-      (record-ref clos 0)
-      (error:wrong-type clos)))
+(define-record pathname*
+  parent-offset components)
 
-(define (closure-values clos)
-  (if (closure? clos)
-      (record-ref clos 1)
-      (error:wrong-type clos)))
+(define (pathname parent-offset components)
+  (if (and (zero? parent-offset) (= (length components) 1)
+	   (symbol? (car components)))
+      (car components)
+      (pathname* parent-offset components)))
 
-(define (closure-debug-info clos)
-  (if (closure? clos)
-      (record-ref clos 2)
-      (error:wrong-type clos)))
+(define (pathname? obj)
+  (or (symbol? obj)
+      (pathname*? obj)))
 
-;;; Variables, macros and name spaces
+(define (pathname-absolute? obj)
+  (< (pathname-parent-offset obj) 0))
+
+(define (pathname-parent-offset obj)
+  (if (symbol? obj)
+      0
+      (pathname*-parent-offset obj)))
+
+(define (pathname-components obj)
+  (if (symbol? obj)
+      (list obj)
+      (pathname*-components obj)))
+
+(define (string->pathname str)
+  (cond 
+   ((equal? str "/")
+    (pathname -1 '()))
+   ((equal? str ".")
+    (pathname 0 '()))
+   (else
+    (let ((len (string-length str)))
+      (let loop ((start 0)
+		 (cur 0)
+		 (offset 0)
+		 (comps '()))
+
+	(define (consume-comp)
+	  (let ((n (substring str start cur)))
+	    (cond ((equal? n "")
+		   (error "pathname component can not be empty"))
+		  ((equal? n ".")
+		   (error "pathname component can not be '.'"))
+		  ((equal? n "..")
+		   (if (and (>= offset 0) (null? comps))
+		       (loop (1+ cur) (1+ cur) (1+ offset) comps)
+		       (error "internal pathname component can not be '..'")))
+		  (else
+		   (loop (1+ cur) (1+ cur) offset 
+			 (cons (string->symbol n) comps))))))
+		  
+	(cond ((> cur len)
+	       (pathname offset (reverse comps)))
+	      ((= cur len)
+	       (consume-comp))
+	      ((eq? (string-ref str cur) #\/)
+	       (if (zero? cur)
+		   (loop 1 1 -1 '())
+		   (consume-comp)))
+	      (else
+	       (loop start (1+ cur) offset comps))))))))
+
+(define (pathname-concat p1 p2)
+  (let ((o1 (pathname-parent-offset p1))
+	(l1 (length (pathname-components p1)))
+	(o2 (pathname-parent-offset p2)))
+    (cond ((< o2 0)
+	   p2)
+	  ((<= o2 l1)
+	   (pathname o1 (append (list-head (pathname-components p1)
+					   (- l1 o2))
+				(pathname-components p2))))
+	  ((< o1 0)
+	   (error "root directory has no parent"))
+	  (else
+	   (pathname (+ o1 (- o2 l1)) (pathname-components p2))))))
+
+;;; Variables and macros
 
 (define (variable? obj)
   (record-with-type? obj variable-type))
 
-(define (variable init name)
-  (record variable-type init name))
+(define (variable init)
+  (record variable-type init))
 
 (define (variable-ref obj)
   (if (variable? obj)
@@ -2065,43 +2398,389 @@ Only elements that occur in both lists occur in the result list."
       (record-set! obj 0 val)
       (error:wrong-type obj)))
 
-(define (variable-name obj)
-  (if (variable? obj)
-      (record-ref obj 1)
-      (error:wrong-type obj)))
-
 (define (macro? obj)
   (record-with-type? obj macro-type))
 
-(define (macro transformer name)
-  (record macro-type transformer name))
+(define (macro transformer)
+  (record macro-type transformer))
 
 (define (macro-transformer obj)
   (if (macro? obj)
       (record-ref obj 0)
       (error:wrong-type obj)))
 
-(define toplevel (caddr (bootinfo)))
+;;; Directories
 
-(define (register-toplevel-variable sym)
-  (let ((var (variable (if #f #f) sym)))
-    (set! toplevel (acons sym var toplevel))
-    var))
+(define entry-value car)
+(define set-entry-value! set-car!)
+(define entry-attributes cdr)
+(define set-entry-attributes! set-cdr!)
 
-(define (register-toplevel-macro-transformer sym transformer)
-  (pk 'macro sym transformer)
-  (let ((mac (macro transformer sym)))
-    (set! toplevel (acons sym mac toplevel))
-    mac))
+(define (make-entry val attrs)
+  (cons val attrs))
 
-(define (lookup-toplevel-variable sym)
-  (let ((thing (assq-ref toplevel sym)))
-    (if thing
-	(if (variable? thing)
-	    thing
-	    (error "not a variable: " sym))
-	(register-toplevel-variable sym))))
+(define (entry-attribute ent attr)
+  (assq-ref (entry-attributes ent) attr))
 
-(define (lookup-toplevel-macro-transformer sym)
-  (let ((thing (assq-ref toplevel sym)))
-    (and (macro? thing) (macro-transformer thing))))
+(define (set-entry-attribute! ent attr val)
+  (set-entry-attributes! ent (acons attr val
+				    (assq-del (entry-attributes ent) attr))))
+
+(define (entry-merge-attrs! ent attrs)
+  ;; XXX - cheap shot
+  (for-each (lambda (attr)
+	      (set-entry-attribute! ent (car attr) (cdr attr)))
+	    attrs))
+
+(define (list-entry name ent verbose)
+  (let* ((value (entry-value ent))
+	 (type (cond ((directory? value) #\d)
+		     ((variable? value)  #\v)
+		     ((macro? value)     #\m)
+		     ((not value)        #\!)
+		     (else               #\?))))
+    (display type)
+    (display #\space)
+    (display name)
+    (newline)
+    (if verbose
+	(for-each (lambda (attr)
+		    (display #\space)
+		    (display #\space)
+		    (display (car attr))
+		    (display #\tab)
+		    (display (cdr attr))
+		    (newline))
+		  (entry-attributes ent)))))
+
+(define-record directory
+  entries)
+
+(define (directory* n)
+  (directory (make-hashq-table n)))
+
+(define (directory-lookup dir sym)
+  (hashq-ref (directory-entries dir) sym))
+
+(define (directory-enter dir sym ent)
+  (hashq-set! (directory-entries dir) sym ent))
+
+(define (directory-remove dir sym)
+  (hashq-del! (directory-entries dir) sym))
+
+(define (directory-list-bindings dir)
+  (hashq-fold '() cons (directory-entries dir)))
+
+(define root-directory (directory* 31))
+(define root-directory-entry (make-entry root-directory '()))
+
+(define boot-directory (directory* 1023))
+(directory-enter root-directory 'boot (make-entry boot-directory '()))
+
+(define boot-bindings (caddr (bootinfo)))
+
+(define (init-boot-directory)
+  (for-each (lambda (binding)
+	      (let ((sym (car binding))
+		    (ent (cdr binding)))
+		(directory-enter boot-directory sym ent)))
+	    boot-bindings))
+
+(init-boot-directory)
+
+(define current-directory (make-parameter root-directory-entry))
+(define current-directory-path (make-parameter (pathname -1 '())))
+
+(define open-directories (make-parameter '()))
+
+(define (lookup-in-entry ent comps)
+  (if (null? comps)
+      ent
+      (lookup-in-entry (directory-lookup (entry-value ent) (car comps))
+		       (cdr comps))))
+
+(define (lookup* name)
+  (if (symbol? name)
+      (directory-lookup (entry-value (current-directory)) name)
+      (lookup-in-entry root-directory-entry
+		       (pathname-components 
+			   (pathname-concat (current-directory-path)
+					    name)))))
+
+(define (lookup name)
+  (or (lookup* name)
+      (and (symbol? name)
+	   (or-map (lambda (dir)
+		     (directory-lookup dir name))
+		   (open-directories)))))
+
+(define (enter-in-entry parent comps child)
+  (cond ((null? (cdr comps))
+	 (directory-enter (entry-value parent) (car comps) child))
+	(else
+	 (enter-in-entry (directory-lookup (entry-value parent) (car comps))
+			 (cdr comps) child))))
+
+(define (enter name proc)
+  (let ((ent (lookup* name)))
+    (cond (ent
+	   (proc ent)
+	   ent)
+	  (else
+	   (if (lookup name)
+	       (pk 'shadows name))
+	   (let ((ent (proc #f)))
+	     (enter-in-entry root-directory-entry
+			     (pathname-components 
+				 (pathname-concat (current-directory-path)
+						  name))
+			     ent)
+	     ent)))))
+
+(define (remove-in-entry ent comps)
+  (cond ((null? (cdr comps))
+	 (directory-remove (entry-value ent) (car comps)))
+	(else
+	 (remove-in-entry (directory-lookup (entry-value ent) (car comps))
+			  (cdr comps)))))
+
+(define (remove name)
+  (remove-in-entry root-directory-entry
+		   (pathname-components 
+		       (pathname-concat (current-directory-path)
+					name))))
+
+(define (variable-lookup name)
+  (let ((ent (lookup name)))
+    (cond ((not ent)
+	   (error "undefined: " name))
+	  ((variable? (entry-value ent))
+	   (entry-value ent))
+	  (else
+	   (error "not a variable: " name)))))
+
+(define (variable-declare name . attrs)
+  (entry-value
+   (enter name
+	  (lambda (old)
+	    (cond ((not old)
+		   (make-entry (variable (begin))  attrs))
+		  ((variable? (entry-value old))
+		   (entry-merge-attrs! old attrs)
+		   old)
+		  (else
+		   (error "already declared: " name)))))))
+
+(define (macro-lookup name)
+  (let ((ent (lookup name)))
+    (cond ((or (not ent) (not (macro? (entry-value ent))))
+	   #f)
+	  (else
+	   (macro-transformer (entry-value ent))))))
+
+(define (macro-define name val)
+  (enter name
+	 (lambda (old)
+	   (cond ((not old)
+		  (make-entry (macro val) '()))
+		 ((macro? (entry-value old))
+		  (set-entry-value! old (macro val))
+		  old)
+		 (else
+		  (error "already declared: " name))))))
+
+(define (make-directory name)
+  (enter name
+	 (lambda (old)
+	   (cond ((not old)
+		  (make-entry (directory* 31) '()))
+		 (else
+		  (error "already declared: " name))))))
+
+(define (set-current-directory name)
+  (let* ((n (pathname-concat (current-directory-path) name))
+	 (e (lookup* n)))
+    (cond ((directory? (entry-value e))
+	   (current-directory e)
+	   (current-directory-path n)
+	   n)
+	  (else
+	   (error "not a directory: " n)))))
+
+(define-macro (cd name)
+  `(set-current-directory ',name))
+
+(define (pwd)
+  (write (current-directory-path))
+  (newline)
+  (values))
+
+(define (list-directory name verbose)
+  (let ((dir (entry-value (lookup name))))
+    (hashq-fold #f (lambda (elt res)
+		     (list-entry (car elt) (cdr elt) verbose))
+		(directory-entries dir))
+    (values)))
+
+(define-macro (ls . names)
+  (if (null? names)
+      `(list-directory '. #f)
+      `(begin ,@(map (lambda (n)
+		       `(list-directory ',n #f))
+		     names))))
+
+(define-macro (rm name)
+  `(remove ',name))
+
+(define-macro (mkdir name)
+  `(make-directory ',name))
+
+;;; Eval
+
+(define (eval form)
+  (let ((form (compile form)))
+    (cond
+     ((pathname? form)
+      (let ((ent (and=> (lookup form) entry-value)))
+	(cond ((not ent)
+	       (error "undefined: " form))
+	      ((variable? ent)
+	       (variable-ref ent))
+	      ((macro? ent)
+	       (error "is a macro: " form))
+	      (else
+	       ent))))
+     ((pair? form)
+      (let ((op (car form)))
+	(case op
+	  ((:quote)
+	   (cadr form))
+	  ((:set)
+	   (let* ((sym (cadr form))
+		  (val (eval (caddr form))))
+	     (variable-set! (variable-lookup sym) val)))
+	  ((:define)
+	   (let* ((sym (cadr form))
+		  (var (variable-declare sym))
+		  (val (eval (caddr form))))
+	     (variable-set! var val)))
+	  ((:define-macro)
+	   (let* ((sym (cadr form))
+		  (val (eval (caddr form))))
+	     (macro-define sym val)))
+	  ((:begin)
+	   (let loop ((body (cdr form)))
+	     (cond ((null? body)
+		    (if #f #f))
+		   ((null? (cdr body))
+		    (eval (car body)))
+		   (else
+		    (eval (car body))
+		    (loop (cdr body))))))
+	  (else
+	   (let ((vals (map eval form)))
+	     (apply (car vals) (cdr vals)))))))
+     (else
+      form))))
+
+;;; Repl
+
+(define repl-commands '())
+
+(define-macro (define-repl-command head . body)
+  (let ((name (car head))
+	(args (cdr head)))
+    `(set! repl-commands (acons ',name (lambda ,args ,@body)
+				repl-commands))))
+
+(define-repl-command (ls)
+  (list-directory '. #f)
+  (values))
+
+(define-repl-command (pwd)
+  (current-directory-path))
+
+(define-repl-command (cd name)
+  (or (pathname-absolute? name)
+      (error "can only cd to absolute names"))
+  (let ((new (lookup* name)))
+    (cond ((directory? (entry-value new))
+	   (current-directory new)
+	   (current-directory-path name))
+	  (else
+	   (error "not a directory: " name)))))
+
+(define-repl-command (pods)
+  (map directory-name (open-directories)))
+
+(define-repl-command (open-cwd)
+  (open-directories (cons (entry-value (current-directory))
+			  (open-directories))))
+
+(define (eval-repl-command form)
+  (cond ((not (pair? form))
+	 (eval-repl-command (list form)))
+	((not (symbol? (car form)))
+	 (error "invalid repl command syntax: " form))
+	(else
+	 (let ((cmd (assq-ref repl-commands (car form))))
+	   (if cmd
+	       (apply cmd (cdr form))
+	       (error "unknown repl command: " (car form)))))))
+
+(define (trace-conts k)
+  (if (closure? k)
+      (let ((src (code-debug-info (closure-code k))))
+	(if (not (or (eq? src 'call-cc) (eq? src 'call-v)))
+	    (pk src))
+	(trace-conts (closure-debug-info k)))))
+
+(define (repl-eval form)
+  (cond ((null? form)
+	 (values))
+	((keyword? (car form))
+	 (eval-repl-command (cons (keyword->symbol (car form)) (cdr form))))
+	((not (pair? (car form)))
+	 (eval form))
+	(else
+	 (eval (cons 'begin form)))))
+
+(define p values)
+
+(define (repl)
+  (call-cc
+   (lambda (exit)
+     (call-cc
+      (lambda (loop)
+	(with-error-handler
+	 (lambda args
+	   (:call-cc trace-conts)
+	   (apply display-error args)
+	   (loop #f))
+	 (lambda ()
+	   (call-v (lambda ()
+		     (display "suo> ")
+		     (let ((form (read-line)))
+		       (cond ((eof-object? form)
+			      (newline)
+			      (suspend)
+			      (values))
+			     (else
+			      (repl-eval form)))))
+		   (lambda vals
+		     (for-each (lambda (v)
+				 (write v)
+				 (newline))
+			       vals)))))))
+     (repl))))
+
+(define (suspend)
+  (let ((hashq-vectors (get-hashq-vectors)))
+    (call-cc (lambda (k)
+	       (primop syscall 10 (lambda () (k #t)))
+	       (error "can't suspend")))
+    (set-hashq-vectors hashq-vectors)
+    (set-wrong-num-args-hook)
+    #t))
+
+(pk 'base)

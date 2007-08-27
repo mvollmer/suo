@@ -305,7 +305,7 @@
 (define-macro (with-param param-val . body)
   (let* ((param-exp (car param-val))
 	 (value-exp (cadr param-val)))
-    `(call/p ,param-exp ,value-exp (lambda () ,@body))))
+    `(call-p ,param-exp ,value-exp (lambda () ,@body))))
 
 ;;; Conversion into CPS
 
@@ -378,7 +378,7 @@
 
   (define (make-env) '())
   (define (extend-env sym value env) (acons sym value env))
-  (define (lookup-sym sym env) (assq-ref env sym))
+  (define (lookup-env-symbol name env) (and (symbol? name) (assq-ref env name)))
   (define (extend-env* syms vals env)
     (if (null? syms)
 	env
@@ -387,14 +387,18 @@
 
   (define (bound-variable? val) (cps-var? val))
 
-  (define (lookup-macro-transformer sym env)
-    (and (not (lookup-sym sym env))
-	 (lookup-toplevel-macro-transformer sym)))
+  (define (lookup-macro-transformer name env)
+    (and (not (lookup-env-symbol name env))
+	 (macro-lookup name)))
 
-  (define (lookup-variable sym env)
-    (or (lookup-sym sym env)
-	(lookup-toplevel-variable sym)))
+  (define (lookup-variable name env)
+    (or (lookup-env-symbol name env)
+	(variable-lookup name)))
 
+  (define (lookup-thing name env)
+    (or (lookup-env-symbol name env)
+	(and=> (lookup name) entry-value)))
+    
   (define (conv-func func-label args body env)
     (let* ((cont-arg (genvar))
 	   (restp (dotted-list? args))
@@ -449,7 +453,7 @@
 					      (cons* z-cont z-args)
 					      restp #f)))))))))
 
-  (define (conv-call/v producer consumer env c)
+  (define (conv-call-v producer consumer env c)
     (let ((source (cps-source)))
       (conv producer env
 	    (lambda (z-producer)
@@ -463,7 +467,7 @@
 			   (cps-fun (cps-func* producer-cont
 					       (list results)
 					       #t #t
-					       'call/v z-cont
+					       'call-v z-cont
 					       (cps-app* z-consumer
 							 (list z-cont
 							       results)
@@ -472,7 +476,7 @@
 					      (list producer-cont)
 					      #f #f)))))))))))
 
-  (define (conv-call/cc func env c)
+  (define (conv-call-cc func env c)
     (let ((source (cps-source))
 	  (cont-func-label (genvar))
 	  (cont-func-cont (genvar))
@@ -485,7 +489,7 @@
 					      (list cont-func-cont
 						    cont-func-args)
 					      #t #f
-					      'call/cc z-cont
+					      'call-cc z-cont
 					      (cps-app* z-cont
 						       (list cont-func-args)
 						       #t #t))
@@ -563,31 +567,37 @@
 			 (cps-set var z cont)
 			 (cps-gen-variable-set (cps-quote var) z cont))))))
 
-	  ((:call/cc ?func)
-	   (conv-call/cc ?func env c))
+	  ((:call-cc ?func)
+	   (conv-call-cc ?func env c))
 	  
-	  ((:call/v ?producer ?consumer)
-	   (conv-call/v ?producer ?consumer env c))
+	  ((:call-v ?producer ?consumer)
+	   (conv-call-v ?producer ?consumer env c))
 	
 	  ((:apply ?func . ?args)
 	   (conv-apply ?func ?args #t env c))
 	
 	  ((?func . ?args)
-	   (let ((transformer (and (symbol? ?func)
+	   (let ((transformer (and (pathname? ?func)
 				   (lookup-macro-transformer ?func env))))
 	     (if transformer
 		 (conv (apply transformer ?args) env c)
 		 (conv-apply ?func ?args #f env c))))
 
 	  (else
-	   (if (symbol? exp)
-	       (let ((var (lookup-variable exp env)))
-		 (if (cps-var? var)
-		     (c var)
-		     (let* ((result-var (genvar))
-			    (cont (c result-var)))
-		       (cps-gen-variable-ref result-var (cps-quote var)
-					     cont))))
+	   (if (pathname? exp)
+	       (let ((thing (or (lookup-thing exp env)
+				(lookup-variable exp env))))
+		 (cond ((cps-var? thing)
+			(c thing))
+		       ((variable? thing)
+			(let* ((result-var (genvar))
+			       (cont (c result-var)))
+			  (cps-gen-variable-ref result-var (cps-quote thing)
+						cont)))
+		       ((macro? thing)
+			(error "macro used as variable:" exp))
+		       (else
+			(c (cps-quote thing)))))
 	       (c (cps-quote exp)))))))
 
   ;; Apply C to a list cps-values that represent the results of
@@ -771,7 +781,7 @@
 ;;; Dynamic attributes
 
 (define-macro (define-dynamic-attr name)
-  (let ((parm-name (symbol-append name '/parm)))
+  (let ((parm-name (symbol-append name '|parm)))
     `(begin (define ,parm-name (make-parameter '()))
  	    (define (,name obj)
  	      (assq-ref (,parm-name) obj)))))
@@ -779,10 +789,10 @@
 (define-macro (with-attr attr-obj-val . body)
   ;; attr-obj-val -> (attr obj val)
   (let* ((attr-name (car attr-obj-val))
-	 (parm-name (symbol-append attr-name '/parm))
+	 (parm-name (symbol-append attr-name '|parm))
 	 (obj-exp (cadr attr-obj-val))
 	 (val-exp (caddr attr-obj-val)))
-    `(call/p ,parm-name (acons ,obj-exp ,val-exp (,parm-name))
+    `(call-p ,parm-name (acons ,obj-exp ,val-exp (,parm-name))
 	     (lambda () ,@body))))
 
 (define (acons* keys vals lst)
@@ -796,10 +806,10 @@
 (define-macro (with-attr* attr-objs-vals . body)
   ;; attr-objs-vals -> (attr objs vals)
   (let* ((attr-name (car attr-objs-vals))
-	 (parm-name (symbol-append attr-name '/parm))
+	 (parm-name (symbol-append attr-name '|parm))
 	 (objs-exp (cadr attr-objs-vals))
 	 (vals-exp (caddr attr-objs-vals)))
-    `(call/p ,parm-name (acons* ,objs-exp ,vals-exp (,parm-name))
+    `(call-p ,parm-name (acons* ,objs-exp ,vals-exp (,parm-name))
 	     (lambda () ,@body))))
 
 (define-dynamic-attr cps-replacement)
@@ -901,7 +911,8 @@
 		(list (cps-primop 'record
 				  (list result)
 				  (list (cps-quote closure-type)
-					func vector-var parent-cont)
+					func vector-var parent-cont 
+					(cps-quote #f))
 				  (list (if func-index
 					    (cps-primop
 					     'vector-set
@@ -922,7 +933,7 @@
 (define (cps-gen-closure-ref-code result closure error-cont cont)
   (if error-cont
       (let* ((error-closure (record-ref 
-			     (lookup-toplevel-variable 'error:not-a-closure)
+			     (variable-lookup 'error:not-a-closure)
 			     0))
 	     (error-code (if (eq? error-closure (if #f #f))
 			     #f
@@ -1199,6 +1210,7 @@
 	(record closure-type
 		(cps-code-generate regs)
 		#()
+		#f
 		#f)))))
 
 ;; Takes EXP and returns a new expression that has the same effect as
@@ -1210,3 +1222,5 @@
     (if (and (pair? exp) (eq? (car exp) :lambda))
 	`(:quote ,(cps-compile (cps-convert exp)))
 	exp)))
+
+(pk 'compiler)

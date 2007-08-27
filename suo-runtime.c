@@ -818,7 +818,11 @@ sys (int n_args,
   else if (arg1 == ((9<<2)|1))
     {
       /* set_reg (i, v) */
-      return regs[((sword)arg2) >> 2] = arg3;
+      int i = ((sword)arg2) >> 2;
+      regs[i] = arg3;
+      if (i == -3)
+	rehash_hashq_vectors (regs[-3]);
+      return regs[i];
     }
   else if (arg1 == ((10<<2)|1))
     {

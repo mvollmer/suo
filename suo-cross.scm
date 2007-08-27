@@ -97,6 +97,7 @@
 (define ignored-variable (make-variable #f))
 
 (define (boot-module-eval-closure sym define?)
+  ;;(pk 'eval-closure sym define?)
   (if define?
       (if (memq sym strong-boot-bindings)
 	  (begin
@@ -106,7 +107,6 @@
 	    (pk 'boot-define sym)
 	    (module-make-local-var! boot-module sym)))
       (begin
-	;;(pk 'lookup sym)
 	(module-local-variable boot-module sym))))
 
 (set-module-eval-closure! boot-module boot-module-eval-closure)
@@ -172,11 +172,17 @@
 	     vector? vector-length make-vector vector-ref vector-set!
 	     vector->list
 
-	     symbol? string->symbol symbol->string gensym
-
-	     keyword? keyword->symbol
+	     symbol? symbol->string string->symbol gensym
 
 	     string? make-string string-length string-ref string-set!)
+
+;; Pathnames are restricted to be just symbols in the boot environment
+
+(define suo:pathname? symbol?)
+(define (suo:pathname-absolute? p) #f)
+(define (suo:pathname-components p) (list p))
+
+(boot-import pathname? pathname-absolute? pathname-components)
 
 ;; Records are implemented using, errm, records, but with records of a
 ;; different kind.  The fields of the Suo record are simply stored as
@@ -281,11 +287,12 @@
 
 (define suo:box-type (suo:make-record-type 1 'box #f))
 
-(define suo:variable-type (suo:make-record-type 2 'variable #f))
+(define suo:variable-type (suo:make-record-type 1 'variable #f))
 
-(define suo:macro-type (suo:make-record-type 2 'macro #f))
+(define suo:macro-type (suo:make-record-type 1 'macro #f))
 
-(define suo:closure-type (suo:make-record-type 3 'closure #f))
+(define suo:closure-type (suo:make-record-type 4 'closure #f))
+;; code env dbg setter
 
 (define suo:string-type (suo:make-record-type 1 'string #f))
 
@@ -377,10 +384,10 @@
 	    (else
 	     f)))))
 
-(define (suo:call/p parameter value func)
+(define (suo:call-p parameter value func)
   (with-fluid* (parameter #f 'get-fluid) value func))
 
-(boot-import make-parameter call/p)
+(boot-import make-parameter call-p)
 
 ;; We also import the printing functions into the boot environment so
 ;; that output is fastish..
@@ -394,69 +401,103 @@
 
 (boot-import make-hashq-table hashq-ref hashq-set!)
 
+;; Setters are stored on the side
+
+(define setters (make-hash-table 31))
+
+(define (suo:setter proc)
+  (hashq-ref setters proc))
+
+(define (suo:init-setter-setter proc)
+  (hashq-set! setters proc
+	      (lambda (setter proc)
+		(hashq-set! setters proc setter))))
+
+(boot-import setter init-setter-setter)
 
 ;;; The image environment
-
-;; The compiler itself doesn't define toplevel variables or macros in
-;; the image environment.  That is done by 'image-eval' below.  The
-;; compiler merely looks up variables and macros with
-;; 'lookup-toplevel-variable', and 'lookup-toplevel-macro',
-;; respectively.
-;;
-;; Toplevel variables follows the Suo model, of course: when a
-;; variable is used for the first time, it is silently created by
-;; 'lookup-toplevel-variable'.  However, there will be warnings at
-;; then end of compilation about referenced but not yet defined
-;; variables.
-
-(define image-bindings '())
-(define image-variable-inits '())
-
-(define (register-image-binding sym obj)
-  (set! image-bindings (acons sym obj image-bindings)))
-
-(define (lookup-image-variable sym)
-  (let ((var (assq-ref image-bindings sym)))
-    (if var
-	(if (suo:record-with-type? var suo:variable-type)
-	    var
-	    (error "not a variable: " sym))
-	(let ((var (suo:record suo:variable-type (if #f #f) sym)))
-	  (pk 'image-variable sym)
-	  (register-image-binding sym var)
-	  var))))
-
-(define (check-undefined-variables)
-  (pk (length image-bindings) 'bindings)
-  (for-each (lambda (binding)
-	      (let ((sym (car binding))
-		    (obj (cdr binding)))
-		(if (and (suo:record-with-type? obj suo:variable-type)
-			 (eq? (if #f #f) (suo:record-ref obj 0))
-			 (not (memq obj image-variable-inits)))
-		    (pk 'undefined sym))))
-	    image-bindings))
-
-(define suo:lookup-toplevel-variable lookup-image-variable)
-(boot-import lookup-toplevel-variable)
 
 ;; Toplevel macros are compiled and made available in the image, but
 ;; they are never used to expand forms during compilation.  Instead,
 ;; the compiler uses the macros in the boot environment to expand code
 ;; that it compiles for the image environment.
+;;
+;; All variables must be declared before they are first referenced.
 
-(define (register-image-macro sym val)
-  (if (assq-ref image-bindings sym)
-      (error "redefined: " sym)
-      (begin
-	(pk 'image-macro sym)
-	(register-image-binding sym (suo:record suo:macro-type val sym)))))
+(define boot-bindings (make-hash-table 513))
 
-(define (lookup-boot-macro-transformer sym)
+(define (lookup sym)
+  (hashq-ref boot-bindings sym))
+
+(define (make-entry val attrs)
+  (cons val attrs))
+
+(define entry-value car)
+
+(define (enter sym ent)
+  (hashq-set! boot-bindings sym ent))
+
+(define undeclared-variables '())
+
+(define (check-undefined-variables)
+  (for-each (lambda (sym)
+	      (let ((val (suo:record-ref (entry-value (lookup sym)) 0)))
+		(if (eq? (if #f #f) val)
+		    (pk 'undeclared sym))))
+	    undeclared-variables))
+
+(define (suo:variable-declare sym . attrs)
+  (let ((ent (lookup sym)))
+    (cond ((not ent)
+	   (let ((var (suo:record suo:variable-type (begin))))
+	     (pk 'image-declare sym)
+	     (enter sym (make-entry var attrs))
+	     var))
+	  ((suo:record-with-type? (entry-value ent) suo:variable-type)
+	   (set-cdr! ent attrs)
+	   (entry-value ent))
+	  (else
+	   (error "already declared: " sym)))))
+
+(define (suo:variable-lookup sym)
+  (let ((ent (lookup sym)))
+    (cond ((not ent)
+	   (pk 'image-undeclared sym)
+	   (set! undeclared-variables (cons sym undeclared-variables))
+	   (let ((var (suo:record suo:variable-type (if #f #f))))
+	     (enter sym (make-entry var '()))
+	     var))
+	  ((suo:record-with-type? (entry-value ent) suo:variable-type)
+	   (entry-value ent))
+	  (else
+	   (error "not a variable: " sym)))))
+
+(define (suo:macro-lookup sym)
   (assq-ref boot-macro-transformers sym))
 
-(define suo:lookup-toplevel-macro-transformer lookup-boot-macro-transformer)
-(boot-import lookup-toplevel-macro-transformer)
+(define (suo:macro-define sym val)
+  (pk 'image-macro sym)
+  (enter sym (make-entry (suo:record suo:macro-type val) '())))
+
+(define-macro (suo:declare-variables . syms)
+  ;; Nothing to do when loading into host Scheme
+  #f)
+
+(register-boot-macro
+ 'declare-variables
+ (lambda syms
+   (apply pk 'image-declare syms)
+   (for-each (lambda (sym)
+	       (enter sym
+		      (make-entry (suo:record suo:variable-type
+					      (if #f #f))
+				  '()))
+	       #f)
+	     syms)))
+
+(boot-import variable-declare variable-lookup
+	     macro-lookup macro-define
+	     declare-variables)
 
 ;; Some of the toplevel forms that are compiled are simple enough that
 ;; they can be carried out at compile time.  Other forms are collected
@@ -470,7 +511,6 @@
   (set! image-expressions (cons exp image-expressions)))
 
 (define (add-image-variable-init var val)
-  (set! image-variable-inits (cons var image-variable-inits))
   (add-image-expression `(primop record-set ',var 0 ,val)))
 
 (define (image-expression)
@@ -492,8 +532,20 @@
 
 (define (image-eval form)
 
-  (define (eval1 form)
-    (let ((exp (boot-eval `(compile ',form))))
+  (define (compile form)
+    (boot-eval `(compile ',form)))
+
+  (define (variable-lookup sym)
+    (boot-eval `(variable-lookup ',sym)))
+
+  (define (variable-declare sym . attrs)
+    (apply (boot-eval 'variable-declare) sym attrs))
+
+  (define (macro-define sym val)
+    (boot-eval `(macro-define ',sym ',val)))
+
+  (define (eval form)
+    (let ((exp (compile form)))
       (if (pair? exp)
 	  (case (car exp)
 	    ((:begin)
@@ -501,32 +553,40 @@
 	       (cond ((null? forms)
 		      (if #f #f))
 		     ((null? (cdr forms))
-		      (eval1 (car forms)))
+		      (pk 'last (car forms))
+		      (eval (car forms)))
 		     (else
-		      (eval1 (car forms))
+		      (pk 'non-last (car forms))
+		      (eval (car forms))
 		      (loop (cdr forms))))))
-	    ((:set :define)
+	    ((:set)
 	     (let* ((name (cadr exp))
-		    (val (eval1 (caddr exp)))
-		    (var (lookup-image-variable name)))
-	       (if (constant? val)
-		   (suo:record-set! var 0 (constant-value val))
-		   (add-image-variable-init var val))
+		    (val-exp (compile (caddr exp)))
+		    (var (variable-lookup name)))
+	       (if (constant? val-exp)
+		   (suo:record-set! var 0 (constant-value val-exp))
+		   (add-image-variable-init var val-exp))
+	       (if #f #f)))
+	    ((:define)
+	     (let* ((name (cadr exp))
+		    (var (variable-declare name (cons 'source (caddr exp))))
+		    (val-exp (compile (caddr exp))))
+	       (if (constant? val-exp)
+		   (suo:record-set! var 0 (constant-value val-exp))
+		   (add-image-variable-init var val-exp))
 	       (if #f #f)))
 	    ((:define-macro)
 	     (let* ((name (cadr exp))
-		    (val (eval1 (caddr exp))))
-	       (if (constant? val)
-		   (register-image-macro name (constant-value val))
-		   (error "macro transformer not constant: " val)))
+		    (val-exp (compile (caddr exp))))
+	       (if (constant? val-exp)
+		   (macro-define name (constant-value val-exp))
+		   (error "macro transformer not constant: " val-exp)))
 	     (if #f #f))
 	    (else
-	     exp))
-	  exp)))
+	     (add-image-expression exp)))
+	  (error "useless form at toplevel: " exp))))
 
-  (let ((exp (eval1 form)))
-    (if (not (constant? exp))
-	(add-image-expression exp))))
+  (eval form))
 
 ;; Where there is 'eval', there is 'load'.
 
@@ -545,16 +605,17 @@
 ;; uses.  it is easier to define these record types once for both the
 ;; boot and image environment.
 
-(define (import-image-binding-from-boot sym)
-  (let ((var (lookup-image-variable sym)))
-    (suo:record-set! var 0 (boot-eval sym))))
+(define (import-symbol-definition-from-boot sym)
+  (enter sym (make-entry (suo:record suo:variable-type
+				     (boot-eval sym))
+			 '())))
 
 (define-macro (image-import-from-boot . syms)
   `(begin
      ,@(map (lambda (sym)
-	      `(import-image-binding-from-boot ',sym))
+	      `(import-symbol-definition-from-boot ',sym))
 	    syms)))
-  
+
 (image-import-from-boot record-type-type
 			string-type
 			symbol-type
@@ -675,7 +736,7 @@
 		     (+ (ash w 8) (car bs))
 		     (1+ i))))))
 
-    (define (emit obj)
+    (define (emit obj . indirects)
       (cond
        ((pair? obj)
 	(let ((ptr (alloc obj 2)))
@@ -686,6 +747,8 @@
 	       (ptr (alloc obj (1+ (length fields)))))
 	  (if (not (eqv? (length fields) (suo:record-ref type 0)))
 	      (error "inconsistent record"))
+	  (for-each (lambda (i) (hashq-set! ptr-hash i ptr))
+		    indirects)
 	  (apply emit-words ptr
 		 (+ (asm type) 3)
 		 (map asm fields))))
@@ -706,21 +769,16 @@
 				   (apply u8vector
 					  (map char->integer
 					       (string->list obj))))))
-	  (emit suo-str)
-	  ;; register the original OBJ as required
-	  (hashq-set! ptr-hash obj (hashq-ref ptr-hash suo-str))))
+	  (emit suo-str obj)))
        ((symbol? obj)
 	(let ((suo-sym (suo:record suo:symbol-type (symbol->string obj))))
-	  (set! all-symbols (cons suo-sym all-symbols))
-	  (emit suo-sym)
-	  ;; register the original OBJ as required
-	  (hashq-set! ptr-hash obj (hashq-ref ptr-hash suo-sym))))
+	  (set! all-symbols (cons obj all-symbols))
+	  (emit suo-sym obj)))
        ((keyword? obj)
-	(let ((suo-keyword (suo:record suo:keyword-type (keyword->symbol obj))))
-	  (set! all-keywords (cons suo-keyword all-keywords))
-	  (emit suo-keyword)
-	  ;; register the original OBJ as required
-	  (hashq-set! ptr-hash obj (hashq-ref ptr-hash suo-keyword))))
+	(let ((suo-keyword (suo:record suo:keyword-type
+				       (keyword->symbol obj))))
+	  (set! all-keywords (cons obj all-keywords))
+	  (emit suo-keyword obj)))
        ((suo:code? obj)
 	(let* ((insns (suo-code-insns obj))
 	       (insn-words (quotient (suo:bytevec-length-8 insns) 4))
@@ -737,9 +795,7 @@
        ((integer? obj)
 	;; bignum, fixnums are handled by asm below
 	(let ((suo-bignum (integer->bignum obj)))
-	  (emit suo-bignum)
-	  ;; register the original OBJ as required
-	  (hashq-set! ptr-hash obj (hashq-ref ptr-hash suo-bignum))))
+	  (emit suo-bignum obj)))
        (else
 	(error "unsupported value: " obj))))
 
@@ -769,18 +825,19 @@
 
     (asm obj)
 
-    ;; The image-bindings might contain symbols or keywords that are
-    ;; otherwise unreferenced, and keywords might use otherwise unused
+    ;; The toplevel might contain symbols or keywords that are
+    ;; otherwise unreferenced, and keywords might otherwise unused
     ;; symbols, so the order here is important.
     ;;
-    (asm image-bindings)
-    (asm all-keywords)
-    (asm all-symbols)
-    (for-each (lambda (idx)
-		(emit-words idx (asm (list all-symbols
-					   all-keywords
-					   image-bindings))))
-	      bootinfo-idxs)
+    (let ((all-bindings (hash-map->list cons boot-bindings)))
+      (asm all-bindings)
+      (asm all-keywords)
+      (asm all-symbols)
+      (for-each (lambda (idx)
+		  (emit-words idx (asm (list all-symbols
+					     all-keywords
+					     all-bindings))))
+		bootinfo-idxs))
 
     (u32subvector mem 0 idx)))
 
