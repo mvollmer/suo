@@ -1989,6 +1989,9 @@ Only elements that occur in both lists occur in the result list."
       (vector-set! s (- i start) (vector-ref v i)))
     s))
 
+(define (vector-copy v)
+  (subvector v 0 (vector-length v)))
+
 ;;; Code
 
 (define (code? val)
@@ -2280,6 +2283,158 @@ Only elements that occur in both lists occur in the result list."
 	      key)))
       (error:wrong-type)))
 
+;;; Extended argument lists (DRAFT)
+
+;; The fundamental function to handle keyword arguments etc is
+;; PARSE-EXTENDED-ARGUMENTS.  Given a argument specification and a
+;; list of the actual parameters, it will return the values for the
+;; arguments (as 'multiple values') in an order corresponding to the
+;; argument specification.
+;;
+;; For example:
+;;
+;;     (parse-extended-arguments '(:flags v w :keys x y z :rest a b r)
+;;                               '(:v 1 :x 2 3 :y 4 5 6)
+;;     => #t #f 2 4 #<unspecified> 1 3 (5 6)
+;;     ;; v  w  x y z              a b r
+;;
+;; A argument specification consists of keywords followed by a list of
+;; symbols.  They keyword can be either :flags, :keys, or :rest.
+;;
+;; The list of actual parameters is scanned from left to right.  When
+;; the current parameter is the keyword :rest, scanning stops and the
+;; remaining parameters are assigned to the rest arguments,
+;; effectively as if scanning would continue but keywords are not
+;; handled specially.  If it is a keyword but not :rest, it must
+;; correspond to one of the :flag or :key arguments.  If it is a flag
+;; argument, that flag is set to true.  If it is a key argument, the
+;; next parameter value is consumed and is used as the value for this
+;; key.  If the current parameter is not a keyword, it is used as the
+;; value for the next unused rest argument.  The last rest argument
+;; accumulates all these values as a list.
+;;
+;; When a flag argument didn't receive a value during the scan, it is
+;; set to #f.  When a key argument or rest argument didn't receive a
+;; value, it is set to #<unspecified>.  When there are no rest
+;; arguments at all and a value should be assigned to one, an error is
+;; signalled.
+;;
+;; Syntactic sugar is available in the form of LAMBDA* and DEFINE*.
+;; These macros are actually slightly more efficient since they
+;; pre-compile the extended argument specification.
+
+(define-record extarg-spec
+  defaults names flags keys rest rest-first rest-last)
+
+(define (parse-extarg-spec spec)
+  (let loop ((spec spec)
+	     (cur-key #f)
+	     (index 0)
+	     (defs '())
+	     (names '())
+	     (flags '())
+	     (keys '())
+	     (rest '())
+	     (rest-first #f)
+	     (rest-last #f))
+    (cond ((null? spec)
+	   (extarg-spec (apply vector (reverse defs))
+			(reverse names)
+			flags
+			keys
+			rest
+			rest-first
+			rest-last))
+	  ((keyword? (car spec))
+	   (loop (cdr spec) (car spec)
+		 index defs names
+		 flags
+		 keys
+		 rest rest-first rest-last))
+	  ((symbol? (car spec))
+	   (case cur-key
+	     ((:flags)
+	      (loop (cdr spec) cur-key
+		    (1+ index) (cons #f defs) (cons (car spec) names)
+		    (acons (symbol->keyword (car spec)) index flags)
+		    keys
+		    rest rest-first rest-last))
+	     ((:keys)
+	      (loop (cdr spec) cur-key
+		    (1+ index) (cons (begin) defs) (cons (car spec) names)
+		    flags
+		    (acons (symbol->keyword (car spec)) index keys)
+		    rest rest-first rest-last))
+	     ((:rest)
+	      (loop (cdr spec) cur-key
+		    (1+ index) (cons '() (if rest-first
+					     (cons (begin) (cdr defs))
+					     defs))
+		    (cons (car spec) names)
+		    flags
+		    keys
+		    (acons (symbol->keyword (car spec)) index rest) 
+		    (or rest-first index) index))
+	     ((#f)
+	      (error "argument list must start with a keyword"))
+	     (else
+	      (error "unrecognized argument keyword: " cur-key))))
+	  (else
+	   (error "unrecognized argument syntax: " (car spec))))))
+
+(define (match-extarg-spec spec parms)
+  (let ((values (vector-copy (extarg-spec-defaults spec)))
+	(rest-last (extarg-spec-rest-last spec)))
+    (let loop ((parms parms)
+	       (rest-next (extarg-spec-rest-first spec))
+	       (rest #f))
+      (cond ((null? parms)
+	     (if rest-last
+		 (vector-set! values rest-last
+			      (reverse (vector-ref values rest-last))))
+	     values)
+	    ((or rest
+		 (not (keyword? (car parms))))
+	     (if (not rest-next)
+		 (error "too many parameters"))
+	     (if (>= rest-next rest-last)
+		 (vector-set! values rest-last
+			      (cons (car parms)
+				    (vector-ref values rest-last)))
+		 (vector-set! values rest-next (car parms)))
+	     (loop (cdr parms)
+		   (1+ rest-next)
+		   rest))
+	    ((eq? :rest (car parms))
+	     (loop (cdr parms) rest-next #t))
+	    ((assq-ref (extarg-spec-flags spec) (car parms))
+	     => (lambda (i)
+		  (vector-set! values i #t)
+		  (loop (cdr parms) rest-next rest)))
+	    ((assq-ref (extarg-spec-keys spec) (car parms))
+	     => (lambda (i)
+		  (if (null? (cdr parms))
+		      (error "missing value for keyword argument: " 
+			     (car parms)))
+		  (vector-set! values i (cadr parms))
+		  (loop (cddr parms) rest-next rest)))
+	    (else
+	     (error "unknown keyword in arguments: " (car parms)))))))
+
+(define (parse-extended-arguments spec parms)
+  (match-extarg-spec (parse-extarg-spec spec) parms))
+
+(define-macro (lambda* spec . body)
+  (let ((spec (parse-extarg-spec spec)))
+    `(let ((func (lambda ,(extarg-spec-names spec) ,@body)))
+       (lambda parms
+	 (apply func (vector->list (match-extarg-spec ',spec parms)))))))
+
+(define-macro (define* head . body)
+  (let ((name (car head))
+	(spec (cdr head)))
+    `(define ,name (lambda* ,spec ,@body))))
+
 ;;; Pathnames
 
 ;; A pathname is a list symbols (called the pathname's components) and
@@ -2379,6 +2534,10 @@ Only elements that occur in both lists occur in the result list."
 	   (error "root directory has no parent"))
 	  (else
 	   (pathname (+ o1 (- o2 l1)) (pathname-components p2))))))
+
+(define (pathname-head p n)
+  (pathname (pathname-parent-offset p)
+	    (list-head (pathname-components p) n)))
 
 ;;; Variables and macros
 
@@ -2493,19 +2652,43 @@ Only elements that occur in both lists occur in the result list."
 
 (define open-directories (make-parameter '()))
 
-(define (lookup-in-entry ent comps)
-  (if (null? comps)
-      ent
-      (lookup-in-entry (directory-lookup (entry-value ent) (car comps))
-		       (cdr comps))))
+;; LOOKUP-PARENT normally returns two values: a directory and a
+;; symbol, where the symbol is the last component of NAME and the
+;; directory is the parent of it according to NAME.  When NAME refers
+;; to the root directory, LOOKUP-PARENT returns the root directory and
+;; #f.
 
+(define (lookup-parent name)
+
+  (cond ((symbol? name)
+	 (values (entry-value (current-directory))
+		 name))
+	(else
+	 (let ((name (pathname-concat (current-directory-path) name)))
+
+	   (define (lookup-in-dir dir comps len)
+	     (cond ((null? comps)
+		    (values dir #f))
+		   ((not (directory? dir))
+		    (error "not a directory: " (pathname-head name len)))
+		   ((null? (cdr comps))
+		    (values dir (car comps)))
+		   (else
+		    (lookup-in-dir (entry-value
+				    (or (directory-lookup dir (car comps))
+					(error "not found: "
+					       (pathname-head name
+							      (1+ len)))))
+				   (cdr comps)
+				   (1+ len)))))
+	 
+	   (lookup-in-dir root-directory (pathname-components name) 0)))))
+	 
 (define (lookup* name)
-  (if (symbol? name)
-      (directory-lookup (entry-value (current-directory)) name)
-      (lookup-in-entry root-directory-entry
-		       (pathname-components 
-			   (pathname-concat (current-directory-path)
-					    name)))))
+  (let-values1 (dir sym (lookup-parent name))
+    (if (not sym)
+	root-directory-entry
+	(directory-lookup dir sym))))
 
 (define (lookup name)
   (or (lookup* name)
@@ -2514,41 +2697,20 @@ Only elements that occur in both lists occur in the result list."
 		     (directory-lookup dir name))
 		   (open-directories)))))
 
-(define (enter-in-entry parent comps child)
-  (cond ((null? (cdr comps))
-	 (directory-enter (entry-value parent) (car comps) child))
-	(else
-	 (enter-in-entry (directory-lookup (entry-value parent) (car comps))
-			 (cdr comps) child))))
-
 (define (enter name proc)
-  (let ((ent (lookup* name)))
-    (cond (ent
-	   (proc ent)
-	   ent)
-	  (else
-	   (if (lookup name)
-	       (pk 'shadows name))
-	   (let ((ent (proc #f)))
-	     (enter-in-entry root-directory-entry
-			     (pathname-components 
-				 (pathname-concat (current-directory-path)
-						  name))
-			     ent)
-	     ent)))))
-
-(define (remove-in-entry ent comps)
-  (cond ((null? (cdr comps))
-	 (directory-remove (entry-value ent) (car comps)))
-	(else
-	 (remove-in-entry (directory-lookup (entry-value ent) (car comps))
-			  (cdr comps)))))
-
-(define (remove name)
-  (remove-in-entry root-directory-entry
-		   (pathname-components 
-		       (pathname-concat (current-directory-path)
-					name))))
+  (let-values1 (dir sym (lookup-parent name))
+    (if (not sym)
+	(error "can't modify root directory")
+	(let ((ent (directory-lookup dir sym)))
+	  (cond (ent
+		 (proc ent)
+		 ent)
+		(else
+		 (if (lookup name)
+		     (pk 'shadows name))
+		 (let ((ent (proc #f)))
+		   (directory-enter dir sym ent)
+		   ent)))))))
 
 (define (variable-lookup name)
   (let ((ent (lookup name)))
@@ -2597,7 +2759,7 @@ Only elements that occur in both lists occur in the result list."
 		 (else
 		  (error "already declared: " name))))))
 
-(define (set-current-directory name)
+(define (cd name)
   (let* ((n (pathname-concat (current-directory-path) name))
 	 (e (lookup* n)))
     (cond ((directory? (entry-value e))
@@ -2607,30 +2769,31 @@ Only elements that occur in both lists occur in the result list."
 	  (else
 	   (error "not a directory: " n)))))
 
-(define-macro (cd name)
-  `(set-current-directory ',name))
-
 (define (pwd)
   (write (current-directory-path))
   (newline)
   (values))
 
 (define (list-directory name verbose)
+  (pk 'list name)
   (let ((dir (entry-value (lookup name))))
     (hashq-fold #f (lambda (elt res)
 		     (list-entry (car elt) (cdr elt) verbose))
-		(directory-entries dir))
-    (values)))
+		(directory-entries dir))))
 
-(define-macro (ls . names)
+(define* (ls :flags v :rest names)
   (if (null? names)
-      `(list-directory '. #f)
-      `(begin ,@(map (lambda (n)
-		       `(list-directory ',n #f))
-		     names))))
+      (list-directory '. v)
+      (for-each (lambda (n)
+		  (list-directory n v))
+		names))
+  (values))
 
-(define-macro (rm name)
-  `(remove ',name))
+(define (rm name)
+  (let-values1 (dir sym (lookup-parent name))
+    (if (not sym)
+	(error "can't remove root directory")
+	(directory-remove dir sym))))
 
 (define-macro (mkdir name)
   `(make-directory ',name))
@@ -2683,7 +2846,53 @@ Only elements that occur in both lists occur in the result list."
      (else
       form))))
 
+;;; Sheval
+
+;; SHEVAL is a variant of eval, intended for use in the repl to give
+;; it a more shell-like character.  It differs from eval in that
+;; pathnames evaluate to themselves and not to the item they refer to,
+;; except in the first position of a form.  This makes it possible to
+;; write commands such as 'cd', 'ls', and 'mkdir' as functions and not
+;; have to quote their arguments all the time.
+;;
+;; You can escape to eval by using
+;;
+;;     ,form
+;;
+;; with sheval.  Quote is also recognized.
+;;
+;; You can not escape from eval to sheval, just use quote to stop
+;; literal pathnames from evaluating, as usual.
+;;
+;; Macros in general are not allowed in Sheval forms, you have to use
+;; something like
+;;
+;;    (ls ,(let ((a ...)) a))
+;;
+;; if you want them.
+
+(define (sheval form)
+  (cond
+   ((pair? form)
+    (cond ((null? form)
+	   (begin))
+	  ((eq? (car form) 'unquote)
+	   (eval (cadr form)))
+	  ((eq? (car form) 'quote)
+	   (cadr form))
+	  (else
+	   (let ((op (eval (car form)))
+		 (args (map sheval (cdr form))))
+	     (apply op args)))))
+   (else
+    form)))
+
 ;;; Repl
+
+;; The 'repl commands' are low-level, hard-coded commands that bypass
+;; the normal directory lookups etc.  They are intended to get you out
+;; of a situation where the normal functions are no longer visible by
+;; accident.
 
 (define repl-commands '())
 
@@ -2735,13 +2944,27 @@ Only elements that occur in both lists occur in the result list."
 	    (pk src))
 	(trace-conts (closure-debug-info k)))))
 
+;; REPL-EVAL evaluates a form that has been read by 'read-line', using
+;; either 'sheval' or 'eval'.  When the first element of the line read
+;; by read-line is not a list, sheval is used, otherwise all elements
+;; are evaluated with eval.  Thus, a line of the form
+;;
+;;    cmd arg1 arg2
+;;
+;; is evaluated as (sheval '(cmd arg1 arg2)) while a line of the form
+;;
+;;    (proc arg1 arg2)
+;;
+;; is evaluated as (eval '(proc arg1 arg2))
+
+
 (define (repl-eval form)
   (cond ((null? form)
 	 (values))
 	((keyword? (car form))
 	 (eval-repl-command (cons (keyword->symbol (car form)) (cdr form))))
 	((not (pair? (car form)))
-	 (eval form))
+	 (sheval form))
 	(else
 	 (eval (cons 'begin form)))))
 
