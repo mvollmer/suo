@@ -60,7 +60,7 @@
 ;; Attempts to re-binding bindings done with
 ;; 'register-strong-boot-binding' will be ignored when evaluating code
 ;; in the boot environment.  Other re-bindings will result in errors.
- 
+
 (define boot-module (make-module 1031))
 
 (define strong-boot-bindings '())
@@ -80,6 +80,22 @@
      ,@(map (lambda (sym)
 	      `(import-boot-binding ',sym))
 	    syms)))
+
+;; Macros can use 'bootstrap-phase' to control their expansion.  See
+;; 'define-record' for an example.
+;;
+;; The bootstrap phase can be on of 'load-for-boot' (when the macro is
+;; expanded to fill the boot environment), 'compile-for-image' (when
+;; the macro is expanded to produce code that is compiled into the
+;; image environment), or 'running' (when the macro is expanded in a
+;; running image).
+
+(define current-bootstrap-phase 'load-for-boot)
+
+(define (suo:bootstrap-phase)
+  current-bootstrap-phase)
+
+(boot-import bootstrap-phase)
 
 ;; We need a few basic bindings to get going.
 
@@ -110,6 +126,14 @@
 	(module-local-variable boot-module sym))))
 
 (set-module-eval-closure! boot-module boot-module-eval-closure)
+
+(define-macro (suo:define-function name . exprs)
+  `(define ,name ,(car exprs)))
+
+(define-macro (suo:define-record-type name  expr)
+  `(define ,name ,expr))
+
+(boot-import define-function define-record-type)
 
 ;; We remember macros more explicitely.  The compiler uses the macros
 ;; in the boot environment when expanding code that is compiled for
@@ -172,7 +196,9 @@
 	     vector? vector-length make-vector vector-ref vector-set!
 	     vector->list
 
-	     symbol? symbol->string string->symbol gensym
+	     symbol? symbol->string string->symbol gensym symbol-append
+
+	     keyword? symbol->keyword keyword->symbol
 
 	     string? make-string string-length string-ref string-set!)
 
@@ -195,7 +221,7 @@
 (define suo:record? (record-predicate suo-record-record-type))
 
 (define (suo:record-length rec)
-  (suo:record-ref (suo:record-type rec) 0))
+  (suo:record-ref (suo:type-of-record rec) 0))
 
 (define suo:record
   (let ((constructor (record-constructor suo-record-record-type)))
@@ -207,7 +233,7 @@
     (lambda (type init)
       (constructor type (make-vector (suo:record-ref type 0) init)))))
 
-(define suo:record-type (record-accessor suo-record-record-type 'type))
+(define suo:type-of-record (record-accessor suo-record-record-type 'type))
 
 (define suo-record-fields (record-accessor suo-record-record-type 'fields))
 
@@ -219,50 +245,55 @@
 
 (define suo-record-set-type! (record-modifier suo-record-record-type 'type))
 
-;; The type of record types.  It has three fields:
-;;
-;; n-fields - the number of fields as a fixnum
-;; name     - a arbitrary symbol used when printing, etc.
-;; ancestry - a vector with all parent types; see below for details
-;;
-;; The '(is-a OBJ TYPE)' relation consists in determining whether TYPE
-;; is among the types in the 'ancestry' vector of the type of OBJ.
-;; Since only single-inheritance is supported, the test doesn't
-;; require searching all of the ancestry vector.  If it is in the
-;; ancestry it can only be in one position and we can check that
-;; position directly.
-;;
-;; More concretely, the ancestry vector lists the parent types starting
-;; with the root type at position zero and ending with the type it
-;; belongs to in the last position.
-
-(define suo:record-type-type (suo:record #f 3 'record-type (vector #f)))
-(suo-record-set-type! suo:record-type-type
-		      suo:record-type-type)
-(vector-set! (suo:record-ref suo:record-type-type 2) 0 suo:record-type-type)
+(define suo:record-type-type #f)
 
 (define (suo:record-with-type? obj type)
   (and (suo:record? obj)
-       (eq? (suo:record-type obj) type)))
+       (eq? (suo:type-of-record obj) type)))
 
 (define (suo:record-is-a? obj type)
   (and (suo:record? obj)
-       (let ((ancestry (suo:record-ref (suo:record-type obj) 2))
+       (let ((ancestry (suo:record-ref (suo:type-of-record obj) 2))
 	     (pos (1- (vector-length (suo:record-ref type 2)))))
 	 (and (< pos (vector-length ancestry))
 	      (eq? type (vector-ref ancestry pos))))))
 
-(define (suo:make-record-type n-fields name parent-type)
+(define (suo:record-type-accessor type slot-name)
+  (let ((index (list-index (suo:record-ref type 3) slot-name)))
+    (if index
+	(lambda (obj)
+	  (if (suo:record-is-a? obj type)
+	      (suo:record-ref obj index)
+	      (error "wrong type: " obj)))
+	(error "no such slot: " slot-name))))
+
+(define (suo:record-type-constructor type args)
+  (lambda args (apply suo:record type args)))
+
+(define boot-record-types '())
+
+(define (suo:make-record-type name parent-type slots)
+  (pk 'boot-record-type name slots)
+  (set! boot-record-types (cons (symbol-append name '@type) boot-record-types))
   (if parent-type
       (error "inheritance not supported"))
   (let* ((ancestry (vector #f))
-	 (type (suo:record suo:record-type-type n-fields name ancestry)))
+	 (type (suo:record suo:record-type-type 
+			   (length slots)
+			   name
+			   ancestry
+			   slots
+			   '())))
     (vector-set! ancestry 0 type)
+    (cond ((eq? name 'record-type)
+	   (set! suo:record-type-type type)
+	   (suo-record-set-type! type type)))
     type))
 
 (boot-import record? record-with-type?
-	     record-type record-length record-ref record-set!
-	     record-type-type record make-record make-record-type)
+	     type-of-record record-length record-ref record-set!
+	     record-type-type record make-record make-record-type
+	     record-type-accessor record-type-constructor)
 
 ;; Code objects are implemented as records with explicit bytevec and
 ;; vector for the instructions and literals, respectively.
@@ -280,30 +311,6 @@
 (define suo:code (record-constructor suo-code-record-type))
 
 (boot-import code? code)
-
-;;; Basic record types, needed by the compiler.  These are not defined
-;;; in "suo-base" since we need them to be identical (i.e., 'eq?') in
-;;; the boot environment and the image environment.  See below.
-
-(define suo:box-type (suo:make-record-type 1 'box #f))
-
-(define suo:variable-type (suo:make-record-type 1 'variable #f))
-
-(define suo:macro-type (suo:make-record-type 1 'macro #f))
-
-(define suo:closure-type (suo:make-record-type 4 'closure #f))
-;; code env dbg setter
-
-(define suo:string-type (suo:make-record-type 1 'string #f))
-
-(define suo:symbol-type (suo:make-record-type 1 'symbol #f))
-
-(define suo:keyword-type (suo:make-record-type 1 'keyword #f))
-
-(define suo:bignum-type (suo:make-record-type 1 'bignum #f))
-
-(boot-import box-type variable-type macro-type closure-type
-             string-type symbol-type keyword-type bignum-type)
 
 ;; Bytevecs are implemented with SRFI-4 u8vectors.
 
@@ -352,13 +359,13 @@
 	     bytevec-length-8 bytevec-ref-u8 bytevec-set-u8!
 	     bytevec-length-16 bytevec-ref-u16 bytevec-set-u16!)
 
-;; string-chars is used for low-level debugging.  It returns a bytevec
+;; string-bytes is used for low-level debugging.  It returns a bytevec
 ;; with the characters of the given string.
 
-(define (suo:string-chars str)
+(define (suo:string-bytes str)
   (list->u8vector (map char->integer (string->list str))))
 
-(boot-import string-chars)
+(boot-import string-bytes)
 
 ;;; Miscellaneous definitions for the boot environment
 
@@ -415,6 +422,12 @@
 
 (boot-import setter init-setter-setter)
 
+;; Multiple values
+
+(define suo:call-v call-with-values)
+
+(boot-import values call-v)
+
 ;;; The image environment
 
 ;; Toplevel macros are compiled and made available in the image, but
@@ -439,45 +452,89 @@
 
 (define undeclared-variables '())
 
+(define (image-lookup sym)
+  (or (resolve-transmogrification (entry-value (lookup sym)))
+      (error "undeclared in image: " sym)))
+
 (define (check-undefined-variables)
-  (for-each (lambda (sym)
-	      (let ((val (suo:record-ref (entry-value (lookup sym)) 0)))
-		(if (eq? (if #f #f) val)
-		    (pk 'undeclared sym))))
-	    undeclared-variables))
+  (let ((variable@type (boot-eval 'variable@type))
+	(closure@type (boot-eval 'closure@type)))
+    (for-each (lambda (sym)
+		(let ((val (image-lookup sym)))
+		  (cond ((suo:record-with-type? val variable@type)
+			 (if (eq? (begin) (suo:record-ref val 0))
+			     (pk 'undeclared-variable sym)))
+			((suo:record-with-type? val closure@type)
+			 (if (not (suo:record-ref val 1))
+			     (pk 'undeclared-function sym)))
+			(else
+			 (pk 'huh? sym)))))
+	      undeclared-variables)))
 
 (define (suo:variable-declare sym . attrs)
-  (let ((ent (lookup sym)))
-    (cond ((not ent)
-	   (let ((var (suo:record suo:variable-type (begin))))
-	     (pk 'image-declare sym)
-	     (enter sym (make-entry var attrs))
-	     var))
-	  ((suo:record-with-type? (entry-value ent) suo:variable-type)
-	   (set-cdr! ent attrs)
-	   (entry-value ent))
-	  (else
-	   (error "already declared: " sym)))))
+  (let ((variable@type (boot-eval 'variable@type)))
+    (let ((ent (lookup sym)))
+      (cond ((not ent)
+	     (let ((var (suo:record variable@type (begin))))
+	       (pk 'image-variable sym)
+	       (enter sym (make-entry var attrs))
+	       var))
+	    ((suo:record-with-type? (entry-value ent) variable@type)
+	     (set-cdr! ent attrs)
+	     (entry-value ent))
+	    (else
+	     (error "already declared, but not as variable: " sym))))))
+
+(define (suo:function-declare sym . attrs)
+  (let ((closure@type (boot-eval 'closure@type)))
+    (let ((ent (lookup sym)))
+      (cond ((not ent)
+	     (let ((func (suo:record closure@type #f #f #f #f)))
+	       (pk 'image-function sym)
+	       (enter sym (make-entry func attrs))
+	       func))
+	    ((suo:record-with-type? (entry-value ent) closure@type)
+	     (pk 'image-function-late sym)
+	     (set-cdr! ent attrs)
+	     (entry-value ent))
+	    (else
+	     (error "already declared, but not as function: " sym))))))
 
 (define (suo:variable-lookup sym)
-  (let ((ent (lookup sym)))
-    (cond ((not ent)
-	   (pk 'image-undeclared sym)
-	   (set! undeclared-variables (cons sym undeclared-variables))
-	   (let ((var (suo:record suo:variable-type (if #f #f))))
-	     (enter sym (make-entry var '()))
-	     var))
-	  ((suo:record-with-type? (entry-value ent) suo:variable-type)
-	   (entry-value ent))
-	  (else
-	   (error "not a variable: " sym)))))
+  (let ((variable@type (boot-eval 'variable@type)))
+    (let ((ent (lookup sym)))
+      (cond ((not ent)
+	     (pk 'image-undeclared sym)
+	     (set! undeclared-variables (cons sym undeclared-variables))
+	     (let ((var (suo:record variable@type (if #f #f))))
+	       (enter sym (make-entry var '()))
+	       var))
+	    ((suo:record-with-type? (entry-value ent) variable@type)
+	     (entry-value ent))
+	    (else
+	     (error "not a variable: " sym))))))
+
+(define (suo:function-lookup sym)
+  (let ((closure@type (boot-eval 'closure@type)))
+    (let ((ent (lookup sym)))
+      (cond ((not ent)
+	     (pk 'image-undeclared sym)
+	     (set! undeclared-variables (cons sym undeclared-variables))
+	     (let ((func (suo:record closure@type #f #f #f #f)))
+	       (enter sym (make-entry func '()))
+	       func))
+	    ((suo:record-with-type? (entry-value ent) closure@type)
+	     (resolve-transmogrification (entry-value ent)))
+	    (else
+	     (error "not a function: " sym))))))
 
 (define (suo:macro-lookup sym)
   (assq-ref boot-macro-transformers sym))
 
 (define (suo:macro-define sym val)
-  (pk 'image-macro sym)
-  (enter sym (make-entry (suo:record suo:macro-type val) '())))
+  (let ((macro@type (boot-eval 'macro@type)))
+    (pk 'image-macro sym)
+    (enter sym (make-entry (suo:record macro@type val) '()))))
 
 (define-macro (suo:declare-variables . syms)
   ;; Nothing to do when loading into host Scheme
@@ -486,16 +543,20 @@
 (register-boot-macro
  'declare-variables
  (lambda syms
-   (apply pk 'image-declare syms)
-   (for-each (lambda (sym)
-	       (enter sym
-		      (make-entry (suo:record suo:variable-type
-					      (if #f #f))
-				  '()))
-	       #f)
-	     syms)))
+   (let ((variable@type (boot-eval 'variable@type)))
+     (apply pk 'image-declare syms)
+     (for-each (lambda (sym)
+		 (enter sym
+			(make-entry (suo:record variable@type
+						(if #f #f))
+				    '()))
+		 #f)
+	       syms)
+     '(begin))))
 
-(boot-import variable-declare variable-lookup
+(boot-import lookup
+	     variable-declare variable-lookup
+	     function-declare function-lookup
 	     macro-lookup macro-define
 	     declare-variables)
 
@@ -513,8 +574,19 @@
 (define (add-image-variable-init var val)
   (add-image-expression `(primop record-set ',var 0 ,val)))
 
+(define (add-image-closure-transmogrify clos val)
+  (add-image-expression `(transmogrify-objects (vector ',clos) (vector ,val))))
+
 (define (image-expression)
   (cons 'begin (reverse image-expressions)))
+
+(define transmogrifications (make-hash-table 1023))
+
+(define (resolve-transmogrification obj)
+  (or (hashq-ref transmogrifications obj) obj))
+
+(define (transmogrify-objects from to)
+  (hashq-set! transmogrifications from (resolve-transmogrification to)))
 
 ;; Compilation happens by evaluating all forms in the image files with
 ;; a special variant of eval, called 'image-eval'.  'image-eval' only
@@ -541,6 +613,9 @@
   (define (variable-declare sym . attrs)
     (apply (boot-eval 'variable-declare) sym attrs))
 
+  (define (function-declare sym . attrs)
+    (apply (boot-eval 'function-declare) sym attrs))
+
   (define (macro-define sym val)
     (boot-eval `(macro-define ',sym ',val)))
 
@@ -553,10 +628,8 @@
 	       (cond ((null? forms)
 		      (if #f #f))
 		     ((null? (cdr forms))
-		      (pk 'last (car forms))
 		      (eval (car forms)))
 		     (else
-		      (pk 'non-last (car forms))
 		      (eval (car forms))
 		      (loop (cdr forms))))))
 	    ((:set)
@@ -575,6 +648,14 @@
 		   (suo:record-set! var 0 (constant-value val-exp))
 		   (add-image-variable-init var val-exp))
 	       (if #f #f)))
+	    ((:define-function)
+	     (let* ((name (cadr exp))
+		    (func (function-declare name (cons 'source (caddr exp))))
+		    (val-exp (compile (caddr exp))))
+	       (if (constant? val-exp)
+		   (transmogrify-objects func (constant-value val-exp))
+		   (add-image-closure-transmogrify func val-exp))
+	       (if #f #f)))
 	    ((:define-macro)
 	     (let* ((name (cadr exp))
 		    (val-exp (compile (caddr exp))))
@@ -592,6 +673,7 @@
 
 (define (image-load file)
   (pk 'image-load file)
+  (set! current-bootstrap-phase 'compile-for-image)
   (with-input-from-file file
     (lambda ()
       (let loop ((form (read)))
@@ -606,9 +688,10 @@
 ;; boot and image environment.
 
 (define (import-symbol-definition-from-boot sym)
-  (enter sym (make-entry (suo:record suo:variable-type
-				     (boot-eval sym))
-			 '())))
+  (let ((variable@type (boot-eval 'variable@type)))
+    (enter sym (make-entry (suo:record variable@type
+				       (boot-eval sym))
+			   '()))))
 
 (define-macro (image-import-from-boot . syms)
   `(begin
@@ -616,15 +699,9 @@
 	      `(import-symbol-definition-from-boot ',sym))
 	    syms)))
 
-(image-import-from-boot record-type-type
-			string-type
-			symbol-type
-			keyword-type
-			bignum-type
-			variable-type
-			macro-type
-			closure-type
-			box-type)
+(define (image-import-boot-record-types)
+  (image-import-from-boot record-type-type)
+  (for-each import-symbol-definition-from-boot boot-record-types))
 
 ;;; Dumping Suo objects into a u32vector
 
@@ -685,7 +762,11 @@
 (define (dump-object obj)
   (pk 'dump)
 
-  (let ((mem (make-u32vector (* 1024 1024)))
+  (let ((suo:string@type (boot-eval 'string@type))
+	(suo:symbol@type (boot-eval 'symbol@type))
+	(suo:keyword@type (boot-eval 'keyword@type))
+
+	(mem (make-u32vector (* 1024 1024)))
 	(idx 0)
 	(ptr-hash (make-hash-table (1- (* 1024 1024))))
 	(all-symbols '())
@@ -737,91 +818,102 @@
 		     (1+ i))))))
 
     (define (emit obj . indirects)
-      (cond
-       ((pair? obj)
-	(let ((ptr (alloc obj 2)))
-	  (emit-words ptr (asm (car obj)) (asm (cdr obj)))))
-       ((suo:record? obj)
-	(let* ((type (suo:record-type obj))
-	       (fields (vector->list (suo-record-fields obj)))
-	       (ptr (alloc obj (1+ (length fields)))))
-	  (if (not (eqv? (length fields) (suo:record-ref type 0)))
-	      (error "inconsistent record"))
-	  (for-each (lambda (i) (hashq-set! ptr-hash i ptr))
-		    indirects)
-	  (apply emit-words ptr
-		 (+ (asm type) 3)
-		 (map asm fields))))
-       ((vector? obj)
-	(let ((ptr (alloc obj (1+ (vector-length obj)))))
-	  (apply emit-words ptr
-		 (+ #x80000000 (* (vector-length obj) 16) 3)
-		 (map asm (vector->list obj)))))
-       ((suo:bytevec? obj)
-	(let* ((len (suo:bytevec-length-8 obj))
-	       (words (quotient (+ len 3) 4))
-	       (ptr (alloc obj (1+ words))))
-	  (apply emit-words ptr
-		 (+ #x80000000 (* len 16) 11)
-		 (bytes->words (suo-bytevec-u8->list obj)))))
-       ((string? obj)
-	(let ((suo-str (suo:record suo:string-type
-				   (apply u8vector
-					  (map char->integer
-					       (string->list obj))))))
-	  (emit suo-str obj)))
-       ((symbol? obj)
-	(let ((suo-sym (suo:record suo:symbol-type (symbol->string obj))))
-	  (set! all-symbols (cons obj all-symbols))
-	  (emit suo-sym obj)))
-       ((keyword? obj)
-	(let ((suo-keyword (suo:record suo:keyword-type
-				       (keyword->symbol obj))))
-	  (set! all-keywords (cons obj all-keywords))
-	  (emit suo-keyword obj)))
-       ((suo:code? obj)
-	(let* ((insns (suo-code-insns obj))
-	       (insn-words (quotient (suo:bytevec-length-8 insns) 4))
-	       (literals (suo-code-literals obj))
-	       (literal-words (vector-length literals))
-	       (ptr (alloc obj (+ 1 insn-words literal-words))))
-	  (apply emit-words ptr
-		 (+ #x80000000
-		    (* insn-words (* 256 16))
-		    (* literal-words 16)
-		    15)
-		 (append (suo-bytevec-u32->list insns)
-			 (map asm (vector->list literals))))))
-       ((integer? obj)
-	;; bignum, fixnums are handled by asm below
-	(let ((suo-bignum (integer->bignum obj)))
-	  (emit suo-bignum obj)))
-       (else
-	(error "unsupported value: " obj))))
+      (let ((obj (resolve-transmogrification obj)))
+	(cond
+	 ((pair? obj)
+	  (let ((ptr (alloc obj 2)))
+	    (emit-words ptr (asm (car obj)) (asm (cdr obj)))))
+	 ((suo:record? obj)
+	  (let* ((type (suo:type-of-record obj))
+		 (fields (vector->list (suo-record-fields obj)))
+		 (ptr (alloc obj (1+ (length fields)))))
+	    (if (not  (eqv? (length fields) (suo:record-ref type 0)))
+		(error "inconsistent record:" 
+		       (suo:record-ref type 1)
+		       (length fields)
+		       (suo:record-ref type 0)))
+	    (for-each (lambda (i) (hashq-set! ptr-hash i ptr))
+		      indirects)
+	    (apply emit-words ptr
+		   (+ (asm type) 3)
+		   (map asm fields))))
+	 ((vector? obj)
+	  (let ((ptr (alloc obj (1+ (vector-length obj)))))
+	    (apply emit-words ptr
+		   (+ #x80000000 (* (vector-length obj) 16) 3)
+		   (map asm (vector->list obj)))))
+	 ((suo:bytevec? obj)
+	  (let* ((len (suo:bytevec-length-8 obj))
+		 (words (quotient (+ len 3) 4))
+		 (ptr (alloc obj (1+ words))))
+	    (apply emit-words ptr
+		   (+ #x80000000 (* len 16) 11)
+		   (bytes->words (suo-bytevec-u8->list obj)))))
+	 ((string? obj)
+	  (let ((suo-str (suo:record suo:string@type
+				     (apply u8vector
+					    (map char->integer
+						 (string->list obj))))))
+	    (emit suo-str obj)))
+	 ((symbol? obj)
+	  (let ((suo-sym (suo:record suo:symbol@type (symbol->string obj))))
+	    (set! all-symbols (cons obj all-symbols))
+	    (emit suo-sym obj)))
+	 ((keyword? obj)
+	  (let ((suo-keyword (suo:record suo:keyword@type
+					 (keyword->symbol obj))))
+	    (set! all-keywords (cons obj all-keywords))
+	    (emit suo-keyword obj)))
+	 ((suo:code? obj)
+	  (let* ((insns (suo-code-insns obj))
+		 (insn-words (quotient (suo:bytevec-length-8 insns) 4))
+		 (literals (suo-code-literals obj))
+		 (literal-words (vector-length literals))
+		 (ptr (alloc obj (+ 1 insn-words literal-words))))
+	    (apply emit-words ptr
+		   (+ #x80000000
+		      (* insn-words (* 256 16))
+		      (* literal-words 16)
+		      15)
+		   (append (suo-bytevec-u32->list insns)
+			   (map asm (vector->list literals))))))
+	 ((integer? obj)
+	  ;; bignum, fixnums are handled by asm below
+	  (let ((suo-bignum (integer->bignum obj)))
+	    (emit suo-bignum obj)))
+	 (else
+	  ;; There shouldn't be unsupported objects of course, but we
+	  ;; help here with developing the bootstrap process itself by
+	  ;; allowing them.  As long as the objects are not actually
+	  ;; used...
+	  (pk 'unsupported-value obj)
+	  (let ((ptr (alloc obj 2)))
+	    (emit-words ptr 26 26))))))
 
     (define (asm obj)
-      (cond
-       ((eq? obj bootinfo-marker)
-	#f)
-       ((suo:fixnum? obj)
-	(+ (* 4 obj)
-	   (if (< obj 0) #x100000000 0)
-	   1))
-       ((char? obj)
-	(+ (* 8 (char->integer obj)) 6))
-       ((eq? obj '())
-	2)
-       ((eq? obj #t)
-	10)
-       ((eq? obj #f)
-	18)
-       ((eq? obj (if #f #f))
-	26)
-       (else
-	(let ((ptr (hashq-ref ptr-hash obj)))
-	  (* 4 (or ptr
-		   (begin (emit obj)
-			  (hashq-ref ptr-hash obj))))))))
+      (let ((obj (resolve-transmogrification obj)))
+	(cond
+	 ((eq? obj bootinfo-marker)
+	  #f)
+	 ((suo:fixnum? obj)
+	  (+ (* 4 obj)
+	     (if (< obj 0) #x100000000 0)
+	     1))
+	 ((char? obj)
+	  (+ (* 8 (char->integer obj)) 6))
+	 ((eq? obj '())
+	  2)
+	 ((eq? obj #t)
+	  10)
+	 ((eq? obj #f)
+	  18)
+	 ((eq? obj (if #f #f))
+	  26)
+	 (else
+	  (let ((ptr (hashq-ref ptr-hash obj)))
+	    (* 4 (or ptr
+		     (begin (emit obj)
+			    (hashq-ref ptr-hash obj)))))))))
 
     (asm obj)
 

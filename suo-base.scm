@@ -1,50 +1,13 @@
 ;;; Bootstrap declarations
 
-;;; undeclared (bootinfo-marker cps-asm-alloc-check cps-reg cps-quote
-;;; cps-render cps-asm-move-rX-to-rY cps-verbose get-reg
-;;; cps-quote-value cps-reg? cps-reg-idx s2val pk2 suspend compile
-;;; keyword->symbol set-hashq-vectors get-hashq-vectors hash
-;;; string-equal? symbol-equal? pair-equal? vector-equal?
-;;; record-equal? symbol-append vector->list vector vector-set!
-;;; record-type-n-fields list->vector symbol->keyword parse
-;;; string->symbol parse-comment record? code? vector? code-lit-length
-;;; code-insn-length symbol-name delimiter? vector-ref vector-length
-;;; record-type-name record-type record-length print max >=
-;;; whitespace? positive-number->char-list string-ref string-length
-;;; string-set! record-ref record record-with-type? remainder quotient
-;;; * < <= bytevec-set-u8! bytevec-ref-u8 = fixnum? equal? 1- zero? 1+
-;;; list-copy-with-tail last-pair write call-p sys:panic newline
-;;; for-each display gensym cons* + - cddr not error > memv pk append
-;;; cons list caddr map cadr null? eq? error:not-a-closure symbol?
-;;; apply cdr macro-lookup car pair?)
+;; The bootstrap compiler will assume that all undeclared names refer
+;; to functions, so we have to explicitly declare the variables that
+;; are used before they are defined.
 
-;; (declare-variables pair? symbol? eq? null? zero?
-;; 		   > < = >= <= not
-;; 		   + - * /
-;; 		   car cdr cadr cddr caddr
-;; 		   cons cons* list append
-;; 		   apply map for-each memv
-;; 		   gensym
-;; 		   display newline
-;; 		   macro-lookup error error:not-a-closure pk)
+; (declare-variables foo bar)
 
-;; (undeclared bootinfo-marker cps-asm-alloc-check cps-reg cps-quote
-;; 	    cps-render cps-asm-move-rX-to-rY cps-verbose get-reg
-;; 	    cps-quote-value cps-reg? cps-reg-idx s2val pk2 suspend compile
-;; 	    eval set-symbol-definition! symbol-definition directory-find
-;; 	    set-hashq-vectors get-hashq-vectors hash string-equal?
-;; 	    symbol-equal? pair-equal? vector-equal? record-equal?
-;; 	    symbol-sibling symbol-suffix vector->list vector vector-set!
-;; 	    record-type-n-fields list->vector symbol->keyword parse
-;; 	    find-symbol parse-comment keyword->symbol record? code? vector?
-;; 	    keyword? code-lit-length code-insn-length symbol-name
-;; 	    directory-name symbol-directory print-weird-symbol-name
-;; 	    vector-ref vector-length record-type-name record-type
-;; 	    record-length print max whitespace? positive-number->char-list
-;; 	    string-ref string-length string-set! record-ref record
-;; 	    record-with-type? remainder quotient bytevec-set-u8!
-;; 	    bytevec-ref-u8 fixnum? equal? 1- 1+ list-copy-with-tail last-pair
-;; 	    write call-p sys:panic)
+(define (bootstrap-phase)
+  'running)
 
 ;;; Basic Suo syntax
 
@@ -66,7 +29,8 @@
   (let loop ((defs '())
 	     (rest body))
     (let ((first (macroexpand (car rest))))
-      (cond ((and (pair? first) (eq? (car first) :define))
+      (cond ((and (pair? first) (or (eq? (car first) :define)
+				    (eq? (car first) :define-function)))
 	     (loop (cons first defs) (cdr rest)))
 	    ((and (pair? first) (eq? (car first) :begin))
 	     (loop defs (append (cdr first) (cdr rest))))
@@ -75,9 +39,8 @@
 	    (else
 	     (let ((vars (map cadr defs))
 		   (vals (map caddr defs)))
-	       (pk body '->
-		   (list `(letrec ,(map list vars vals)
-			    ,@(cons first (cdr rest)))))))))))
+	       (list `(letrec ,(map list vars vals)
+			,@(cons first (cdr rest))))))))))
 
 ;; Traditional quaisquote is wierd, mostly when being nested.  This is
 ;; from Alan Bawden, "Quasiquotation in Lisp", Appendix B.
@@ -132,28 +95,42 @@
 (define-macro (lambda args . body)
   (lambda-transformer args body))
 
+(define-macro (lambda-with-setter l s)
+  `(let ((l (lambda ,@l))
+	 (s (lambda ,@s)))
+     (set! (setter l) s)
+     l))
+
 (define-macro (quote val)
   (list :quote val))
 
 (define-macro (quasiquote form)
   (qq-expand form 0))
 
+(define-macro (begin . body)
+  `(:begin ,@body))
+
 (define-macro (if cond then . else)
   (if (null? else)
       `(if ,cond ,then (begin))
       `(:primitive if-eq? () (,cond #f) (,(car else) ,then))))
 
-(define-macro (begin . body)
-  `(:begin ,@body))
-
 (define-macro (define head . body)
   (if (pair? head)
-      `(define ,(car head) (lambda ,(cdr head) 
-;; 			     (primop syscall 0 ,(string-chars
-;; 						 (symbol->string (car head))))
-			     (let ()
-			       ,@body)))
+;;    `(define-function ,(car head) (lambda ,(cdr head) ,@body))
+      `(define-function ,(car head) (lambda ,(cdr head)
+				      (primop syscall 0
+					      ,(string-bytes
+						(symbol->string (car head))))
+				      (let ()
+					,@body)))
       `(:define ,head ,(car body))))
+
+(define-macro (define-function name . exprs)
+  `(:define-function ,name ,@exprs))
+
+(define-macro (define-record-type name expr)
+  `(:define-record-type ,name ,expr))
 
 (define-macro (define-macro head . body)
   (if (pair? head)
@@ -176,6 +153,8 @@
       `(let (,(car bindings))
 	 (let* ,(cdr bindings)
 	   ,@body))))
+
+(define (identity obj) obj)
 
 (define-macro (cond . clauses)
   (if (null? clauses)
@@ -325,6 +304,8 @@
   (newline)
   (car (last-pair args)))
 
+(define (pk2) (for-each (lambda (a) #t) '()))
+
 (define-macro (assert form)
   `(or ,form
        (error "assertion failed: " ',form)))
@@ -383,8 +364,11 @@
 (define (caddr a)
   (car (cdr (cdr a))))
 
+(define (cdddr a)
+  (cdr (cdr (cdr a))))
+
 (define (cadddr a)
-  (car (cdr (cdr (cdr a)))))
+  (car (cdddr a)))
 
 ;;; Lists
 
@@ -476,6 +460,14 @@
 	(else
 	 (memq elt (cdr lst)))))
 
+(define (delq1 elt lst)
+  (cond ((null? lst)
+	 lst)
+	((eq? elt (car lst))
+	 (cdr lst))
+	(else
+	 (cons (car lst) (delq1 elt (cdr lst))))))
+
 (define (list-copy lst)
   (list-copy-with-tail lst '()))
 
@@ -526,9 +518,22 @@
       (list-ref (cdr lst) (1- i))))
 
 (define (list-head lst i)
-  (if (zero? i)
+  (if (or (zero? i) (null? lst))
       '()
       (cons (car lst) (list-head (cdr lst) (1- i)))))
+
+(define (list-tail lst i)
+  (if (zero? i)
+      lst
+      (list-tail (cdr lst) (1- i))))
+
+(define (filter pred lst)
+  (cond ((null? lst)
+	 lst)
+	((pred (car lst))
+	 (cons (car lst) (filter pred (cdr lst))))
+	(else
+	 (filter pred (cdr lst)))))
 
 ;;; Association lists
 
@@ -690,18 +695,391 @@ Only elements that occur in both lists occur in the result list."
 (define (char=? a b)
   (eq? a b))
 
+;;; Setters
+
+(define (setter clos)
+  (closure-setter clos))
+
+(define (init-setter-setter proc)
+  (record-set! proc 3
+	       (lambda (setter clos)
+		 (if (closure? clos)
+		     (record-set! clos 3 setter)
+		     (error:wrong-type clos)))))
+
+(init-setter-setter setter)   
+
+;;; Records
+
+;; (define-record name :keys creator slots)
+
+(define (keyword-ref args key def)
+
+  (define (ref args)
+    (cond ((null? args)
+	   def)
+	  ((keyword? (car args))
+	   (if (eq? (car args) key)
+	       (cadr args)
+	       (ref (cddr args))))
+	  (else
+	   (error "malformed key/value pairs: " args))))
+
+  (or (and (not (null? args))
+	   (keyword? (car args))
+	   (ref args))
+      def))
+
+(define (keyword-gather args key)
+
+  (define (gather args)
+    (cond ((null? args)
+	   '())
+	  ((keyword? (car args))
+	   (if (eq? (car args) key)
+	       (cons (cadr args) (gather (cddr args)))
+	       (gather (cddr args))))
+	  (else
+	   (error "malformed key/value pairs: " args))))
+
+  (or (and (not (null? args))
+	   (keyword? (car args))
+	   (gather args))
+      '()))
+
+(define-macro (define-record name . args)
+  (let* ((type-name (symbol-append name '@type))
+	 (pred-name (symbol-append name '?))
+	 (slot-descs (keyword-ref args :slots args))
+	 (slot-code (map (lambda (slot)
+			   (let ((name (if (pair? slot) (car slot) slot)))
+			     (if (pair? slot)
+				 `(list ',name (lambda () ,(cadr slot)))
+				 `',name)))
+			 slot-descs))
+	 (constructors (filter identity
+			       (let ((spec (keyword-gather args :constructor)))
+				 (if (null? spec)
+				     (list (cons name (map (lambda (s)
+							     (if (pair? s)
+								 (car s)
+								 s))
+							   slot-descs)))
+				     spec)))))
+    `(begin
+       ,(if (eq? (bootstrap-phase) 'compile-for-image)
+	    `(bootstrap-record-type ,type-name)
+	    `(define-record-type ,type-name 
+	       (make-record-type ',name #f
+				 (list ,@slot-code))))
+       (define (,pred-name x) (record-is-a? x ,type-name))
+       ,@(map (lambda (slot)
+		(let* ((slot-name (if (pair? slot) (car slot) slot))
+		       (accessor-name (symbol-append name '- slot-name)))
+		  `(define-function ,accessor-name 
+		     (record-type-accessor ,type-name ',slot-name))))
+	      slot-descs)
+       ,@(if (eq? (bootstrap-phase) 'compile-for-image)
+	     ;; We need to help bootstrapping here by compiling the
+	     ;; constructor into the image.  The compiler in the image
+	     ;; can't run yet when the first record types are defined.
+	     ;; We only handle simple constructors that use all the
+	     ;; slots, tho.
+	     (map (lambda (constructor)
+		    (pk 'bootstrap-constructor constructor)
+		    (if (equal? (cdr constructor) slot-descs)
+			`(register-record-type-constructor
+			  ,type-name ',(cdr constructor)
+			  (lambda args (apply record ,type-name args)))
+			#f))
+		  constructors)
+	     '())
+       ,@(map (lambda (constructor)
+		`(define-function ,(car constructor)
+		   (record-type-constructor ,type-name
+					    ',(cdr constructor))))
+	      constructors))))
+
+;; We need to pre-define some accessors so that bootstrap-record-type
+;; can do its work on record-type@type itself.
+;;
+(define (record-type-n-fields type)             (record-ref type 0))
+(define (record-type-name type)                 (record-ref type 1))
+(define (record-type-ancestry type)             (record-ref type 2))
+(define (record-type-slots type)                (record-ref type 3))
+(define (set-record-type-slots! type val)       (record-set! type 3 val))
+(define (closure-setter clos)                   (record-ref clos 3))
+(define (slot-accessor slot)                    (record-ref slot 1))
+
+(define-record record-type
+  :slots (n-fields name ancestry slots constructors)
+  :constructor (create-record-type n-fields name ancestry slots constructors))
+
+(define-record slot
+  index accessor initfunc)
+
+(define (slot . args) (apply record slot@type args))
+
+(define (make-slot type index initfunc)
+  (slot index
+	(lambda-with-setter ((obj)
+			     (if (record-with-type?
+				  obj type)
+				 (record-ref obj index)
+				 (error:wrong-type obj)))
+			    ((val obj)
+			     (if (record-with-type?
+				  obj type)
+				 (record-set! obj index val)
+				 (error:wrong-type obj))))
+	initfunc))
+
+(define (bootstrap-record-type type)
+  ;; Create the real slots
+  (let* ((slots	(record-type-slots type))
+	 (new-slots (map (lambda (s i)
+			   (cons s (make-slot type i #f)))
+			 slots (iota (length slots)))))
+    (set-record-type-slots! type new-slots)))
+
+(define (record? val)
+  (primif (if-record? val #t) #t #f))
+
+(define (record-with-type? val type)
+  (primif (if-record? val type) #t #f))
+
+(define (type-of-record rec)
+  (if (record? rec)
+      (primop record-desc rec)
+      (error:wrong-type rec)))
+
+(define (record-length rec)
+  (primop record-ref (type-of-record rec) 0))
+
+(define (record-ref rec idx)
+  (if (and (<= 0 idx) (< idx (record-length rec)))
+      (primop record-ref rec idx)
+      (error:out-of-range idx)))
+
+(define (record-set! rec idx val)
+  (if (and (<= 0 idx) (< idx (record-length rec)))
+      (primop record-set rec idx val)
+      (error:out-of-range idx)))
+
+(define (make-record type init)
+  (primop make-record type (record-type-n-fields type) init))
+  
+(define (record type . values)
+  (if (record-type? type)
+      (let ((n (record-ref type 0))
+	    (rec (make-record type #f)))
+	(if (= (length values) n)
+	    (begin
+	      (do ((i 0 (+ i 1))
+		   (v values (cdr v)))
+		  ((= i n))
+		(record-set! rec i (car v)))
+	      rec)
+	    (error:wrong-num-args)))
+      (error:wrong-type type)))
+
+(define (make-record-type name parent-type direct-slots)
+  (let* ((n-parent-fields (if parent-type
+			      (record-type-n-fields parent-type)
+			      0))
+	 (n-effective-fields (+ (length direct-slots)
+				n-parent-fields))
+	 (ancestry (if parent-type
+		       (list->vector 
+			(append (vector->list
+				 (record-type-ancestry parent-type))
+				(list #f)))
+		       (vector #f)))
+	 (type (create-record-type n-effective-fields name ancestry '() '()))
+	 (slots (append
+		 (if parent-type
+		     (record-type-slots parent-type)
+		     '())
+		 (map (lambda (s i)
+			(let ((name (if (pair? s) (car s) s))
+			      (init (if (pair? s) (cadr s) #f))
+			      (index (+ i n-parent-fields)))
+			  (cons name (make-slot type index init))))
+		      direct-slots
+		      (iota (length direct-slots))))))
+    (set-record-type-slots! type slots)
+    (vector-set! ancestry (1- (vector-length ancestry)) type)
+    type))
+
+(define (make-record-type-constructor-code type slot-names)
+  (let ((init-exprs (map (lambda (s)
+			   (cond ((memq (car s) slot-names)
+				  (car s))
+				 ((slot-initfunc (cdr s))
+				  `(',(slot-initfunc (cdr s))))
+				 (else
+				  (error "slot needs initializer: " (car s)))))
+			 (record-type-slots type))))
+    (eval `(lambda ,slot-names (record ',type ,@init-exprs)))))
+
+(define (register-record-type-constructor type slot-names func)
+  (set! (record-type-constructors type)
+	(acons slot-names func
+	       (record-type-constructors type))))
+
+(define (record-type-constructor type slot-names)
+  (or (assoc-ref (record-type-constructors type) slot-names)
+      (register-record-type-constructor
+       type slot-names
+       (eval (make-record-type-constructor-code type slot-names)))))
+
+(define (record-is-a? obj type)
+  (and (record? obj)
+       (let ((ancestry (record-type-ancestry (type-of-record obj)))
+	     (pos (1- (vector-length (record-type-ancestry type)))))
+	 (and (< pos (vector-length ancestry))
+	      (eq? type (vector-ref ancestry pos))))))
+
+(define (record->list rec)
+  (do ((i (record-length rec) (1- i))
+       (l '() (cons (record-ref rec (1- i)) l)))
+      ((zero? i) l)))
+
+(define (record-type-slot type name)
+  (or (assq-ref (record-type-slots type) name)
+      (error "no such slot: " name)))
+
+(define (record-type-accessor type name)
+  (slot-accessor (record-type-slot type name)))
+
+;;; Closures
+
+(define-record closure
+  code values debug-info setter)
+
+(define (closure-copy clos)
+  (if (closure? clos)
+      (record closure@type
+	      (record-ref clos 0)
+	      (record-ref clos 1)
+	      (record-ref clos 2)
+	      (and (record-ref clos 3)
+		   (closure-copy (record-ref clos 3))))
+      (error:wrong-type clos)))
+      
+(define (unspecified-function)
+  (error "unspecified"))
+
+(define (make-unspecified-closure)
+  (closure-copy unspecified-function))
+
+(define-macro (record-case exp . clauses)
+  ;; clause -> ((NAME FIELD...) BODY...)
+  (let ((tmp (gensym)))
+    (define (record-clause->cond-clause clause)
+      (let ((pattern (car clause)))
+	(if (eq? pattern 'else)
+	    clause
+	    (let* ((name (car pattern))
+		   (args (cdr pattern))
+		   (body (cdr clause)))
+	      `((,(symbol-append name '?) ,tmp)
+		((lambda ,args ,@body)
+		 ,@(map (lambda (i)
+			  `(record-ref ,tmp ,i))
+			(iota (length args)))))))))
+    `(let ((,tmp ,exp))
+       (cond ,@(map record-clause->cond-clause clauses)
+	     (else (error "unsupported record instance" ,tmp))))))
+
+;;; Updating record types
+
+(define-function no-such-slot-accessor
+  (lambda-with-setter ((obj)
+		       (error "no such slot"))
+		      ((val obj)
+		       (error "no such slot"))))
+
+(define (record-type-transmogrify old-type new-type)
+
+  ;; All transmogrifications are pre-computed and then done together
+  ;; at the end.  This increases robustness and makes it possible to
+  ;; change the type of records that are used in this function itself.
+
+  (let* ((old-slots (record-type-slots old-type))
+	 (new-slots (record-type-slots new-type))
+
+	 (old-instances (find-instances old-type))
+	 (new-instances (make-vector (vector-length old-instances) #f))
+
+	 (old-accessors (list->vector (map slot-accessor (map cdr old-slots))))
+	 (new-accessors (make-vector (vector-length old-accessors) #f))
+
+	 (old-constructors (list->vector (map cdr 
+					      (record-type-constructors
+					       old-type))))
+	 (new-constructors (make-vector (vector-length old-constructors) #f)))
+
+    ;; Create new instances
+
+    (let* ((update-accessors 
+	    (map (lambda (n)
+		   (cond ((assq-ref old-slots (car n))
+			  => slot-accessor)
+			 ((slot-initfunc (cdr n))
+			  => (lambda (initfunc) (lambda (obj) (initfunc))))
+			 (else
+			  (error "no way to initialize new slot: " (car n)))))
+		 new-slots))
+	   (update (lambda (obj)
+		     (map (lambda (a) (a obj)) update-accessors))))
+      (do ((i 0 (1+ i)))
+	  ((= i (vector-length old-instances)))
+	(vector-set! new-instances i
+		     (apply record new-type
+			    (update (vector-ref old-instances i))))))
+
+    ;; Create new accessors
+
+    (for-each (lambda (o i)
+		(let* ((n (assq-ref new-slots (car o))))
+		  (vector-set! 
+		   new-accessors i
+		   (if n
+		       (slot-accessor n)
+		       (closure-copy no-such-slot-accessor)))))
+	      old-slots (iota (length old-slots)))
+
+    ;; Create new constructors
+
+    (for-each (lambda (args+cons i)
+		(vector-set! new-constructors i
+			     (record-type-constructor new-type
+						      (car args+cons))))
+	      (record-type-constructors old-type)
+	      (iota (vector-length old-constructors)))
+
+    ;; Transmogrify everything.  The vectors with the old objects are
+    ;; unreferenced after use so that the old objects are truely dead.
+    ;; This matters when transmogrifying the type objects in the end.
+    ;; No objects of the old type should be alive at that point.
+
+    (transmogrify-objects old-instances new-instances)
+    (set! old-instances #f)
+    (transmogrify-objects old-accessors new-accessors)
+    (set! old-accessors #f)
+    (transmogrify-objects old-constructors new-constructors)
+    (set! old-constructors #f)
+    (transmogrify-objects (vector old-type) (vector new-type))))
+
 ;;; Strings
 
-(define (string? val)
-  (record-with-type? val string-type))
+(define-record string
+  :slots (bytes)
+  :constructor (create-string bytes))
 
 (define (make-string n)
-  (record string-type (make-bytevec n)))
-
-(define (string-chars str)
-  (if (string? str)
-      (record-ref str 0)
-      (error:wrong-type str)))
+  (create-string (make-bytevec n)))
 
 (define (string . chars)
   (let ((str (make-string (length chars))))
@@ -721,13 +1099,13 @@ Only elements that occur in both lists occur in the result list."
 	((< i 0) l))))
 
 (define (string-length str)
-  (bytevec-length-8 (string-chars str)))
+  (bytevec-length-8 (string-bytes str)))
 
 (define (string-ref str idx)
-  (integer->char (bytevec-ref-u8 (string-chars str) idx)))
+  (integer->char (bytevec-ref-u8 (string-bytes str) idx)))
 
 (define (string-set! str idx chr)
-  (bytevec-set-u8! (string-chars str) idx (char->integer chr)))
+  (bytevec-set-u8! (string-bytes str) idx (char->integer chr)))
 
 (define (number->string n . opt-base)
   (let ((base (if (null? opt-base) 10 (car opt-base))))
@@ -883,17 +1261,14 @@ Only elements that occur in both lists occur in the result list."
 
 ;;; Numbers
 
+(define-record bignum
+  limbs)
+
 (define fixnum-max  536870911)
 (define fixnum-min -536870912)
 
 (define (fixnum? obj)
   (primif (if-fixnum? obj) #t #f))
-
-(define (bignum? x)
-  (record-with-type? x bignum-type))
-
-(define (bignum-limbs b)
-  (record-ref b 0))
 
 (define (bignum-length b)
   (bytevec-length-16 (bignum-limbs b)))
@@ -919,7 +1294,7 @@ Only elements that occur in both lists occur in the result list."
 
 (define (fixnum->bignum n)
   (:primitive split-fixnum (hi lo) (n)
-	      ((record bignum-type (bytevec-u16 lo hi)))))
+	      ((bignum (bytevec-u16 lo hi)))))
 
 (define (make-bignum-limbs n)
   (make-bytevec (* 2 n)))
@@ -948,7 +1323,7 @@ Only elements that occur in both lists occur in the result list."
 	     (+ (bytevec-ref-u16 x 0) (* (- k #x10000) #x10000)))
 	    (else
 	     (pk-dbg 'trunc-to (1+ i))
-	     (record bignum-type (bytevec-subvector-u16 x 0 (1+ i))))))))
+	     (bignum (bytevec-subvector-u16 x 0 (1+ i))))))))
 
 (define (normalize-bignum b)
   (limbs->bignum (bignum-limbs b)))
@@ -1299,8 +1674,8 @@ Only elements that occur in both lists occur in the result list."
 
 ;;; Ports
 
-(define the-eof-object-type (make-record-type 0 'eof-object #f))
-(define the-eof-object (record the-eof-object-type))
+(define-record the-eof-object-type)
+(define the-eof-object (the-eof-object-type))
 
 (define (eof-object? obj)
   (eq? obj the-eof-object))
@@ -1407,30 +1782,34 @@ Only elements that occur in both lists occur in the result list."
 (define (print-number n state)
   (output-string (print-state-port state) (number->string n)))
 
-(define (print-list-tail p state)
-  (if (pair? p)
-      (begin
-	(output-char (print-state-port state) #\space)
-	(print (car p) state)
-	(print-list-tail (cdr p) state))
-      (begin
-	(if (not (null? p))
-	    (begin
-	      (output-string (print-state-port state) " . ")
-	      (print p state)))
-	(output-char (print-state-port state) #\)))))
+(define max-print-length (make-parameter fixnum-max))
+
+(define (print-list-tail p n state)
+  (if (>= n (max-print-length))
+      (output-string  (print-state-port state) " ...)")
+      (if (pair? p)
+	  (begin
+	    (output-char (print-state-port state) #\space)
+	    (print (car p) state)
+	    (print-list-tail (cdr p) (1+ n) state))
+	  (begin
+	    (if (not (null? p))
+		(begin
+		  (output-string (print-state-port state) " . ")
+		  (print p state)))
+	    (output-char (print-state-port state) #\))))))
       
 (define (print-list p state)
   (let ((port (print-state-port state)))
     (output-char port #\()
     (print (car p) state)
-    (print-list-tail (cdr p) state)))
+    (print-list-tail (cdr p) 1 state)))
 
 (define (print-record r state)
   (let ((port (print-state-port state))
 	(n (record-length r)))
     (output-string port "#<")
-    (print (record-type-name (record-type r)) state)
+    (print (record-type-name (type-of-record r)) state)
 ;;     (do ((i 0 (+ i 1)))
 ;; 	((= i n))
 ;;       (output-string port " ")
@@ -1443,7 +1822,7 @@ Only elements that occur in both lists occur in the result list."
     (output-string port "#(")
     (do ((i 0 (+ i 1))
 	 (sp #f #t))
-	((= i n))
+	((or (= i n) (> i (max-print-length))))
       (if sp
 	  (output-string port " "))
       (print (vector-ref v i) state))
@@ -1510,9 +1889,10 @@ Only elements that occur in both lists occur in the result list."
   (output-string (print-state-port state) ">"))
 
 (define print-depth (make-parameter 0))
+(define max-print-depth (make-parameter 10))
 
 (define (print val state)
-  (if (< (print-depth) 10)
+  (if (< (print-depth) (max-print-depth))
       (call-p print-depth (+ 1 (print-depth))
 	      (lambda ()
 		(let ((port (print-state-port state)))
@@ -1757,189 +2137,6 @@ Only elements that occur in both lists occur in the result list."
 	     (putback-char (current-input-port) ch)
 	     (loop (cons (read) res) in-comment escaped))))))
 
-;;; Records
-
-(define (record? val)
-  (primif (if-record? val #t) #t #f))
-
-(define (record-with-type? val type)
-  (primif (if-record? val type) #t #f))
-
-(define (record-type rec)
-  (if (record? rec)
-      (primop record-desc rec)
-      (error:wrong-type rec)))
-
-(define (record-length rec)
-  (primop record-ref (record-type rec) 0))
-
-(define (record-ref rec idx)
-  (if (and (<= 0 idx) (< idx (record-length rec)))
-      (primop record-ref rec idx)
-      (error:out-of-range idx)))
-
-(define (record-set! rec idx val)
-  (if (and (<= 0 idx) (< idx (record-length rec)))
-      (primop record-set rec idx val)
-      (error:out-of-range idx)))
-
-(define (make-record type init)
-  (primop make-record type (record-type-n-fields type) init))
-  
-(define (record type . values)
-  (if (record-with-type? type record-type-type)
-      (let ((n (record-ref type 0))
-	    (rec (make-record type #f)))
-	(if (= (length values) n)
-	    (begin
-	      (do ((i 0 (+ i 1))
-		   (v values (cdr v)))
-		  ((= i n))
-		(record-set! rec i (car v)))
-	      rec)
-	    (error:wrong-num-args)))
-      (error:wrong-type type)))
-
-(define (make-record-type-record n-fields name ancestry)
-  (if (fixnum? n-fields)
-      (if (vector? ancestry)
-	  (record record-type-type n-fields name ancestry)
-	  (error:wrong-type ancestry))
-      (error:wrong-type n-fields)))
-
-(define (record-type-n-fields rec)
-  (if (record-with-type? rec record-type-type)
-      (record-ref rec 0)
-      (error:wrong-type rec)))
-
-(define (record-type-name rec)
-  (if (record-with-type? rec record-type-type)
-      (record-ref rec 1)
-      (error:wrong-type rec)))
-
-(define (record-type-ancestry rec)
-  (if (record-with-type? rec record-type-type)
-      (record-ref rec 2)
-      (error:wrong-type rec)))
-
-(define (make-record-type n-direct-fields name parent-type)
-  (let* ((n-effective-fields (+ n-direct-fields
-				(if parent-type
-				    (record-type-n-fields parent-type)
-				    0)))
-	 (ancestry (if parent-type
-		       (list->vector 
-			(append (vector->list
-				 (record-type-ancestry parent-type))
-				(list #f)))
-		       (vector #f)))
-	 (type (make-record-type-record n-effective-fields name ancestry)))
-    (vector-set! ancestry (1- (vector-length ancestry)) type)
-    type))
-
-(define (record-is-a? obj type)
-  (and (record? obj)
-       (let ((ancestry (record-type-ancestry (record-type obj)))
-	     (pos (1- (vector-length (record-type-ancestry type)))))
-	 (and (< pos (vector-length ancestry))
-	      (eq? type (vector-ref ancestry pos))))))
-
-(define (record->list rec)
-  (do ((i (record-length rec) (1- i))
-       (l '() (cons (record-ref rec (1- i)) l)))
-      ((zero? i) l)))
-
-;;; Closures
-
-(define (closure? obj)
-  (record-with-type? obj closure-type))
-
-(define (closure-code clos)
-  (if (closure? clos)
-      (record-ref clos 0)
-      (error:wrong-type clos)))
-
-(define (closure-values clos)
-  (if (closure? clos)
-      (record-ref clos 1)
-      (error:wrong-type clos)))
-
-(define (closure-debug-info clos)
-  (if (closure? clos)
-      (record-ref clos 2)
-      (error:wrong-type clos)))
-
-(define (setter clos)
-  (if (closure? clos)
-      (record-ref clos 3)
-      (error:wrong-type clos)))
-
-(define (init-setter-setter proc)
-  (record-set! proc 3
-	       (lambda (setter clos)
-		 (if (closure? clos)
-		     (record-set! clos 3 setter)
-		     (error:wrong-type clos)))))
-
-(init-setter-setter setter)		      
-
-;; (define-record NAME FIELD...) defines a new record type and
-;; associated procedures.
-;;
-;; (NAME VALUE...) is a constructor and returns a new object with
-;; fields initialized according to the arguments of the constructor.
-;; VALUE... is a list with one member for each field of the record.
-;;
-;; (NAME? obj) is the predicate.
-;;
-;; (NAME-FIELD obj) is a getter for FIELD.
-;;
-;; (set-NAME-FIELD! obj val) is a setter for FIELD.
-;;
-;; NAME-type is the type of the record.
-
-(define-macro (define-record name . fields)
-  (pk name fields)
-  (pk
-  (let* ((type-name (symbol-append name 'type))
-	 (pred-name (symbol-append name '?)))
-    `(begin
-       (define ,type-name (make-record-type ,(length fields) ',name #f))
-       (define (,pred-name x) (record-is-a? x ,type-name))
-       (define (,name ,@fields) (record ,type-name ,@fields))
-       ,@(map (lambda (f i)
-		(let ((reader-name (symbol-append name '- f)))
-		  `(begin
-		     (define (,reader-name x)
-		       (if (,pred-name x)
-			   (record-ref x ,i)
-			   (error:wrong-type x)))
-		     (set! (setter ,reader-name) 
-			   (lambda (y x)
-			     (if (,pred-name x)
-				 (record-set! x ,i y)
-				 (error:wrong-type x)))))))
-	      fields (iota (length fields)))))))
-
-(define-macro (record-case exp . clauses)
-  ;; clause -> ((NAME FIELD...) BODY...)
-  (let ((tmp (gensym)))
-    (define (record-clause->cond-clause clause)
-      (let ((pattern (car clause)))
-	(if (eq? pattern 'else)
-	    clause
-	    (let* ((name (car pattern))
-		   (args (cdr pattern))
-		   (body (cdr clause)))
-	      `((,(symbol-append name '?) ,tmp)
-		((lambda ,args ,@body)
-		 ,@(map (lambda (i)
-			  `(record-ref ,tmp ,i))
-			(iota (length args)))))))))
-    `(let ((,tmp ,exp))
-       (cond ,@(map record-clause->cond-clause clauses)
-	     (else (error "unsupported record instance" ,tmp))))))
-
 ;;; Vectors
 
 (define (vector? val)
@@ -2065,7 +2262,7 @@ Only elements that occur in both lists occur in the result list."
 	   (pair-equal? a b))
       (and (vector? a) (vector? b)
 	   (vector-equal? a b))
-      (and (record? a) (record-with-type? b (record-type a))
+      (and (record? a) (record-with-type? b (type-of-record a))
 	   (record-equal? a b))))
 
 (define (string-equal? a b)
@@ -2217,22 +2414,20 @@ Only elements that occur in both lists occur in the result list."
 
 ;;; Symbols
 
-(define (symbol? val)
-  (record-with-type? val symbol-type))
+(define-record symbol
+  name)
 
 (define boot-symbols (car (bootinfo)))
 
 (define symbols (make-hash-table 511))
 
 (define (symbol->string sym)
-  (if (record-with-type? sym symbol-type)
-      (record-ref sym 0)
-      (error:wrong-type sym)))
+  (symbol-name sym))
 
 (define (string->symbol str)
   (if (string? str)
       (or (hash-ref symbols str)
-	  (let ((sym (record symbol-type str)))
+	  (let ((sym (symbol str)))
 	    (hash-set! symbols str sym)
 	    sym))
       (error:wrong-type str)))
@@ -2255,6 +2450,9 @@ Only elements that occur in both lists occur in the result list."
 
 ;;; Keywords
 
+(define-record keyword
+  symbol)
+
 (define boot-keywords (cadr (bootinfo)))
 
 (define keywords (make-hashq-table 31))
@@ -2266,19 +2464,14 @@ Only elements that occur in both lists occur in the result list."
 
 (init-keywords)
 
-(define (keyword? val)
-  (record-with-type? val keyword-type))
-
 (define (keyword->symbol key)
-  (if (keyword? key)
-      (record-ref key 0)
-      (error:wrong-type key)))
+  (keyword-symbol key))
 
 (define (symbol->keyword sym)
   (if (symbol? sym)
       (let ((key (hashq-ref keywords sym)))
 	(or key
-	    (let ((key (record keyword-type sym)))
+	    (let ((key (keyword sym)))
 	      (hashq-set! keywords sym key)
 	      key)))
       (error:wrong-type)))
@@ -2337,6 +2530,7 @@ Only elements that occur in both lists occur in the result list."
 	     (rest '())
 	     (rest-first #f)
 	     (rest-last #f))
+    (pk 'on spec)
     (cond ((null? spec)
 	   (extarg-spec (apply vector (reverse defs))
 			(reverse names)
@@ -2380,6 +2574,7 @@ Only elements that occur in both lists occur in the result list."
 	     (else
 	      (error "unrecognized argument keyword: " cur-key))))
 	  (else
+	   (pk (car spec) (keyword? (car spec)))
 	   (error "unrecognized argument syntax: " (car spec))))))
 
 (define (match-extarg-spec spec parms)
@@ -2433,7 +2628,7 @@ Only elements that occur in both lists occur in the result list."
 (define-macro (define* head . body)
   (let ((name (car head))
 	(spec (cdr head)))
-    `(define ,name (lambda* ,spec ,@body))))
+    `(define-function ,name (lambda* ,spec ,@body))))
 
 ;;; Pathnames
 
@@ -2539,34 +2734,53 @@ Only elements that occur in both lists occur in the result list."
   (pathname (pathname-parent-offset p)
 	    (list-head (pathname-components p) n)))
 
+;;; Reverse scanning
+
+(define (find-referrers obj)
+  (let* ((vec (make-vector 200 #f))
+	 (count (primop syscall 12 obj vec)))
+    (if (<= count 200)
+	(subvector vec 0 count)
+	(let* ((vec (make-vector count #f))
+	       (count2 (primop syscall 12 obj vec)))
+	  (cond ((not (= count count2))
+		 (pk 'whoops)
+		 (subvector vec 0 count2))
+		(else
+		 vec))))))
+
+(define (find-instances type)
+  (let* ((vec (make-vector 200 #f))
+	 (count (primop syscall 13 type vec)))
+    (if (<= count 200)
+	(subvector vec 0 count)
+	(let* ((vec (make-vector count #f))
+	       (count2 (primop syscall 13 type vec)))
+	  (cond ((not (= count count2))
+		 (pk 'whoops)
+		 (subvector vec 0 count2))
+		(else
+		 vec))))))
+
+(define (transmogrify-objects from to)
+  (if (and (vector? from) (vector? to)
+	   (= (vector-length from) (vector-length to)))
+      (primop syscall 14 from to)
+      (error "need two parallel vectors: " from to)))
+
 ;;; Variables and macros
 
-(define (variable? obj)
-  (record-with-type? obj variable-type))
+(define-record variable
+  value)
 
-(define (variable init)
-  (record variable-type init))
+(define (variable-ref var)
+  (variable-value var))
 
-(define (variable-ref obj)
-  (if (variable? obj)
-      (record-ref obj 0)
-      (error:wrong-type obj)))
+(define (variable-set! var val)
+  (set! (variable-value var) val))
 
-(define (variable-set! obj val)
-  (if (variable? obj)
-      (record-set! obj 0 val)
-      (error:wrong-type obj)))
-
-(define (macro? obj)
-  (record-with-type? obj macro-type))
-
-(define (macro transformer)
-  (record macro-type transformer))
-
-(define (macro-transformer obj)
-  (if (macro? obj)
-      (record-ref obj 0)
-      (error:wrong-type obj)))
+(define-record macro
+  transformer)
 
 ;;; Directories
 
@@ -2719,7 +2933,16 @@ Only elements that occur in both lists occur in the result list."
 	  ((variable? (entry-value ent))
 	   (entry-value ent))
 	  (else
-	   (error "not a variable: " name)))))
+	   (error "not a variable:" name)))))
+
+(define (function-lookup name)
+  (let ((ent (lookup name)))
+    (cond ((not ent)
+	   (error "undefined: " name))
+	  ((closure? (entry-value ent))
+	   (entry-value ent))
+	  (else
+	   (error "not a function:" name)))))
 
 (define (variable-declare name . attrs)
   (entry-value
@@ -2728,6 +2951,18 @@ Only elements that occur in both lists occur in the result list."
 	    (cond ((not old)
 		   (make-entry (variable (begin))  attrs))
 		  ((variable? (entry-value old))
+		   (entry-merge-attrs! old attrs)
+		   old)
+		  (else
+		   (error "already declared: " name)))))))
+
+(define (function-declare name . attrs)
+  (entry-value
+   (enter name
+	  (lambda (old)
+	    (cond ((not old)
+		   (make-entry (make-unspecified-closure) attrs))
+		  ((closure? (entry-value old))
 		   (entry-merge-attrs! old attrs)
 		   old)
 		  (else
@@ -2827,6 +3062,25 @@ Only elements that occur in both lists occur in the result list."
 		  (var (variable-declare sym))
 		  (val (eval (caddr form))))
 	     (variable-set! var val)))
+	  ((:define-function)
+	   (let* ((sym (cadr form))
+		  (func (function-declare sym))
+		  (val (eval (caddr form))))
+	     (if (not (closure? val))
+		 (error "not a function: " val))
+	     (if (not (eq? func val))
+		 (transmogrify-objects (vector func) (vector val)))))
+	  ((:define-record)
+	   (let* ((sym (cadr form))
+		  (old (and=> (lookup sym) entry-value)))
+	     (if (and old (not (record-type? old)))
+		 (error "already declared, but not as record type: " sym))
+	     (let ((new (eval (caddr form))))
+	       (if (not (record-type? new))
+		   (error "not a record type: " new))
+	       (if old
+		   (record-type-transmogrify old new)
+		   (enter sym (lambda (old-ent) (make-entry new '())))))))
 	  ((:define-macro)
 	   (let* ((sym (cadr form))
 		  (val (eval (caddr form))))
@@ -2855,6 +3109,10 @@ Only elements that occur in both lists occur in the result list."
 ;; write commands such as 'cd', 'ls', and 'mkdir' as functions and not
 ;; have to quote their arguments all the time.
 ;;
+;; As a special case, when the first position is a variable and there
+;; are no arguments, the value of the variable is returned instead of
+;; trying to call it with no arguments.
+;;
 ;; You can escape to eval by using
 ;;
 ;;     ,form
@@ -2880,12 +3138,134 @@ Only elements that occur in both lists occur in the result list."
 	   (eval (cadr form)))
 	  ((eq? (car form) 'quote)
 	   (cadr form))
+	  ((and (null? (cdr form))
+		(pathname? (car form))
+		(let ((ent (lookup (car form))))
+		  (if (and ent (variable? (entry-value ent)))
+		      (entry-value ent)
+		      #f)))
+	   => (lambda (var)
+		(variable-ref var)))
 	  (else
 	   (let ((op (eval (car form)))
 		 (args (map sheval (cdr form))))
 	     (apply op args)))))
    (else
     form)))
+
+;;; Books, sections, and pages.
+
+;; BOOKs contain the bulk of the code in a Suo system, in a literate
+;; programming kind of way that allows for interactive and incremental
+;; development.
+;;
+;; The basic concept is that of a SECTION: A section contains some
+;; descriptive text, a set of properties, a list of sub-sections, and
+;; a list of expressions.  Sections form a tree: a section can only be
+;; a sub-section of at most one other section.
+;;
+;; A book is simply a top-level section.  A page is a section with no
+;; sub-sections.
+;;
+;; The properties of a section are used to determine certain defaults
+;; for its sub-sections.  The most common properties are 'directory',
+;; which specifies which directory should be current when expressions
+;; are compiled, and 'open', which determines which directories are
+;; opened.
+;;
+;; A section can actually contain multiple versions of its content.
+;; Two versions have a specific meaning: the 'current' version is the
+;; one that has been committed most recently, and the 'proposed'
+;; version is the one waiting to be comitted.
+;;
+;; 'Commiting' a section without any sub-sections means compiling the
+;; expressions of its 'proposed' content and installing the result.
+;; When a section has sub-sections, the sub-sections are compiled
+;; first, but not yet installed.  When all compilations succeed, all
+;; compilation results are installed, together with making the
+;; proposed version the new current one.  If there is an error in any
+;; of the compilations, nothing is installed.
+;;
+;; Thus, a commit operation applies to a set of sections as a unit.
+;; When looking at properties, they are taken from the proposed
+;; version for sections that are part of the commit (when they have a
+;; proposed version), and from the current version of sections that
+;; are not part of the commit (whether they have a proposed version or
+;; not).
+;;
+;; Committing a section that has no proposed version does nothing,
+;; except when the properties of it or one of its parents have changed
+;; such that the current directory or the list of open directories are
+;; now different.  Then it is recompiled nevertheless.
+;;
+;; The result of compiling a section content contains definitions and
+;; actions.  When installing the result, the old set of definitions
+;; (from the previously current version) are updated to the new set.
+;; When a definition is only in the new set, it is simply entered into
+;; its directory.  When a definition is only in the old set, it is
+;; simply removed.  When a defintion is both in the old and the new
+;; set, it is updated according to its type.  When the types of the
+;; old and new definition do not agree, the old one is removed and the
+;; new one installed (with a loud complaint).
+;;
+;; When updating a variable, nothing happens.  In particular, the
+;; default value given in the new definition is ignored.
+;;
+;; When updating a procedure, the procedure is changed 'in-place' to
+;; the new one, without losing the identity of the old procedure.
+;; That is, if you have stored the old procedure object in some data
+;; structure, that old procedure will cange its behavior to that of
+;; the new procedure.
+;;
+;; When updating a macro, the new transformer replaces the old.
+;;
+;; XXX - these updating rules are going to get much more refined and
+;;       will cover also record types.
+;;
+;; After updating the defintions, the actions are simply executed in
+;; sequence.  Since actions are carried out every time a section is
+;; committed (even when they didn't change from the previous version)
+;; they should be idem-potent: running them twice in a row must be
+;; equivalent to running them just once.
+;;
+;; When compiling a section content, the environment needs to be
+;; defined.  For this, a current directory and a list of open
+;; directories are found by going up the section tree and looking for
+;; 'directory', 'open', and 'open-only' properties.
+;;
+;; The current directory is determined by the first 'directory'
+;; property encountered on the way up to the top-level section.
+;;
+;; The list of open directories starts out empty, and the directories
+;; listed in the 'open' properties are collected while going up.
+;; Properties that are farther away from the current section appear
+;; further towards the start of the list.  When a 'open-only' property
+;; is encountered, it is treated as a 'open' property but collecting
+;; stops at that level of the section tree.
+;;
+;; The names of the new definitions are interpreted relative to the
+;; current directory.  When remembering these names, their full
+;; absolute pathnames are stored, so the you can cleanly switch
+;; current directories from one version to the next.
+;;
+;; The list of sub-sections and the parent reference of a section are
+;; also versioned.  When commiting a set of sections, the set must be
+;; consistent with respect to the tree of sections: when the parent of
+;; a section changes, the old and new parents must be part of the
+;; commit set.
+;;
+;; For example, when moving section S from P1 to P2, the proposed
+;; sub-sections of both P1 and P2 and modified to reflect the change
+;; and the change can only be committed when all of S, P1 and P2 are
+;; part of the commit set.
+;;
+;; XXX - in the future, sections should also remember which
+;;       definitions of other sections they use, so that smart
+;;       re-compilations can be triggered when macros change etc.
+;;
+;; XXX - more version control things should be defined: logs, diffing,
+;;       branching, merging,
+
 
 ;;; Repl
 
@@ -2918,9 +3298,6 @@ Only elements that occur in both lists occur in the result list."
 	   (current-directory-path name))
 	  (else
 	   (error "not a directory: " name)))))
-
-(define-repl-command (pods)
-  (map directory-name (open-directories)))
 
 (define-repl-command (open-cwd)
   (open-directories (cons (entry-value (current-directory))
@@ -3006,4 +3383,136 @@ Only elements that occur in both lists occur in the result list."
     (set-wrong-num-args-hook)
     #t))
 
+;;; The inspector
+
+;; The inspector lets you interactively explore a object, and follow
+;; links, both forwards and backwards.
+
+(define (inspect obj)
+
+  (define (prompt p)
+    (display p)
+    (let loop ((r (read-line)))
+      (cond ((null? r)
+	     (loop (read-line)))
+	    (else
+	     (car r)))))
+
+  (define (describe-short obj)
+    (call-p max-print-depth 3
+	    (lambda ()
+	      (call-p max-print-length 5
+		      (lambda ()
+			(write obj)
+			(newline))))))
+  
+  (define (describe obj)
+    (call-p max-print-depth 6
+	    (lambda ()
+	      (call-p max-print-length 20
+		      (lambda () (write obj))))))
+
+  (define (display-menu choices)
+    (for-each (lambda (c i)
+		(display i)
+		(display " - ")
+		(cond ((car c)
+		       (display (car c))
+		       (display ": ")))
+		(describe-short (cdr c)))
+	      (list-head choices 10) (iota 10))
+    (cond ((> (length choices) 10)
+	   (display "[ ")
+	   (display (- (length choices) 10))
+	   (display " more ]")
+	   (newline))))
+
+  (define (run-menu choices)
+    (let ((r (prompt "# ")))
+      (if (number? r)
+	  (cond ((and (<= 0 r)
+		      (< r (length choices)))
+		 (cons 'go (cdr (list-ref choices r))))
+		(else
+		 (display "choice out of range")
+		 (newline)
+		 (run-menu choices)))
+	  r)))
+
+  (define (object-choices obj)
+    (define (list->choices lst)
+      (cond ((null? lst)
+	     '())
+	    ((pair? lst)
+	     (cons (cons #f (car lst))
+		   (list->choices (cdr lst))))
+	    (else
+	     (list (cons #f lst)))))
+    (cond ((pair? obj)
+	   (list->choices obj))
+	  ((vector? obj)
+	   (list->choices (vector->list obj)))
+	  ((record? obj)
+	   (cons (cons 'type (type-of-record obj))
+		 (map (lambda (s)
+			(cons (car s) ((slot-accessor (cdr s)) obj)))
+		      (record-type-slots (type-of-record obj)))))
+	  (else
+	   '())))
+
+  (define (display-head obj ctxt offset)
+    (display ctxt)
+    (display " of ")
+    (describe obj)
+    (cond ((> offset 0)
+	   (display " [ +")
+	   (display offset)
+	   (display " ]")))
+    (newline))
+
+  (define (inspect-loop obj ctxt choices offset history)
+    (display-head obj ctxt offset)
+    (display-menu (list-tail choices offset))
+    (let loop ()
+      (let ((cmd (run-menu (list-tail choices offset))))
+	(cond ((and (pair? cmd)
+		    (eq? (car cmd) 'go))
+	       (inspect-loop (cdr cmd)
+			     'elements (object-choices (cdr cmd)) 0
+			     (cons obj history)))
+	      ((eq? cmd '?)
+	       (display "What would I know?")
+	       (newline)
+	       (loop))
+	      ((eq? cmd 'q)
+	       (values))
+	      ((eq? cmd 'h)
+	       (inspect-loop obj
+			     'history (object-choices history) 0
+			     (cons obj history)))
+	      ((eq? cmd 'b)
+	       (inspect-loop (car history)
+			     'elements (object-choices (car history)) 0
+			     (cdr history)))
+	      ((eq? cmd 'r)
+	       (inspect-loop obj
+			     'referrers (object-choices (find-referrers obj)) 0
+			     (cons obj history)))
+	      ((eq? cmd 'n)
+	       (inspect-loop obj
+			     ctxt choices (+ offset 10)
+			     history))
+	      ((eq? cmd 'p)
+	       (inspect-loop obj
+			     ctxt choices (max 0 (- offset 10))
+			     history))
+	      (else
+	       (display "huh?")
+	       (newline)
+	       (loop))))))
+
+  (inspect-loop obj
+		'elements (object-choices obj) 0
+		'()))
+		
 (pk 'base)

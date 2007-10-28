@@ -249,12 +249,15 @@
 
 ;;; Code generation hooks for the compiler
 
+(define-record box
+  value)
+
 ;; Bind a box to RESULT, put VALUE into it and continue with CONT
 ;;
 (define (cps-gen-box result value cont)
   (cps-primop 'record
 	      (list result)
-	      (list (cps-quote box-type) value)
+	      (list (cps-quote box@type) value)
 	      (list cont)))
 
 ;; Bind the value in BOX to RESULT and continue with CONT
@@ -394,11 +397,15 @@
   (define (lookup-variable name env)
     (or (lookup-env-symbol name env)
 	(variable-lookup name)))
+  
+  (define (lookup-function name env)
+    (or (lookup-env-symbol name env)
+	(function-lookup name)))
 
   (define (lookup-thing name env)
     (or (lookup-env-symbol name env)
 	(and=> (lookup name) entry-value)))
-    
+
   (define (conv-func func-label args body env)
     (let* ((cont-arg (genvar))
 	   (restp (dotted-list? args))
@@ -538,6 +545,9 @@
 	  ((:define ?var ?val)
 	   (error "wrong 'define' placement: " exp))
 	  
+	  ((:define-function ?var ?val)
+	   (error "wrong 'define' placement: " exp))
+
 	  ((:quote ?val)
 	   (c (cps-quote ?val)))
 	  
@@ -586,7 +596,7 @@
 	  (else
 	   (if (pathname? exp)
 	       (let ((thing (or (lookup-thing exp env)
-				(lookup-variable exp env))))
+				(lookup-function exp env))))
 		 (cond ((cps-var? thing)
 			(c thing))
 		       ((variable? thing)
@@ -910,7 +920,7 @@
 		(map (lambda (v) (if (eq? v func) (cps-quote #f) v)) values)
 		(list (cps-primop 'record
 				  (list result)
-				  (list (cps-quote closure-type)
+				  (list (cps-quote closure@type)
 					func vector-var parent-cont 
 					(cps-quote #f))
 				  (list (if func-index
@@ -932,15 +942,13 @@
 ;;
 (define (cps-gen-closure-ref-code result closure error-cont cont)
   (if error-cont
-      (let* ((error-closure (record-ref 
-			     (variable-lookup 'error:not-a-closure)
-			     0))
+      (let* ((error-closure (function-lookup 'error:not-a-closure))
 	     (error-code (if (eq? error-closure (if #f #f))
 			     #f
 			     (record-ref error-closure 0))))
 	(cps-primop 'if-record?
 		    '()
-		    (list closure (cps-quote closure-type))
+		    (list closure (cps-quote closure@type))
 		    (list (cps-primop 'record-ref
 				      (list result)
 				      (list closure (cps-quote 0))
@@ -1207,7 +1215,7 @@
       (cps-dbg 'clos clos)
       (let ((regs (cps-register-allocate (cps-fun-func clos))))
 	(cps-dbg 'regs regs)
-	(record closure-type
+	(record closure@type
 		(cps-code-generate regs)
 		#()
 		#f

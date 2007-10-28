@@ -22,9 +22,11 @@
 (load "suo-cross.scm")
 
 (boot-load "suo-base.scm")
+(boot-load "suo-asm.scm")
 (boot-load "suo-asm-ppc.scm")
 (boot-load "suo-util.scm")
 (boot-load "suo-compiler.scm")
+(image-import-boot-record-types)
 
 (define (write-image mem file)
   (let* ((port (open-output-file file)))
@@ -43,10 +45,13 @@
 
 (define (compile-base)
   (image-load "suo-base.scm")
+  (image-load "suo-null-compiler.scm")
+  (image-load "suo-boot.scm")
   (make-bootstrap-image (image-expression) "base"))
 
 (define (compile-compiler)
   (image-load "suo-base.scm")
+  (image-load "suo-asm.scm")
   (image-load "suo-asm-ppc.scm")
   (image-load "suo-util.scm")
   (image-load "suo-compiler.scm")
@@ -57,9 +62,7 @@
   (boot-eval '(set! cps-verbose #t))
   (make-bootstrap-image
    '(begin
-      (lambda (args body)
-	(cons* :lambda args (expand-body body)))
-      (bootinfo))
+      (define foo 12))
    "minimal"))
 
 ;;(compile-base)
