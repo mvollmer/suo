@@ -929,9 +929,9 @@ Only elements that occur in both lists occur in the result list."
 
 (define (record-type-constructor type slot-names)
   (or (assoc-ref (record-type-constructors type) slot-names)
-      (register-record-type-constructor
-       type slot-names
-       (eval (make-record-type-constructor-code type slot-names)))))
+      (let ((c (eval (make-record-type-constructor-code type slot-names))))
+	(register-record-type-constructor type slot-names c)
+	c)))
 
 (define (record-is-a? obj type)
   (and (record? obj)
@@ -3070,7 +3070,7 @@ Only elements that occur in both lists occur in the result list."
 		 (error "not a function: " val))
 	     (if (not (eq? func val))
 		 (transmogrify-objects (vector func) (vector val)))))
-	  ((:define-record)
+	  ((:define-record-type)
 	   (let* ((sym (cadr form))
 		  (old (and=> (lookup sym) entry-value)))
 	     (if (and old (not (record-type? old)))
@@ -3095,6 +3095,8 @@ Only elements that occur in both lists occur in the result list."
 		    (eval (car body))
 		    (loop (cdr body))))))
 	  (else
+	   (if (keyword? op)
+	       (error "unsupported special op: " op))
 	   (let ((vals (map eval form)))
 	     (apply (car vals) (cdr vals)))))))
      (else

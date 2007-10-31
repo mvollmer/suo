@@ -81,7 +81,7 @@
       (define (fixup! proc)
 	(set! fixups (cons proc fixups)))
       
-      (define (register-literal obj)
+      (define (litidx obj)
 	(let ((pos (list-index literals obj)))
 	  (or pos
 	      (begin
@@ -90,7 +90,7 @@
 
       (define (emit-s16-with-litoff w lit)
 	(let ((pos idx)
-	      (off (register-literal lit)))
+	      (off (litidx lit)))
 	  (emit-u16 (s2val w))
 	  (fixup! (lambda ()
 		    (fixup-s16 pos (+ (* 2 idx) (* 4 (1+ off))))))))
@@ -119,6 +119,8 @@
 	 (emit-s16-with-litoff (car args) (cadr args)))
 	((emit-s16-with-laboff)
 	 (emit-s16-with-laboff (car args) (cadr args)))
+	((litidx)
+	 (litidx (car args)))
 	((make-label)
 	 (make-label))
 	((def-label)
@@ -136,6 +138,9 @@
 
 (define (cps-asm-s16-with-litoff ctxt w lit)
   (ctxt 'emit-s16-with-litoff w lit))
+
+(define (cps-asm-litidx ctxt lit)
+  (ctxt 'litidx lit))
 
 (define (cps-asm-s16-with-laboff ctxt w label)
   (ctxt 'emit-s16-with-laboff w label))

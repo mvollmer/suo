@@ -222,11 +222,325 @@ unswizzle_objects (val *mem, size_t off, word n)
     }
 }
 
-/* Machine state
+/* The machine.
+
+   There are 256 general registers that hold valid suo values at all
+   times.
+
+   There are also a number of special registers that are used in
+   special ways by certain instructions.  They don't generally hold
+   valid suo values.  They are described together with the
+   instructions that use them.
+
+   Instructions consist of four bytes, called OP, X, Y, and Z.  OP
+   determines the kind of instruction and X, Y, and Z are its
+   parameters.  They might contain a register number, or a small
+   immediate constant, for example.  Sometimes, Y and Z are combined
+   into a 16-bit quatity, which is called YZ.  Some instructions also
+   deal with the 24-bit quantity XYZ.
+
+   The instructions have a 'riscy' feeling to it: many of them operate
+   on two registers and store the result in a third.  But in addition
+   to registers, these instructions can also access literals in the
+   current code object as the source operands.  Because of the uniform
+   encoding, this means that there can be at most 256 literals.
+
+   For example, the ADD16 instruction exists in the variants ADD16RR,
+   ADD16RL, ADD16LR, and ADD16LL.  (Of course, it is not very useful
+   to have an instruction that adds two literals, the compiler should
+   perform constant-folding on them.  But the machine offers it anyway
+   for completeness and so that the compiler can be very simple,
+   regular, and still correct.)
+
+   Most instructions either operate on registers and literals, or do a
+   single reference to the heap.  This is done to keep the illusion
+   that this is a machine that could be implemented in hardware using
+   a standard RISC pipeline.  However, some instructions contain a
+   very simple implicit loop (which could be executed by the
+   load/store unit), and some are so complicated that they would be
+   implemented as traps in a real system.
+
+   There are instructions that know about the tagging scheme.  For
+   example, INIT_LENGTH knows how the header word of vectors, etc is
+   constructed.
+
+
+   In the instruction descriptions, reg[i] refers to general register
+   I, and lit[I] refers to literal number I in the code object pointed
+   to by CODE.  "reglit[I]" is a shorthand to say that either a
+   register or a literal can be used.
+
+   Unless explicitly mentioned, instructions don't do type checking,
+   so if you try to GO to a fixnum, the machine will attempt to do so
+   and will likely crash.
+
+   When a instruction is described with three arguments, each of them
+   is 8 bit wide.  When it has two parameters, the first is 8 and the
+   second 16 bit wide.  A single parameter is 24 bit wide.
+
+   ** Simple instructions
+
+   - HALT XYZ
+
+   Halt execution.  XYZ can be used to indicate the reason for
+   halting.
+
+   - GO C                  == MISC 0 C MISCOP_GO
+
+   code = reglit[C]
+   pc = first instruction of code
+   lit = first literal of code
+
+   - MOVE D S Z
+
+   reg[D] = reglit[S].
+
+   - MOVEI D YZ
+
+   reg[D] = YZ
+
+   - REF D S I
+
+   reg[D] = reglit[S][FIXNUM_VAL(reglit[I])+1]
+
+   (Note the "+ 1" in the index calculation.)
+
+   - REFI D S I
+
+   reg[D] = reglit[S][I]
+
+   - SET D S I
+
+   reg[D][FIXNUM_VAL(reglit[I])+1] = reglit[S]
+
+   - SETI D S I
+
+   reglit[D][I] = reglit[S]
+
+   - SETL D S I
+
+   lit[D][FIXNUM_VAL(reglit[I])+1] = reglit[S]
+
+   - ALLOC D S                == MISC D S MISCOP_ALLOC
+
+   count = FIXNUM_VAL (reglit[S])
+   reg[D] = free
+   dst = free
+   free += count
+
+   - ALLOCI D I
+
+   count = I
+   reg[D] = free
+   dst = free
+   free += count
+
+   - INIT S                   == MISC 0 S MISCOP_INIT
+
+   dst[0] = reglit[S]
+   dst += 1
+   count -= 1
+
+   - INITI I
+
+   dst[0] = I
+   dst += 1
+   count -= 1
+
+   - INIT_REC S               == MISC 0 S MISCOP_INIT_REC
+
+   dst[0] = reglit[S] | 3
+   dst += 1
+   count -= 1
+
+   - INIT_VEC T S             == MISC T S MISCOP_INIT_VEC
+
+   dst[0] = (FIXNUM_VAL(reglit[S]) << 4) | 0x80000000 | T
+   dst += 1
+   count -= 1
+
+   - FILL S                   == MISC 0 S MISCOP_FILL
+
+   f = reglit[S]
+   while (count > 0)
+     {
+       dst[0] = f
+       dst += 1
+       count -= 1
+     }
+
+   - FILLI I
+
+   f = I
+   while (count > 0)
+     {
+       dst[0] = f
+       dst += 1
+       count -= 1
+     }
+
+   - COPY                     == MISC 0 0 MISCOP_COPY
+
+   while (count > 0)
+     {
+       dst[0] = src[0]
+       dst += 1
+       src += 1
+       count -= 1
+     }
+
+   - LOAD_DESC D S            == MISC D S MISCOP_LOAD_DESC
+
+   reg[D] = reglit[S][0] & ~3
+
+   - LOAD_LENGTH D S          == MISC D S MISCOP_LOAD_LENGTH
+
+   reg[D] = MAKE_FIXNUM (reglit[S][0] & ~0x8000000F)
+
+
+   ** Testing and branching
+
+   - TEST_REC S               == MISC 0 S MISCOP_TEST_REC
+
+   if (HEAP_P (reglit[S]))
+     {
+       dst = reglit[S][0];
+       count = (dst & 0x80000003) == 3;
+     }
+   else
+     count = 0;
+
+   - TEST_VEC S               == MISC T S MISCOP_TEST_VEC
+
+   if (HEAP_P (reglit[S]))
+     {
+       dst = reglit[S][0];
+       count = (dst & 0x8000000F) == 0x80000000 | T;
+     }
+   else
+     count = 0;
+
+   - TEST_DESC S              == MISC 0 S MISCOP_TEST_DESC
+
+   if (count && dst == reglit[S] | 3):
+     count = 1
+   else
+     count = 0
+
+   - BRANCH C O
+
+   If condition C is true, pc += O.
+
+   Conditions are
+   
+     IF_TRUE:    count != 0
+     IF_RECORD:  dst & 0x80000003 == 3
+
+     IFNOT variants also exist.
+
+
+   ** Complex instructions
+
+   These instructions do complicated things by conditionally branching
+   out to subroutines.  You can imagine the subroutines being
+   implemented somewhere in ROM, using an instruction set from above
+   plus whatever is needed in addition.
+
+   - SYSCALL N              == TRAP 0 N TRAPOP_SYSCALL
+
+   Trap into the operation system to perform syscall number S.  The
+   next N words of the instruction stream are used as parameters for
+   the syscall.  Each word is either of the form
+
+       R    or   0x80000000 + L
+
+   where R means that reg[R] is to be used, and the second form refers
+   to lit[L].
+
+   - CHECK_ALLOCI S
+
+   If FREE + S >= END, run the garbage collector.  If there still
+   isn't enough free space afterwards, halt the machine.
+
+   - CHECK_CALLSIG C S        == TRAP C S TRAPOP_CHECK_CALLSIG
+
+   reg[C] is the signature of the parameters in the general registers
+   and S is the signature that is expected.  If reg[C] and S are not
+   equal, a 'signature adjustement routine' is executed.
+
+   The adjustement subroutine knows about the calling convention and
+   will reshuffle the general registers to make the two signatures
+   equal if possible.  This might run the GC.  When it is not possible
+   to reshuffle the registers, a GO to WRONG_CALLSIG is performed, if
+   that register points to the heap.  If it doesn't, a HALT with FF,
+   reg[C], and S is performed instead.
+
+   A 'call signature' is a integer that encodes the number of
+   parameters and whether or not there is a 'rest' parameter.  It is
+   computed as
+   
+       2*n + r
+
+   where N is the number of parameters, excluding any rest parameter
+   if there is one, and R is 0 when there is no rest parameter and 1
+   when there is.
+
+   For example, a function defined as
+
+       (define (foo a b c . rest) ...)
+
+   has a call signature of 2*3 + 1 = 7 and expects parameters A, B, C,
+   and REST in registers 1, 2, 4, and 4, respectively.  When using
+   apply to call it like so
+
+       (apply foo 1 2 '(3 4)),
+
+   the call itself has a signature of 2*2 + 1 = 5 with reg[1] = 1,
+   reg[2] = 2, and reg[3] = '(3 4).  The adjustement subroutine will
+   reshuffle the register by moving the cdr of reg[3] into reg[4] and
+   the car of reg[3] into reg[3].  If the call would be
+
+       (foo 1 2 3 4),
+
+   its call signature would be 2*5 + 0 = 10, with reg[1] = 1, reg[2] =
+   2, reg[3] = 3, and reg[4] = 4.  The adjustement subroutine will
+   allocate a new pair, put reg[4] into its car (and nil in its cdr)
+   and will point reg[4] to it.
+   
+
  */
 
 val specials_and_regs[8+256];
 val *regs = specials_and_regs + 8;
+
+val reg_code;
+
+word *reg_pc;
+word *reg_src;
+word *reg_dst;
+word  reg_count;
+word *reg_free;
+word *reg_end;
+
+void
+run_cpu ()
+{
+  while (1)
+    {
+      word insn = *reg_pc;
+      word op = insn >> 24;
+      word x = (insn >> 16) & 0xFF;
+      word y = (insn >> 8) & 0xFF;
+      word z = insn & 0xFF;
+
+      switch (op)
+	{
+	case 0:
+	  fprintf (stderr, "HALT %02x%02x%02x\n", x, y, z);
+	  exit (0);
+	}
+    }
+}
 
 /* The GC.
 
@@ -396,44 +710,26 @@ scan (val *ptr)
     return ptr - size;
 }
 
-int gc_count = 0;
-
-#define GCPAR_LR  0
-#define GCPAR_R4  1
-#define GCPAR_R15 2
-#define GCPAR_R16 3
-#define GCPAR_R17 4
-
-void gc_glue (void);
-
-#define PPC_DCBST(where) asm volatile ("dcbst 0,%0" : : "r"(where) : "memory")
-#define PPC_SYNC asm volatile ("sync" : : : "memory")
-#define PPC_ISYNC asm volatile ("sync; isync" : : : "memory")
-#define PPC_ICBI(where) asm volatile ("icbi 0,%0" : : "r"(where) : "memory")
-
 void rehash_hashq_vectors (val list);
 
-word *
-gc (word *params)
+void
+gc (word size)
 {
   val *ptr;
   size_t count;
-  word lr_off = params[GCPAR_LR] - params[GCPAR_R15];
-  word size = params[GCPAR_R4] - params[GCPAR_R16];
+  word pc_off = reg_pc - (word *)reg_code;
 
-  if (params[GCPAR_R17] == 0)
+  if (reg_end == 0)
     {
       fprintf (stderr, "INTERRUPT\n");
-      params[GCPAR_R17] = spaces[active_space] + SPACE_SIZE;
-      return params;
+      reg_end = spaces[active_space] + SPACE_SIZE;
+      return;
     }
-
-  gc_count++;
 
   active_space = 1 - active_space;
   to_space = spaces[active_space];
 
-  // fprintf (stderr, "alloc of %d bytes failed, off %d\n", size, lr_off);
+  // fprintf (stderr, "alloc of %d bytes failed, off %d\n", size, pc_off);
 
   to_ptr = to_space;
   scan_words (regs, 256);
@@ -441,7 +737,7 @@ gc (word *params)
   scan_words (&regs[-6], 1);
   scan_words (&regs[-7], 1);
   scan_words (&regs[-8], 1);
-  scan_words (&params[GCPAR_R15], 1);
+  scan_words (&reg_code, 1);
   for (ptr = to_space, count = 0; ptr < to_ptr; count++)
     ptr = scan (ptr);
 
@@ -449,37 +745,17 @@ gc (word *params)
     fprintf (stderr, "GC: copied %d objects, %d words (%02f%%)\n",
 	     count, to_ptr - to_space, (to_ptr - to_space)*100.0/SPACE_SIZE);
 
-  params[GCPAR_LR] = params[GCPAR_R15] + lr_off;
-  params[GCPAR_R4] = (word)(to_ptr + size);
-  params[GCPAR_R16] = (word)to_ptr;
-  params[GCPAR_R17] = (word)(to_space + SPACE_SIZE);
+  reg_pc = (word *)reg_code + pc_off;
+  reg_free = to_ptr;
+  reg_end = to_space + SPACE_SIZE;
 
-  if (params[GCPAR_R16] > params[GCPAR_R17])
+  if (reg_free > reg_end)
     {
       fprintf (stderr, "FULL\n");
       exit (1);
     }
 
-  /* Flush new semi space out of data cache and into instruction
-   * cache.  We assume a cache line size of 32 bytes, which might not
-   * be appropriate for all PPC...
-   *
-   * XXX - we don't need to flush the whole semi-space, only those
-   *       parts that are actually code.
-   */
-  for (ptr = to_space; ptr < to_ptr; ptr += 8)
-    PPC_DCBST (ptr);
-  PPC_DCBST (ptr - 1);
-  PPC_SYNC;
-  
-  for (ptr = to_space; ptr < to_ptr; ptr += 8)
-    PPC_ICBI (ptr);
-  PPC_ICBI (ptr - 1);
-  PPC_ISYNC;
-
   rehash_hashq_vectors (regs[-3]);
-  
-  return params;
 }
 
 struct image_header {
@@ -488,7 +764,7 @@ struct image_header {
   word start;
 };
 
-#define MAGIC_1 0xABCD0001
+#define MAGIC_1 0xABCD0002
 
 char *suspend_image;
 
@@ -989,7 +1265,7 @@ scan_for_transmogrify (val from, val to, val obj)
     }
   else if (HEADER_RECORD_P (header))
     {
-      val desc = copy (HEADER_RECORD_DESC (header));
+      val desc = HEADER_RECORD_DESC (header);
       val new_desc = find_replacement (from, to, desc);
 
       if (new_desc != desc)
@@ -1145,7 +1421,7 @@ sys (int n_args,
   if (n_args == 0)
     {
       if (verbose)
-	fprintf (stderr, "PANIC after %d GCs.\n", gc_count);
+	fprintf (stderr, "PANIC\n");
       exit (0);
     }
 
@@ -1273,46 +1549,40 @@ sys (int n_args,
   return BOOL_T;
 }
 
-void adjust_call_sig ();
-
 void
-go (val closure, val *free, val *end)
+boot (val closure, val *free, val *end)
 {
   int i;
-  register val *r14 asm ("r14");
-  register val *r15 asm ("r15");
-  register val *r16 asm ("r16");
-  register val *r17 asm ("r17");
 
   for (i = 0; i < 256; i++)
-    regs[i] = 1; /* fixnum zero */
+    regs[i] = UNSPEC;
 
   regs[-8] = BOOL_F; // interrupt val
   regs[-7] = BOOL_F; // interrupt flag
   regs[-6] = BOOL_F; // error:wrong-num-args code
   regs[-5] = BOOL_F; // target_sig for adjust_call_sig
-  regs[-4] = (val)adjust_call_sig;
-  regs[-3] = NIL; // hashq vectors
-  regs[-2] = (val)gc_glue;
-  regs[-1] = (val)sys;
+  regs[-4] = BOOL_F; // adjust_call_sig
+  regs[-3] = NIL;    // hashq vectors
+  regs[-2] = BOOL_F; // gc_glue
+  regs[-1] = BOOL_F; // sys
   regs[0] = MAKE_FIXNUM(4);
   regs[1] = closure;
   regs[2] = BOOL_F;  // cont of boot procedure
 
-  r14 = regs;
-  r15 = (val *)RECORD_REF(closure,0);
-  r16 = free;
-  r17 = end;
-  asm ("mr 3,15\n\t addi 3,3,4\n\t mtctr 3\n\t bctr"
-       :
-       : "r" (r14), "r" (r15), "r" (r16), "r" (r17));
+  reg_code = RECORD_REF(closure,0);
+  reg_free = free;
+  reg_end = end;
+  
+  reg_pc = ((word *)reg_code) + 1;
+
+  run_cpu ();
 }
 
 void
 sighandler (int sig, struct sigcontext *ctxt)
 {
   printf ("INT\n");
-  ctxt->regs->gpr[17] = 0;
+  reg_end = 0;
   signal (sig, (void (*) (int))sighandler);
 }
 
@@ -1395,8 +1665,8 @@ main (int argc, char **argv)
 
   signal (SIGINT, (void (*) (int))sighandler);
 
-  go (((val)space) + head.start - head.origin,
-      space + n/4, space + SPACE_SIZE);
+  boot (((val)space) + head.start - head.origin,
+	space + n/4, space + SPACE_SIZE);
 
   return 0;
 }

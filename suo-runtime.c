@@ -1,4 +1,4 @@
-/* suo-runtime -- lowest level runtime 
+/* suo-vm -- virtual machine
  */
 
 #include <stdio.h>
@@ -35,12 +35,76 @@ error_exit (const char *msg)
   exit (1);
 }
 
+/* Representation of objects
+ */
+
 typedef unsigned int word;
 typedef   signed int sword;
 typedef         word val;
 
-val specials_and_regs[8+256];
-val *regs = specials_and_regs + 8;
+#define MAKE_IMM(i)        (((i)<<3)+2)
+
+#define NIL                MAKE_IMM(0)
+#define BOOL_T             MAKE_IMM(1)
+#define BOOL_F             MAKE_IMM(2)
+#define UNSPEC             MAKE_IMM(3)
+
+#define FIXNUM_P(v)        (((v)&3)==1)
+#define FIXNUM_VAL(v)      (((sword)(v))>>2)
+#define MAKE_FIXNUM(n)     (((word)(n))<<2|1)
+
+#define CHAR_P(v)          (((v)&7)==6)
+#define CHAR_VAL(v)        (((word)(v))>>3)
+#define MAKE_CHAR(n)       (((word)(n))<<3|6)
+
+#define HEAP_P(v)          (((v)&3)==0)
+#define LOC(o,i)           (((val *)(o))+i)
+#define REF(o,i)           (((val *)(o))[i])
+#define SET(o,i,v)         (((val *)(o))[i]=(v))
+
+#define HEADER_PAIR_P(v)   (((v)&3)!=3)
+
+#define PAIR_P(v)          (HEAP_P(v) && HEADER_PAIR_P(REF(v,0)))
+#define CAR(p)             REF(p,0)
+#define CDR(p)             REF(p,1)
+#define CDR_LOC(p)         LOC(p,1)
+#define SET_CDR(p,v)       SET(p,1,v)
+
+#define HEADER_RECORD_P(v)       (((v)&0x80000003)==0x00000003)
+#define HEADER_RECORD_DESC(v)    ((v)&~3)
+#define MAKE_HEADER_RECORD(desc) ((desc)|3)
+
+#define RECORD_P(v)        (HEAP_P(v) && HEADER_RECORD_P(REF(v,0)))
+#define RECORD_DESC(v)     (HEADER_RECORD_DESC(REF(v,0)))
+#define RECORD_LENGTH(v)   FIXNUM_VAL(RECORD_REF(RECORD_DESC(v),0))
+#define RECORD_LOC(v,i)    LOC(v,(i)+1)
+#define RECORD_REF(v,i)    REF(v,(i)+1)
+#define RECORD_SET(v,i,e)  SET(v,(i)+1,e)
+
+#define HEADER_VECTOR_P(v)      (((v)&0x8000000F)==0x80000003)
+#define HEADER_VECTOR_LENGTH(v) (((v)&~0x80000000)>>4)
+
+#define VECTOR_P(v)        (HEAP_P(v) && HEADER_VECTOR_P(REF(v,0)))
+#define VECTOR_LENGTH(v)   (HEADER_VECTOR_LENGTH(REF(v,0)))
+#define VECTOR_LOC(v,i)    LOC(v,(i)+1)
+#define VECTOR_REF(v,i)    REF(v,(i)+1)
+#define VECTOR_SET(v,i,e)  SET(v,(i)+1,e)
+
+#define HEADER_BYTEVEC_P(v)      (((v)&0x8000000F)==0x8000000B)
+#define HEADER_BYTEVEC_LENGTH(v) (((v)&~0x80000000)>>4)
+
+#define BYTEVEC_P(v)       (HEAP_P(v) && HEADER_BYTEVEC_P(REF(v,0)))
+#define BYTEVEC_LENGTH(v)  (HEADER_BYTEVEC_LENGTH(REF(v,0)))
+#define BYTEVEC_BYTES(v)   ((char *)LOC(v,1))
+
+#define HEADER_CODE_P(v)           (((v)&0x8000000F)==0x8000000F)
+#define HEADER_CODE_INSN_LENGTH(v) (((v)>>12)&0x7FFFF)
+#define HEADER_CODE_LIT_LENGTH(v)  (((v)>>4)&0xFF)
+
+#define CODE_P(v)           (HEAP_P(v) && HEADER_CODE_P(REF(v,0)))
+#define CODE_INSN_LENGTH(v) (HEADER_CODE_INSN_LENGTH(REF(v,0)))
+#define CODE_LIT_LENGTH(v)  (HEADER_CODE_LIT_LENGTH(REF(v,0)))
+
 
 #define HEAP_SIZE  (32*1024*1024)
 #define SPACE_SIZE (HEAP_SIZE/2)
@@ -57,6 +121,7 @@ init_heap ()
   spaces[1] = spaces[0] + SPACE_SIZE;
   active_space = 0;
 }
+
 
 #define UNSWIZZLE(p,b)   (((word)p)+((word)b))
 
@@ -75,62 +140,56 @@ unswizzle_objects (val *mem, size_t off, word n)
     {
       sword size;
       char *type;
-      val v = *ptr;
-      
-      // fprintf (stderr, "on %d %08x\n", ptr-mem, v);
+      val header = *ptr;
+
+#if DEBUG      
+      fprintf (stderr, "on %d %08x\n", ptr-mem, header);
+#endif
+
       count++;
 
-      if ((v & 3) == 3)
+      if (HEADER_PAIR_P (header))
 	{
-	  /* non-pair header */
-	  if (((sword)(v)) >= 0)
-	    {
-	      /* record header */
-	      *ptr = UNSWIZZLE (*ptr, off);
-	      val *desc = (val *)(*ptr & ~3);
-	      type = "record";
-	      n_records++;
-	      size = ((sword)desc[1]) >> 2;
-	    }
-	  else
-	    {
-	      v &= ~ 0x80000000;
-	      if ((v & 15) == 3)
-		{
-		  type = "vector";
-		  n_vectors++;
-		  size = v >> 4;
-		}
-	      else if ((v & 15) == 11)
-		{
-		  /* bytevec header */
-		  type = "bytevec";
-		  n_bytevecs++;
-		  size = -(((v >> 4) + 3) / 4);
-		}
-	      else if ((v & 15) == 15)
-		{
-		  /* code header */
-		  type = "code";
-		  n_codes++;
-		  size = (v >> 4) & 0xFF;
-		  ptr += (v >> 12);
-		}
-	      else
-		abort ();
-	    }
-	  /* size does not include header */
-	  ptr++;
-	}
-      else
-	{
-	  /* pair */
 	  type = "pair";
 	  n_pairs++;
 	  size = 2;
 	}
+      else if (HEADER_RECORD_P (header))
+	{
+	  *ptr = UNSWIZZLE (*ptr, off);
+	  val desc = HEADER_RECORD_DESC (*ptr);
+	  type = "record";
+	  n_records++;
+	  size = FIXNUM_VAL(RECORD_REF(desc,0));
+	  ptr++;
+	}
+      else if (HEADER_VECTOR_P (header))
+	{
+	  type = "vector";
+	  n_vectors++;
+	  size = HEADER_VECTOR_LENGTH (header);
+	  ptr++;
+	}
+      else if (HEADER_BYTEVEC_P (header))
+	{
+	  type = "bytevec";
+	  n_bytevecs++;
+	  size = - ((HEADER_BYTEVEC_LENGTH(header) + 3) / 4);
+	  ptr++;
+	}
+      else if (HEADER_CODE_P (header))
+	{
+	  type = "code";
+	  n_codes++;
+	  size = HEADER_CODE_LIT_LENGTH(header);
+	  ptr += HEADER_CODE_INSN_LENGTH(header) + 1;
+	}
+      else
+	abort ();
 
-      // fprintf (stderr, " %s, %d words\n", type, size);
+#if DEBUG
+      fprintf (stderr, " %s, %d words\n", type, size);
+#endif
 
       if (size > 0)
 	{
@@ -140,7 +199,7 @@ unswizzle_objects (val *mem, size_t off, word n)
 	  while (size > 0)
 	    {
 	      val v = *ptr;
-	      if ((v & 3) == 0)
+	      if (HEAP_P(v))
 		*ptr = UNSWIZZLE (v, off);
 	      ptr++;
 	      size--;
@@ -163,7 +222,15 @@ unswizzle_objects (val *mem, size_t off, word n)
     }
 }
 
-/* The GC.  It must use only a constant amount of space in addition to
+/* Machine state
+ */
+
+val specials_and_regs[8+256];
+val *regs = specials_and_regs + 8;
+
+/* The GC.
+
+   It must use only a constant amount of space in addition to
    the semi spaces.  Thus, it must not be recursive.
 
    There are two basic operations: copy and scan.
@@ -182,25 +249,25 @@ unswizzle_objects (val *mem, size_t off, word n)
 
 val *to_space, *to_ptr;
 
-val *
-snap_pointer (val *ptr)
+val
+snap_pointer (val ptr)
 {
-  val v = *ptr;
-  if ((v & 3) == 0 &&
-      (val *)v >= to_space && (val *)v < to_space + SPACE_SIZE)
-    return (val *)v;
+  val header = REF(ptr,0);
+  if (HEAP_P(header) &&
+      (val *)header >= to_space && (val *)header < to_space + SPACE_SIZE)
+    return header;
   else
     return ptr;
 }
 
 /* Copy the object at PTR to the to_space if it isn't already there.
 */
-val *
-copy (val *ptr)
+val
+copy (val ptr)
 {
   sword size;
   char *type;
-  val v, *ptr2;
+  val header, ptr2;
 
   /* check for a forwarding pointer
    */
@@ -213,65 +280,51 @@ copy (val *ptr)
       return ptr2;
     }
 
-  v = *ptr;
+  header = REF(ptr,0);
 
 #if DEBUG
-  fprintf (stderr, "copy %p (%08x) -> %p\n", ptr, v, to_ptr);
+  fprintf (stderr, "copy %p (%08x) -> %p\n", ptr, header, to_ptr);
 #endif
 
-  if ((v & 3) == 3)
+  if (HEADER_PAIR_P (header))
     {
-      /* non-pair header */
-      if (((sword)(v)) >= 0)
-	{
-	  /* record header */
-	  val *desc = (val *)(*ptr & ~3);
-	  desc = snap_pointer (desc);
-	  type = "record";
-	  size = ((sword)desc[1]) >> 2;
-	}
-      else
-	{
-	  v &= ~ 0x80000000;
-	  if ((v & 15) == 3)
-	    {
-	      type = "vector";
-	      size = v >> 4;
-	    }
-	  else if ((v & 15) == 11)
-	    {
-	      /* bytevec header */
-	      type = "bytevec";
-	      size = (((v >> 4) + 3) / 4);
-	    }
-	  else if ((v & 15) == 15)
-	    {
-	      /* code header */
-	      type = "code";
-	      size = ((v >> 4) & 0xFF) + (v >> 12);
-	    }
-	  else
-	    abort ();
-	}
-      /* size does not include header */
-      size++;
-    }
-  else
-    {
-      /* pair */
       type = "pair";
       size = 2;
     }
-
+  else if (HEADER_RECORD_P (header))
+    {
+      val desc = snap_pointer (HEADER_RECORD_DESC (header));
+      type = "record";
+      size = FIXNUM_VAL(RECORD_REF(desc,0)) + 1;
+    }
+  else if (HEADER_VECTOR_P (header))
+    {
+      type = "vector";
+      size = HEADER_VECTOR_LENGTH (header) + 1;
+    }
+  else if (HEADER_BYTEVEC_P (header))
+    {
+      type = "bytevec";
+      size = (((HEADER_BYTEVEC_LENGTH(header) + 3) / 4) + 1);
+    }
+  else if (HEADER_CODE_P (header))
+    {
+      type = "code";
+      size = (HEADER_CODE_LIT_LENGTH(header) + 
+	      HEADER_CODE_INSN_LENGTH(header) + 1);
+    }
+  else
+    abort ();
+  
 #if DEBUG
   fprintf (stderr, " %s, %d words\n", type, size);
 #endif
   
-  memcpy (to_ptr, ptr, size*sizeof(val));
-  *ptr = (val)to_ptr;
+  memcpy (to_ptr, (val *)ptr, size*sizeof(val));
+  SET(ptr, 0, (val)to_ptr);
   to_ptr += size;
 
-  return to_ptr - size;
+  return (val)(to_ptr - size);
 }
 
 void
@@ -280,8 +333,8 @@ scan_words (val *ptr, size_t n)
   size_t i;
   for (i = 0; i < n; i++)
     {
-      if ((ptr[i] & 3) == 0)
-	ptr[i] = (val) copy ((val *)ptr[i]);
+      if (HEAP_P (ptr[i]))
+	ptr[i] = copy (ptr[i]);
     }
 }
 
@@ -290,56 +343,45 @@ scan (val *ptr)
 {
   sword size;
   char *type;
-  val v = *ptr;
+  val header = *ptr;
   
 #if DEBUG
-  fprintf (stderr, "scan %08x (%08x)\n", ptr, v);
+  fprintf (stderr, "scan %08x (%08x)\n", ptr, header);
 #endif
 
-  if ((v & 3) == 3)
+  if (HEADER_PAIR_P (header))
     {
-      /* non-pair header */
-      if (((sword)(v)) >= 0)
-	{
-	  /* record header */
-	  val *desc = copy ((val *)(*ptr & ~3));
-	  *ptr = ((val)desc) | 3;
-	  type = "record";
-	  size = ((sword)desc[1]) >> 2;
-	}
-      else
-	{
-	  v &= ~ 0x80000000;
-	  if ((v & 15) == 3)
-	    {
-	      type = "vector";
-	      size = v >> 4;
-	    }
-	  else if ((v & 15) == 11)
-	    {
-	      /* bytevec header */
-	      type = "bytevec";
-	      size = -(((v >> 4) + 3) / 4);
-	    }
-	  else if ((v & 15) == 15)
-	    {
-	      /* code header */
-	      type = "code";
-	      size = (v >> 4) & 0xFF;
-	      ptr += (v >> 12);
-	    }
-	  else
-	    abort ();
-	}
-      /* size does not include header */
-      ptr++;
-    }
-  else
-    {
-      /* pair */
       type = "pair";
       size = 2;
     }
+  else if (HEADER_RECORD_P (header))
+    {
+      val desc = copy (HEADER_RECORD_DESC (header));
+      SET (ptr, 0, MAKE_HEADER_RECORD (desc));
+      type = "record";
+      size = FIXNUM_VAL(RECORD_REF(desc,0));
+      ptr++;
+    }
+  else if (HEADER_VECTOR_P (header))
+    {
+      type = "vector";
+      size = HEADER_VECTOR_LENGTH (header);
+      ptr++;
+    }
+  else if (HEADER_BYTEVEC_P (header))
+    {
+      type = "bytevec";
+      size = - ((HEADER_BYTEVEC_LENGTH(header) + 3) / 4);
+      ptr++;
+    }
+  else if (HEADER_CODE_P (header))
+    {
+      type = "code";
+      size = HEADER_CODE_LIT_LENGTH(header);
+      ptr += HEADER_CODE_INSN_LENGTH(header) + 1;
+    }
+  else
+    abort ();
   
 #if DEBUG
   fprintf (stderr, " %s, %d words\n", type, size);
@@ -451,7 +493,7 @@ struct image_header {
 char *suspend_image;
 
 void
-suspend (word cont)
+suspend (val cont)
 {
   val *ptr;
   size_t count;
@@ -536,37 +578,16 @@ suspend (word cont)
    syscall.)
 */
 
-#define HEAP_P(v)          ((v&3)==0)
-#define LOC(o,i)           (((val *)(o))+i)
-#define REF(o,i)           (((val *)(o))[i])
-#define SET(o,i,v)         (((val *)(o))[i]=(v))
-
-#define VECTOR_P(v)        (HEAP_P(v) && (REF(v,0)&0x8000000F) == 0x80000003)
-#define VECTOR_LENGTH(v)   ((REF(v,0)&~0x80000000)>>4)
-#define VECTOR_LOC(v,i)    LOC(v,(i)+1)
-#define VECTOR_REF(v,i)    REF(v,(i)+1)
-#define VECTOR_SET(v,i,e)  SET(v,(i)+1,e)
-
-#define PAIR_P(v)          (HEAP_P(v) && (REF(v,0)&3)!=3)
-#define CAR(p)             REF(p,0)
-#define CDR(p)             REF(p,1)
-#define CDR_LOC(p)         LOC(p,1)
-#define SET_CDR(p,v)       SET(p,1,v)
-
-#define EOL                2
-#define BOOL_T             10
-#define BOOL_F             18
-
 val
 hashq_vector_to_alist (val vec)
 {
   int n = VECTOR_LENGTH (vec);
   int i;
-  val result = EOL;
+  val result = NIL;
 
   for (i = 0; i < n; i++)
     {
-      val a = EOL, b = VECTOR_REF (vec, i);
+      val a = NIL, b = VECTOR_REF (vec, i);
       while (PAIR_P (b))
 	{
 	  a = b;
@@ -739,7 +760,7 @@ scan_for_referrers (val obj, val vec, size_t count, val referrer)
   sword size;
   char *type;
   val *ptr = (val *)referrer;
-  val v = *ptr;
+  val header = *ptr;
   
   if (is_marked (ptr))
     return count;
@@ -750,49 +771,38 @@ scan_for_referrers (val obj, val vec, size_t count, val referrer)
   fprintf (stderr, "Scan %08x (%08x)\n", ptr, v);
 #endif
 
-  if ((v & 3) == 3)
+  if (HEADER_PAIR_P (header))
     {
-      /* non-pair header */
-      if (((sword)(v)) >= 0)
-	{
-	  /* record header */
-	  val *desc = (val *)(*ptr & ~3);
-	  type = "record";
-	  size = ((sword)desc[1]) >> 2;
-	}
-      else
-	{
-	  v &= ~ 0x80000000;
-	  if ((v & 15) == 3)
-	    {
-	      type = "vector";
-	      size = v >> 4;
-	    }
-	  else if ((v & 15) == 11)
-	    {
-	      /* bytevec header */
-	      type = "bytevec";
-	      size = -(((v >> 4) + 3) / 4);
-	    }
-	  else if ((v & 15) == 15)
-	    {
-	      /* code header */
-	      type = "code";
-	      size = (v >> 4) & 0xFF;
-	      ptr += (v >> 12);
-	    }
-	  else
-	    abort ();
-	}
-      /* size does not include header */
-      ptr++;
-    }
-  else
-    {
-      /* pair */
       type = "pair";
       size = 2;
     }
+  else if (HEADER_RECORD_P (header))
+    {
+      val desc = HEADER_RECORD_DESC (header);
+      type = "record";
+      size = FIXNUM_VAL(RECORD_REF(desc,0));
+      ptr++;
+    }
+  else if (HEADER_VECTOR_P (header))
+    {
+      type = "vector";
+      size = HEADER_VECTOR_LENGTH (header);
+      ptr++;
+    }
+  else if (HEADER_BYTEVEC_P (header))
+    {
+      type = "bytevec";
+      size = - ((HEADER_BYTEVEC_LENGTH(header) + 3) / 4);
+      ptr++;
+    }
+  else if (HEADER_CODE_P (header))
+    {
+      type = "code";
+      size = HEADER_CODE_LIT_LENGTH(header);
+      ptr += HEADER_CODE_INSN_LENGTH(header) + 1;
+    }
+  else
+    abort ();
   
 #if DEBUG
   fprintf (stderr, " %s, %d words\n", type, size);
@@ -841,7 +851,7 @@ scan_for_instances (val desc, val vec, size_t count, val obj)
   sword size;
   char *type;
   val *ptr = (val *)obj;
-  val v = *ptr;
+  val header = *ptr;
   
   if (is_marked (ptr))
     return count;
@@ -849,59 +859,49 @@ scan_for_instances (val desc, val vec, size_t count, val obj)
   mark (ptr);
 
 #if DEBUG
-  fprintf (stderr, "Scan %08x (%08x)\n", ptr, v);
+  fprintf (stderr, "Scan %08x (%08x)\n", ptr, header);
 #endif
 
-  if ((v & 3) == 3)
+  if (HEADER_PAIR_P (header))
     {
-      /* non-pair header */
-      if (((sword)(v)) >= 0)
-	{
-	  /* record header */
-	  val *d = (val *)(*ptr & ~3);
-	  type = "record";
-	  size = ((sword)d[1]) >> 2;
-
-	  if (((val)d) == desc)
-	    {
-	      if (VECTOR_P (vec) && count < VECTOR_LENGTH (vec))
-		VECTOR_SET (vec, count, obj);
-	      count++;
-	    }
-	}
-      else
-	{
-	  v &= ~ 0x80000000;
-	  if ((v & 15) == 3)
-	    {
-	      type = "vector";
-	      size = v >> 4;
-	    }
-	  else if ((v & 15) == 11)
-	    {
-	      /* bytevec header */
-	      type = "bytevec";
-	      size = -(((v >> 4) + 3) / 4);
-	    }
-	  else if ((v & 15) == 15)
-	    {
-	      /* code header */
-	      type = "code";
-	      size = (v >> 4) & 0xFF;
-	      ptr += (v >> 12);
-	    }
-	  else
-	    abort ();
-	}
-      /* size does not include header */
-      ptr++;
-    }
-  else
-    {
-      /* pair */
       type = "pair";
       size = 2;
     }
+  else if (HEADER_RECORD_P (header))
+    {
+      val d = HEADER_RECORD_DESC (header);
+      type = "record";
+      size = FIXNUM_VAL(RECORD_REF(d,0));
+
+      if (d == desc)
+	{
+	  if (VECTOR_P (vec) && count < VECTOR_LENGTH (vec))
+	    VECTOR_SET (vec, count, obj);
+	  count++;
+	}
+
+      ptr++;
+    }
+  else if (HEADER_VECTOR_P (header))
+    {
+      type = "vector";
+      size = HEADER_VECTOR_LENGTH (header);
+      ptr++;
+    }
+  else if (HEADER_BYTEVEC_P (header))
+    {
+      type = "bytevec";
+      size = - ((HEADER_BYTEVEC_LENGTH(header) + 3) / 4);
+      ptr++;
+    }
+  else if (HEADER_CODE_P (header))
+    {
+      type = "code";
+      size = HEADER_CODE_LIT_LENGTH(header);
+      ptr += HEADER_CODE_INSN_LENGTH(header) + 1;
+    }
+  else
+    abort ();
   
 #if DEBUG
   fprintf (stderr, " %s, %d words\n", type, size);
@@ -925,9 +925,6 @@ find_instances (val desc, val vec)
 }
 
 /* Transmogrifying objects
-
-   XXX - no need to scan only life objects, transmogrifying dead ones
-         is harmless and doesn't need to recurse.
 */
 
 void scan_for_transmogrify (val from, val to, val obj);
@@ -966,11 +963,11 @@ scan_for_transmogrify (val from, val to, val obj)
   sword size;
   char *type;
   val *ptr = (val *)obj;
-  val v = *ptr;
+  val header = *ptr;
 
   if (obj == from)
     {
-      /* Never transmmogrify inside the FROM vector since we need it,
+      /* Never transmogrify inside the FROM vector since we need it,
 	 of course.
       */
       return;
@@ -982,63 +979,53 @@ scan_for_transmogrify (val from, val to, val obj)
   mark (ptr);
 
 #if DEBUG
-  fprintf (stderr, "Scan %08x (%08x)\n", ptr, v);
+  fprintf (stderr, "Scan %08x (%08x)\n", ptr, header);
 #endif
 
-  if ((v & 3) == 3)
+  if (HEADER_PAIR_P (header))
     {
-      /* non-pair header */
-      if (((sword)(v)) >= 0)
-	{
-	  /* record header */
-	  val desc = (*ptr & ~3);
-	  val new_desc = find_replacement (from, to, desc);
-
-	  if (new_desc != desc)
-	    {
-	      if (((val *)new_desc)[1] != ((val *)desc)[1])
-		fprintf (stderr,
-			 "ERROR: new descriptor has wrong size,"
-			 " not transmogrifying\n");
-	      else
-		*ptr = new_desc | 3;
-	    }
-	  type = "record";
-	  size = ((sword)((val *)desc)[1]) >> 2;
-	}
-      else
-	{
-	  v &= ~ 0x80000000;
-	  if ((v & 15) == 3)
-	    {
-	      type = "vector";
-	      size = v >> 4;
-	    }
-	  else if ((v & 15) == 11)
-	    {
-	      /* bytevec header */
-	      type = "bytevec";
-	      size = -(((v >> 4) + 3) / 4);
-	    }
-	  else if ((v & 15) == 15)
-	    {
-	      /* code header */
-	      type = "code";
-	      size = (v >> 4) & 0xFF;
-	      ptr += (v >> 12);
-	    }
-	  else
-	    abort ();
-	}
-      /* size does not include header */
-      ptr++;
-    }
-  else
-    {
-      /* pair */
       type = "pair";
       size = 2;
     }
+  else if (HEADER_RECORD_P (header))
+    {
+      val desc = HEADER_RECORD_DESC (header);
+      val new_desc = find_replacement (from, to, desc);
+
+      if (new_desc != desc)
+	{
+	  if (RECORD_REF(new_desc,0) != RECORD_REF(desc,0))
+	    fprintf (stderr,
+		     "ERROR: new descriptor has wrong size,"
+		     " not transmogrifying\n");
+	  else
+	    SET (ptr, 0, MAKE_HEADER_RECORD (new_desc));
+	}
+
+      type = "record";
+      size = FIXNUM_VAL(RECORD_REF(desc,0));
+      ptr++;
+    }
+  else if (HEADER_VECTOR_P (header))
+    {
+      type = "vector";
+      size = HEADER_VECTOR_LENGTH (header);
+      ptr++;
+    }
+  else if (HEADER_BYTEVEC_P (header))
+    {
+      type = "bytevec";
+      size = - ((HEADER_BYTEVEC_LENGTH(header) + 3) / 4);
+      ptr++;
+    }
+  else if (HEADER_CODE_P (header))
+    {
+      type = "code";
+      size = HEADER_CODE_LIT_LENGTH(header);
+      ptr += HEADER_CODE_INSN_LENGTH(header) + 1;
+    }
+  else
+    abort ();
   
 #if DEBUG
   fprintf (stderr, " %s, %d words\n", type, size);
@@ -1071,107 +1058,72 @@ transmogrify_objects (val from, val to)
 /* Debugging
  */
 
+char
+type_code (val header)
+{
+  if (HEADER_PAIR_P (header))
+    return 'p';
+  else if (HEADER_RECORD_P (header))
+    return 'r';
+  else if (HEADER_VECTOR_P (header))
+    return 'v';
+  else if (HEADER_BYTEVEC_P (header))
+    return 'b';
+  else if (HEADER_CODE_P (header))
+    return 'c';
+  else
+    abort ();
+}
+
 void
 dump (val v)
 {
-  fprintf (stderr, " %08x", v);
-  if ((v & 3) == 1)
-    fprintf (stderr, " (%d)", ((sword)v) >> 2);
-  else if ((v & 7) == 6)
-    fprintf (stderr, " (#\\%c)", ((sword)v) >> 3);
-  else if (v == 2)
-    fprintf (stderr, " (nil)");
-  else if (v == 10)
-    fprintf (stderr, " (#t)");
-  else if (v == 18)
-    fprintf (stderr, " (#f)");
-  else if (v == 26)
-    fprintf (stderr, " (unspec)");
-  else if ((v & 3) == 0)
-    {
-      val t = *(val *)v;
-      if ((t & 0x8000000f) == 0x8000000b)
-	{
-	  val l = (t & ~0x80000000) >> 4;
-	  fprintf (stderr, " %d \"%.*s\"", l, l, ((val *)v)+1);
-	}
-      else
-	fprintf (stderr, " [%08x]", t);
-    }
-}
-
-char
-type_code (val tag_word)
-{
-  if ((tag_word & 3) == 3)
-    {
-      /* non-pair header */
-      if (((sword)(tag_word)) >= 0)
-	{
-	  /* record header */
-	  return 'r';
-	}
-      else
-	{
-	  tag_word &= ~ 0x80000000;
-	  if ((tag_word & 15) == 3)
-	    return 'v';
-	  else if ((tag_word & 15) == 11)
-	    return 'b';
-	  else if ((tag_word & 15) == 15)
-	    return 'c';
-	  else
-	    abort ();
-	}
-    }
-  else
-    return 'p';
-}
-
-void
-dump_arg (val v)
-{
-  if ((v & 3) == 1)
-    fprintf (stderr, " %d", ((sword)v) >> 2);
-  else if ((v & 7) == 6)
-    fprintf (stderr, " #\\%c", ((sword)v) >> 3);
-  else if (v == 2)
+  if (FIXNUM_P(v))
+    fprintf (stderr, " %d", FIXNUM_VAL (v));
+  else if (CHAR_P(v))
+    fprintf (stderr, " #\\%c", CHAR_VAL (v));
+  else if (v == NIL)
     fprintf (stderr, " nil");
-  else if (v == 10)
+  else if (v == BOOL_T)
     fprintf (stderr, " #t");
-  else if (v == 18)
+  else if (v == BOOL_F)
     fprintf (stderr, " #f");
-  else if (v == 26)
+  else if (v == UNSPEC)
     fprintf (stderr, " unspec");
-  else if ((v & 3) == 0)
+  else if (BYTEVEC_P(v))
+    fprintf (stderr, " /%.*s/", BYTEVEC_LENGTH(v), BYTEVEC_BYTES(v));
+#if 0
+  else if (RECORD_P(v) 
+	   && RECORD_LENGTH(v) > 0
+	   && BYTEVEC_P (RECORD_REF (v, 0)))
     {
-      val t = *(val *)v;
-      if ((t & 0x8000000f) == 0x8000000b)
-	{
-	  val l = (t & ~0x80000000) >> 4;
-	  fprintf (stderr, " \"%.*s\"", l, ((val *)v)+1);
-	}
-      else
-	fprintf (stderr, " %c", type_code (t));
+      /* Might be a string.
+       */
+      val s = RECORD_REF (v, 0);
+      fprintf (stderr, " \"%.*s\"", BYTEVEC_LENGTH(v), BYTEVEC_BYTES(v));
     }
+  else if (RECORD_P(v)
+	   && RECORD_LENGTH(v) > 0
+	   && RECORD_P (RECORD_REF (v, 0))
+	   && RECORD_LENGTH (RECORD_REF (v, 0)) > 0
+	   && BYTEVEC_P (RECORD_REF (RECORD_REF (v, 0), 0)))
+    {
+      /* Might be a symbol
+       */
+      val s = RECORD_REF (RECORD_REF (v, 0), 0);
+      fprintf (stderr, " '%.*s", BYTEVEC_LENGTH(v), BYTEVEC_BYTES(v));
+    }
+#endif
   else
-    fprintf (stderr, " ?");
+    fprintf (stderr, " %c", type_code (REF(v,0)));
 }
 
 int
 is_string (val v, char *str)
 {
-  if ((v & 3) == 0)
-    {
-      val t = *(val *)v;
-      if ((t & 0x8000000f) == 0x8000000b)
-	{
-	  val l = (t & ~0x80000000) >> 4;
-	  return (l == strlen (str)
-		  && memcmp (((val *)v)+1, str, l) == 0);
-	}
-    }
-  return 0;
+  return (BYTEVEC_P (v)
+	  && BYTEVEC_LENGTH (v) == strlen (str)
+	  && memcmp (BYTEVEC_BYTES (v), str, BYTEVEC_LENGTH (v)) == 0);
 }
 
 void
@@ -1180,7 +1132,7 @@ dump_regs ()
   int i;
 
   for (i = 0; i < 10; i++)
-    dump_arg (regs[i]);
+    dump (regs[i]);
 }
 
 /* Syscalls
@@ -1197,116 +1149,110 @@ sys (int n_args,
       exit (0);
     }
 
-  if (arg1 == ((2<<2)|1))
+  if (arg1 == MAKE_FIXNUM(2))
     {
       /* write (fd, buf, start, end) */
-      word fd = ((word)arg2) >> 2;
-      val *buf = (val *)arg3;
-      word start = ((word)arg4) >> 2;
-      word end = ((word)arg5) >> 2;
-      char *bytes = (char*)(buf+1);
+      word fd = FIXNUM_VAL (arg2);
+      char *buf = BYTEVEC_BYTES (arg3);
+      word start = FIXNUM_VAL (arg4);
+      word end = FIXNUM_VAL (arg5);
       word res;
 
       // fprintf (stderr, "writing %d %p %d %d\n", fd, buf, start, end);
-      res = write (fd, ((char *)(buf+1)) + start, end-start);
+      res = write (fd, buf + start, end - start);
 
-      return (val)((res << 2) | 1);
+      return MAKE_FIXNUM (res);
     }
-  else if (arg1 == ((3<<2)|1))
+  else if (arg1 == MAKE_FIXNUM(3))
     {
       /* read (fd, buf, start, end) */
-      word fd = ((word)arg2) >> 2;
-      val *buf = (val *)arg3;
-      word start = ((word)arg4) >> 2;
-      word end = ((word)arg5) >> 2;
-      char *bytes = (char*)(buf+1);
+      word fd = FIXNUM_VAL (arg2);
+      char *buf = BYTEVEC_BYTES (arg3);
+      word start = FIXNUM_VAL (arg4);
+      word end = FIXNUM_VAL (arg5);
       word res;
 
       // fprintf (stderr, "reading %d %p %d %d\n", fd, buf, start, end);
-      res = read (fd, ((char *)(buf+1)) + start, end-start);
+      res = read (fd, buf + start, end - start);
 
-      return (val)((res << 2) | 1);
+      return MAKE_FIXNUM (res);
     }
-  else if (arg1 == ((4<<2)|1))
+  else if (arg1 == MAKE_FIXNUM(4))
     {
       /* hashq_vector_ref (vec, key, new_pair) */
       return hashq_vector_ref (arg2, arg3, arg4);
     }
-  else if (arg1 == ((5<<2)|1))
+  else if (arg1 == MAKE_FIXNUM(5))
     {
       /* hashq_vector_del (vec, key) */
       return hashq_vector_del (arg2, arg3);
     }
-  else if (arg1 == ((6<<2)|1))
+  else if (arg1 == MAKE_FIXNUM(6))
     {
       /* hashq_vector_to_alist (vec) */
       return hashq_vector_to_alist (arg2);
     }
-  else if (arg1 == ((7<<2)|1))
+  else if (arg1 == MAKE_FIXNUM(7))
     {
       /* alist_to_hashq_vector (alist, vec) */
       return alist_to_hashq_vector (arg2, arg3);
     }
-  else if (arg1 == ((8<<2)|1))
+  else if (arg1 == MAKE_FIXNUM(8))
     {
       /* get_reg (i) */
-      return regs[((sword)arg2) >> 2];
+      return regs[FIXNUM_VAL(arg2)];
     }
-  else if (arg1 == ((9<<2)|1))
+  else if (arg1 == MAKE_FIXNUM(9))
     {
       /* set_reg (i, v) */
-      int i = ((sword)arg2) >> 2;
+      int i = FIXNUM_VAL(arg2);
       regs[i] = arg3;
       if (i == -3)
 	rehash_hashq_vectors (regs[-3]);
       return regs[i];
     }
-  else if (arg1 == ((10<<2)|1))
+  else if (arg1 == MAKE_FIXNUM(10))
     {
       /* suspend (cont) */
       suspend (arg2);
-      return 10;
+      return BOOL_F;
     }
-  else if (arg1 == ((11<<2)|1))
+  else if (arg1 == MAKE_FIXNUM(11))
     {
       /* argdump */
       int i, n;
 
-      n = ((regs[0]>>2)+1)>>1;
+      n = (FIXNUM_VAL(regs[0])+1) >> 1;
       fprintf (stderr, "ARGS:");
       for (i = 1; i < n+1; i++)
-	dump_arg (regs[i]);
+	dump (regs[i]);
       fprintf (stderr, "\n");
-      return 10;
+      return BOOL_F;
     }
-  else if (arg1 == ((12<<2)|1))
+  else if (arg1 == MAKE_FIXNUM(12))
     {
       /* find_referrers */
       return find_referrers (arg2, arg3);
     }
-  else if (arg1 == ((13<<2)|1))
+  else if (arg1 == MAKE_FIXNUM(13))
     {
       /* find_instances */
       return find_instances (arg2, arg3);
     }
-  else if (arg1 == ((14<<2)|1))
+  else if (arg1 == MAKE_FIXNUM(14))
     {
       /* transmogrify_objects */
       transmogrify_objects (arg2, arg3);
       return BOOL_T;
     }
 
-  if (n_args > 1
-      && is_string (arg2, "directory-enter"))
-    breakpoint ();
-
   if (super_verbose)
     {
       fprintf (stderr, "syscall");
       if (n_args > 0)
-	dump_arg (arg1);
+	dump (arg1);
       if (n_args > 1)
-	dump_arg (arg2);
+	dump (arg2);
       if (n_args > 2)
 	dump (arg3);
       if (n_args > 3)
@@ -1324,7 +1270,7 @@ sys (int n_args,
       fprintf (stderr, "\n");
     }
 
-  return 0x0000000a;
+  return BOOL_T;
 }
 
 void adjust_call_sig ();
@@ -1346,15 +1292,15 @@ go (val closure, val *free, val *end)
   regs[-6] = BOOL_F; // error:wrong-num-args code
   regs[-5] = BOOL_F; // target_sig for adjust_call_sig
   regs[-4] = (val)adjust_call_sig;
-  regs[-3] = EOL; // hashq vectors
+  regs[-3] = NIL; // hashq vectors
   regs[-2] = (val)gc_glue;
   regs[-1] = (val)sys;
-  regs[0] = (2<<3)|1;
+  regs[0] = MAKE_FIXNUM(4);
   regs[1] = closure;
   regs[2] = BOOL_F;  // cont of boot procedure
 
   r14 = regs;
-  r15 = (val *)((val *)closure)[1];
+  r15 = (val *)RECORD_REF(closure,0);
   r16 = free;
   r17 = end;
   asm ("mr 3,15\n\t addi 3,3,4\n\t mtctr 3\n\t bctr"
@@ -1403,7 +1349,7 @@ main (int argc, char **argv)
 
   if (argc != 2 && argc != 3)
     {
-      write (2, "usage: suo <image> [<suspend-image>]\n", 20);
+      fprintf (stderr, "usage: suo-vm <image> [<suspend-image>]\n");
       exit (1);
     }
 
