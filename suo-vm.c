@@ -58,52 +58,52 @@ typedef         word val;
 #define MAKE_CHAR(n)       (((word)(n))<<3|6)
 
 #define HEAP_P(v)          (((v)&3)==0)
-#define LOC(o,i)           (((val *)(o))+i)
-#define REF(o,i)           (((val *)(o))[i])
-#define SET(o,i,v)         (((val *)(o))[i]=(v))
+#define FIELD_LOC(o,i)     (((val *)(o))+i)
+#define FIELD_REF(o,i)     (((val *)(o))[i])
+#define FIELD_SET(o,i,v)   (((val *)(o))[i]=(v))
 
 #define HEADER_PAIR_P(v)   (((v)&3)!=3)
 
-#define PAIR_P(v)          (HEAP_P(v) && HEADER_PAIR_P(REF(v,0)))
-#define CAR(p)             REF(p,0)
-#define CDR(p)             REF(p,1)
-#define CDR_LOC(p)         LOC(p,1)
-#define SET_CDR(p,v)       SET(p,1,v)
+#define PAIR_P(v)          (HEAP_P(v) && HEADER_PAIR_P(FIELD_REF(v,0)))
+#define CAR(p)             FIELD_REF(p,0)
+#define CDR(p)             FIELD_REF(p,1)
+#define CDR_LOC(p)         FIELD_LOC(p,1)
+#define SET_CDR(p,v)       FIELD_SET(p,1,v)
 
 #define HEADER_RECORD_P(v)       (((v)&0x80000003)==0x00000003)
 #define HEADER_RECORD_DESC(v)    ((v)&~3)
 #define MAKE_HEADER_RECORD(desc) ((desc)|3)
 
-#define RECORD_P(v)        (HEAP_P(v) && HEADER_RECORD_P(REF(v,0)))
-#define RECORD_DESC(v)     (HEADER_RECORD_DESC(REF(v,0)))
+#define RECORD_P(v)        (HEAP_P(v) && HEADER_RECORD_P(FIELD_REF(v,0)))
+#define RECORD_DESC(v)     (HEADER_RECORD_DESC(FIELD_REF(v,0)))
 #define RECORD_LENGTH(v)   FIXNUM_VAL(RECORD_REF(RECORD_DESC(v),0))
-#define RECORD_LOC(v,i)    LOC(v,(i)+1)
-#define RECORD_REF(v,i)    REF(v,(i)+1)
-#define RECORD_SET(v,i,e)  SET(v,(i)+1,e)
+#define RECORD_LOC(v,i)    FIELD_LOC(v,(i)+1)
+#define RECORD_REF(v,i)    FIELD_REF(v,(i)+1)
+#define RECORD_SET(v,i,e)  FIELD_SET(v,(i)+1,e)
 
 #define HEADER_VECTOR_P(v)      (((v)&0x8000000F)==0x80000003)
 #define HEADER_VECTOR_LENGTH(v) (((v)&~0x80000000)>>4)
 
-#define VECTOR_P(v)        (HEAP_P(v) && HEADER_VECTOR_P(REF(v,0)))
-#define VECTOR_LENGTH(v)   (HEADER_VECTOR_LENGTH(REF(v,0)))
-#define VECTOR_LOC(v,i)    LOC(v,(i)+1)
-#define VECTOR_REF(v,i)    REF(v,(i)+1)
-#define VECTOR_SET(v,i,e)  SET(v,(i)+1,e)
+#define VECTOR_P(v)        (HEAP_P(v) && HEADER_VECTOR_P(FIELD_REF(v,0)))
+#define VECTOR_LENGTH(v)   (HEADER_VECTOR_LENGTH(FIELD_REF(v,0)))
+#define VECTOR_LOC(v,i)    FIELD_LOC(v,(i)+1)
+#define VECTOR_REF(v,i)    FIELD_REF(v,(i)+1)
+#define VECTOR_SET(v,i,e)  FIELD_SET(v,(i)+1,e)
 
 #define HEADER_BYTEVEC_P(v)      (((v)&0x8000000F)==0x8000000B)
 #define HEADER_BYTEVEC_LENGTH(v) (((v)&~0x80000000)>>4)
 
-#define BYTEVEC_P(v)       (HEAP_P(v) && HEADER_BYTEVEC_P(REF(v,0)))
-#define BYTEVEC_LENGTH(v)  (HEADER_BYTEVEC_LENGTH(REF(v,0)))
-#define BYTEVEC_BYTES(v)   ((char *)LOC(v,1))
+#define BYTEVEC_P(v)       (HEAP_P(v) && HEADER_BYTEVEC_P(FIELD_REF(v,0)))
+#define BYTEVEC_LENGTH(v)  (HEADER_BYTEVEC_LENGTH(FIELD_REF(v,0)))
+#define BYTEVEC_BYTES(v)   ((char *)FIELD_LOC(v,1))
 
 #define HEADER_CODE_P(v)           (((v)&0x8000000F)==0x8000000F)
 #define HEADER_CODE_INSN_LENGTH(v) (((v)>>12)&0x7FFFF)
 #define HEADER_CODE_LIT_LENGTH(v)  (((v)>>4)&0xFF)
 
-#define CODE_P(v)           (HEAP_P(v) && HEADER_CODE_P(REF(v,0)))
-#define CODE_INSN_LENGTH(v) (HEADER_CODE_INSN_LENGTH(REF(v,0)))
-#define CODE_LIT_LENGTH(v)  (HEADER_CODE_LIT_LENGTH(REF(v,0)))
+#define CODE_P(v)           (HEAP_P(v) && HEADER_CODE_P(FIELD_REF(v,0)))
+#define CODE_INSN_LENGTH(v) (HEADER_CODE_INSN_LENGTH(FIELD_REF(v,0)))
+#define CODE_LIT_LENGTH(v)  (HEADER_CODE_LIT_LENGTH(FIELD_REF(v,0)))
 
 
 #define HEAP_SIZE  (32*1024*1024)
@@ -315,7 +315,7 @@ unswizzle_objects (val *mem, size_t off, word n)
 
    - SETI D S I
 
-   reglit[D][I] = reglit[S]
+   reg[D][I] = reglit[S]
 
    - SETL D S I
 
@@ -359,6 +359,12 @@ unswizzle_objects (val *mem, size_t off, word n)
    dst += 1
    count -= 1
 
+   - INIT_VECI L
+
+   dst[0] = 0x80000000 | L;
+   dst += 1
+   count -= 1
+
    - FILL S                   == MISC 0 S MISCOP_FILL
 
    f = reglit[S]
@@ -399,6 +405,14 @@ unswizzle_objects (val *mem, size_t off, word n)
 
 
    ** Testing and branching
+
+   - CMP T A B
+
+   count = (T is true about A and B)
+
+   T can be
+   
+      CMPOP_EQ:  A == B
 
    - TEST_REC S               == MISC 0 S MISCOP_TEST_REC
 
@@ -446,7 +460,7 @@ unswizzle_objects (val *mem, size_t off, word n)
    implemented somewhere in ROM, using an instruction set from above
    plus whatever is needed in addition.
 
-   - SYSCALL N              == TRAP 0 N TRAPOP_SYSCALL
+   - SYSCALL N V            == TRAP N V TRAPOP_SYSCALL
 
    Trap into the operation system to perform syscall number S.  The
    next N words of the instruction stream are used as parameters for
@@ -456,6 +470,8 @@ unswizzle_objects (val *mem, size_t off, word n)
 
    where R means that reg[R] is to be used, and the second form refers
    to lit[L].
+
+   The result is delivered in register V.
 
    - CHECK_ALLOCI S
 
@@ -516,30 +532,321 @@ val *regs = specials_and_regs + 8;
 val reg_code;
 
 word *reg_pc;
+word *reg_lit;
 word *reg_src;
 word *reg_dst;
 word  reg_count;
 word *reg_free;
 word *reg_end;
 
+#define RR 0
+#define RL 1
+#define LR 2
+#define LL 3
+
+#define HALT           0
+#define MISC           4
+#define MOVE           8
+#define REF           12
+#define REFI          16
+#define SET           20
+#define SETL          24
+#define SETI          28
+#define CMP           32
+#define TRAP          36
+
+#define MOVEI        128
+#define ALLOCI       129
+#define INITI        130
+#define FILLI        131
+#define CHECK_ALLOCI 132
+#define INIT_VECI    133
+
+#define BRANCH       255
+
+#define MISCOP_GO            0
+#define MISCOP_ALLOC         1
+#define MISCOP_INIT          2
+#define MISCOP_INIT_REC      3
+#define MISCOP_INIT_VEC      4
+#define MISCOP_FILL          5
+#define MISCOP_COPY          6
+#define MISCOP_LOAD_DESC     7
+#define MISCOP_LOAD_LENGTH   8
+#define MISCOP_TEST_REC      9
+#define MISCOP_TEST_VEC     10
+#define MISCOP_TEST_DESC    11
+
+#define CMPOP_EQ             0
+
+#define TRAPOP_SYSCALL       0
+#define TRAPOP_CHECK_CALLSIG 1
+#define TRAPOP_CHECK_ALLOC   2
+
+#define IF_FALSE             0
+
+#define IMM_UNSPEC 26
+
+#define TAG_VECTOR 3
+
+#define rlop(op) op+RR: case op+RL: case op+LR: case op+LL
+
+void
+do_GO (val code)
+{
+  reg_code = code;
+  reg_pc = ((word *)reg_code) + 1;
+  reg_lit = ((word *)reg_code) + 1 + CODE_INSN_LENGTH (reg_code);
+}
+
+void do_syscall (word n_args, word return_register);
+void check_callsig (word expected_sig, int caller_sig_reg);
+void gc (word size);
+
 void
 run_cpu ()
 {
   while (1)
     {
-      word insn = *reg_pc;
+      /* Fetch
+       */
+      word insn = *reg_pc++;
+
+      /* Decode
+       */
       word op = insn >> 24;
       word x = (insn >> 16) & 0xFF;
       word y = (insn >> 8) & 0xFF;
       word z = insn & 0xFF;
+      word yz = insn & 0xFFFF;
+      word xyz = insn & 0xFFFFFF;
+      word *yp = (op & 2)? reg_lit : regs;
+      word *zp = (op & 1)? reg_lit : regs;
 
+      // printf ("%08x: %d %d %d %d\n", reg_pc-1, op, x, y, z);
+
+      /* Execute
+       */
       switch (op)
 	{
-	case 0:
+	case rlop(HALT):
 	  fprintf (stderr, "HALT %02x%02x%02x\n", x, y, z);
 	  exit (0);
+
+	case rlop(MISC):
+	  switch (z)
+	    {
+	    case MISCOP_GO:
+	      do_GO (yp[y]);
+	      break;
+
+	    case MISCOP_ALLOC:
+	      reg_count = FIXNUM_VAL (yp[y]);
+	      regs[x] = (val) reg_free;
+	      reg_dst = reg_free;
+	      reg_free += reg_count;
+	      break;
+
+	    case MISCOP_INIT:
+	      reg_dst[0] = yp[y];
+	      reg_dst++;
+	      reg_count--;
+	      break;
+
+	    case MISCOP_INIT_REC:
+	      reg_dst[0] = yp[y] | 3;
+	      reg_dst++;
+	      reg_count--;
+	      break;
+
+	    case MISCOP_INIT_VEC:
+	      reg_dst[0] = FIXNUM_VAL (yp[y]) << 4 | 0x80000000 | x;
+	      reg_dst++;
+	      reg_count--;
+	      break;
+
+	    case MISCOP_FILL:
+	      while (reg_count > 0)
+		{
+		  reg_dst[0] = yp[y];
+		  reg_dst++;
+		  reg_count--;
+		}
+	      break;
+
+	    case MISCOP_COPY:
+	      while (reg_count > 0)
+		{
+		  reg_dst[0] = reg_src[0];
+		  reg_dst++;
+		  reg_src++;
+		  reg_count--;
+		}
+	      break;
+
+	    case MISCOP_LOAD_DESC:
+	      regs[x] = FIELD_REF (yp[y], 0) & ~3;
+	      break;
+
+	    case MISCOP_LOAD_LENGTH:
+	      regs[x] = MAKE_FIXNUM ((FIELD_REF(yp[y], 0)&~0x80000000) >> 4);
+	      break;
+
+	    case MISCOP_TEST_REC:
+	      if (HEAP_P (yp[y]))
+		{
+		  reg_dst = (val *)FIELD_REF (yp[y], 0);
+		  reg_count = HEADER_RECORD_P ((val)reg_dst);
+		}
+	      else
+		reg_count = 0;
+	      break;
+
+	    case MISCOP_TEST_VEC:
+	      if (HEAP_P (yp[y]))
+		{
+		  reg_dst = (val *)FIELD_REF (yp[y], 0);
+		  reg_count = (((val)reg_dst) & 0x8000000F) == (0x80000000 | x);
+		}
+	      else
+		reg_count = 0;
+	      break;
+
+	    case MISCOP_TEST_DESC:
+	      if (reg_count && ((val)reg_dst) == (yp[y] | 3))
+		reg_count = 1;
+	      else
+		reg_count = 0;
+	      break;
+
+	    default:
+	      abort ();
+	    }
+	  break;
+
+	case rlop(MOVE):
+	  regs[x] = yp[y];
+	  break;
+
+	case rlop(REF):
+	  regs[x] = FIELD_REF (yp[y], FIXNUM_VAL(zp[z])+1);
+	  break;
+
+	case rlop(REFI):
+	  regs[x] = FIELD_REF (yp[y], z);
+	  break;	  
+
+	case rlop(SET):
+	  FIELD_SET (regs[x], FIXNUM_VAL(zp[z])+1, yp[y]);
+	  break;
+
+	case rlop(SETL):
+	  FIELD_SET (reg_lit[x], FIXNUM_VAL(zp[z])+1, yp[y]);
+	  break;
+
+	case rlop(SETI):
+	  FIELD_SET (regs[x], z, yp[y]);
+	  break;
+
+	case rlop(CMP):
+	  switch (x)
+	    {
+	    case CMPOP_EQ:
+	      reg_count = (yp[y] == zp[z]);
+	      break;
+	    default:
+	      abort ();
+	    }
+	  break;
+
+	case rlop(TRAP):
+	  switch (z)
+	    {
+	    case TRAPOP_SYSCALL:
+	      do_syscall (x, y);
+	      break;
+	    case TRAPOP_CHECK_CALLSIG:
+	      check_callsig (x, y);
+	      break;
+	    case TRAPOP_CHECK_ALLOC:
+	      if (reg_free + FIXNUM_VAL(yp[y]) + 1 >= reg_end)
+		gc (FIXNUM_VAL(yp[y]) + 1);
+	      break;
+	    default:
+	      abort ();
+	    }
+	  break;
+
+	case MOVEI:
+	  regs[x] = yz;
+	  break;	  
+
+	case ALLOCI:
+	  reg_count = yz;
+	  regs[x] = (val) reg_free;
+	  reg_dst = reg_free;
+	  reg_free += reg_count;
+	  break;	  
+
+	case INITI:
+	  reg_dst[0] = xyz;
+	  reg_dst++;
+	  reg_count--;
+	  break;	  
+
+	case FILLI:
+	  while (reg_count > 0)
+	    {
+	      reg_dst[0] = xyz;
+	      reg_dst++;
+	      reg_count--;
+	    }
+	  break;	  
+
+	case CHECK_ALLOCI:
+	  if (reg_free + xyz >= reg_end)
+	    gc (xyz);
+	  break;  
+
+	case INIT_VECI:
+	  reg_dst[0] = 0x80000000 | xyz;
+	  reg_dst++;
+	  reg_count--;
+	  break;	  
+
+	case BRANCH:
+	  switch (x)
+	    {
+	    case IF_FALSE:
+	      if (reg_count == 0)
+		reg_pc += (sword)xyz;
+	      break;
+	    default:
+	      abort ();
+	    }
+	  break;
+
+	default:
+	  abort ();
 	}
     }
+}
+
+/* The subroutines for the complex instructions.
+ */
+
+void
+check_callsig (word expected_sig, int caller_sig_reg)
+{
+  word caller_sig = FIXNUM_VAL (regs[caller_sig_reg]);
+
+  if (expected_sig == caller_sig)
+    return;
+
+  if (HEAP_P (regs[-6]))
+    do_GO (regs[-6]);
+  else
+    abort ();
 }
 
 /* The GC.
@@ -566,7 +873,7 @@ val *to_space, *to_ptr;
 val
 snap_pointer (val ptr)
 {
-  val header = REF(ptr,0);
+  val header = FIELD_REF(ptr,0);
   if (HEAP_P(header) &&
       (val *)header >= to_space && (val *)header < to_space + SPACE_SIZE)
     return header;
@@ -594,7 +901,7 @@ copy (val ptr)
       return ptr2;
     }
 
-  header = REF(ptr,0);
+  header = FIELD_REF(ptr,0);
 
 #if DEBUG
   fprintf (stderr, "copy %p (%08x) -> %p\n", ptr, header, to_ptr);
@@ -635,7 +942,7 @@ copy (val ptr)
 #endif
   
   memcpy (to_ptr, (val *)ptr, size*sizeof(val));
-  SET(ptr, 0, (val)to_ptr);
+  FIELD_SET(ptr, 0, (val)to_ptr);
   to_ptr += size;
 
   return (val)(to_ptr - size);
@@ -671,7 +978,7 @@ scan (val *ptr)
   else if (HEADER_RECORD_P (header))
     {
       val desc = copy (HEADER_RECORD_DESC (header));
-      SET (ptr, 0, MAKE_HEADER_RECORD (desc));
+      FIELD_SET (ptr, 0, MAKE_HEADER_RECORD (desc));
       type = "record";
       size = FIXNUM_VAL(RECORD_REF(desc,0));
       ptr++;
@@ -1275,7 +1582,7 @@ scan_for_transmogrify (val from, val to, val obj)
 		     "ERROR: new descriptor has wrong size,"
 		     " not transmogrifying\n");
 	  else
-	    SET (ptr, 0, MAKE_HEADER_RECORD (new_desc));
+	    FIELD_SET (ptr, 0, MAKE_HEADER_RECORD (new_desc));
 	}
 
       type = "record";
@@ -1391,7 +1698,7 @@ dump (val v)
     }
 #endif
   else
-    fprintf (stderr, " %c", type_code (REF(v,0)));
+    fprintf (stderr, " %c", type_code (FIELD_REF(v,0)));
 }
 
 int
@@ -1414,10 +1721,34 @@ dump_regs ()
 /* Syscalls
  */
 
-val
-sys (int n_args,
-     val arg1, val arg2, val arg3, val arg4, val arg5, val arg6, val arg7)
+#define MAX_ARGS 16
+
+void
+do_syscall (word n_args, word return_register)
 {
+  val arg[MAX_ARGS], res;
+  int i;
+
+  for (i = 0; i < n_args; i++)
+    {
+      val a = *reg_pc++;
+      if (a & 0x80000000)
+	arg[i] = reg_lit[a&0xFF];
+      else
+	arg[i] = regs[a&0xFF];
+    }
+
+  if (super_verbose)
+    {
+      fprintf (stderr, "syscall");
+
+      for (i = 0; i < n_args; i++)
+	dump (arg[i]);
+      fprintf (stderr, " |");
+      dump_regs ();
+      fprintf (stderr, "\n");
+    }
+
   if (n_args == 0)
     {
       if (verbose)
@@ -1425,75 +1756,75 @@ sys (int n_args,
       exit (0);
     }
 
-  if (arg1 == MAKE_FIXNUM(2))
+  if (arg[1] == MAKE_FIXNUM(2))
     {
       /* write (fd, buf, start, end) */
-      word fd = FIXNUM_VAL (arg2);
-      char *buf = BYTEVEC_BYTES (arg3);
-      word start = FIXNUM_VAL (arg4);
-      word end = FIXNUM_VAL (arg5);
-      word res;
+      word fd = FIXNUM_VAL (arg[2]);
+      char *buf = BYTEVEC_BYTES (arg[3]);
+      word start = FIXNUM_VAL (arg[4]);
+      word end = FIXNUM_VAL (arg[5]);
+      word n;
 
       // fprintf (stderr, "writing %d %p %d %d\n", fd, buf, start, end);
-      res = write (fd, buf + start, end - start);
+      n = write (fd, buf + start, end - start);
 
-      return MAKE_FIXNUM (res);
+      res = MAKE_FIXNUM (n);
     }
-  else if (arg1 == MAKE_FIXNUM(3))
+  else if (arg[1] == MAKE_FIXNUM(3))
     {
       /* read (fd, buf, start, end) */
-      word fd = FIXNUM_VAL (arg2);
-      char *buf = BYTEVEC_BYTES (arg3);
-      word start = FIXNUM_VAL (arg4);
-      word end = FIXNUM_VAL (arg5);
-      word res;
+      word fd = FIXNUM_VAL (arg[2]);
+      char *buf = BYTEVEC_BYTES (arg[3]);
+      word start = FIXNUM_VAL (arg[4]);
+      word end = FIXNUM_VAL (arg[5]);
+      word n;
 
       // fprintf (stderr, "reading %d %p %d %d\n", fd, buf, start, end);
-      res = read (fd, buf + start, end - start);
+      n = read (fd, buf + start, end - start);
 
-      return MAKE_FIXNUM (res);
+      res = MAKE_FIXNUM (n);
     }
-  else if (arg1 == MAKE_FIXNUM(4))
+  else if (arg[1] == MAKE_FIXNUM(4))
     {
       /* hashq_vector_ref (vec, key, new_pair) */
-      return hashq_vector_ref (arg2, arg3, arg4);
+      res = hashq_vector_ref (arg[2], arg[3], arg[4]);
     }
-  else if (arg1 == MAKE_FIXNUM(5))
+  else if (arg[1] == MAKE_FIXNUM(5))
     {
       /* hashq_vector_del (vec, key) */
-      return hashq_vector_del (arg2, arg3);
+      res = hashq_vector_del (arg[2], arg[3]);
     }
-  else if (arg1 == MAKE_FIXNUM(6))
+  else if (arg[1] == MAKE_FIXNUM(6))
     {
       /* hashq_vector_to_alist (vec) */
-      return hashq_vector_to_alist (arg2);
+      res = hashq_vector_to_alist (arg[2]);
     }
-  else if (arg1 == MAKE_FIXNUM(7))
+  else if (arg[1] == MAKE_FIXNUM(7))
     {
       /* alist_to_hashq_vector (alist, vec) */
-      return alist_to_hashq_vector (arg2, arg3);
+      res = alist_to_hashq_vector (arg[2], arg[3]);
     }
-  else if (arg1 == MAKE_FIXNUM(8))
+  else if (arg[1] == MAKE_FIXNUM(8))
     {
       /* get_reg (i) */
-      return regs[FIXNUM_VAL(arg2)];
+      res = regs[FIXNUM_VAL(arg[2])];
     }
-  else if (arg1 == MAKE_FIXNUM(9))
+  else if (arg[1] == MAKE_FIXNUM(9))
     {
       /* set_reg (i, v) */
-      int i = FIXNUM_VAL(arg2);
-      regs[i] = arg3;
+      int i = FIXNUM_VAL(arg[2]);
+      regs[i] = arg[3];
       if (i == -3)
 	rehash_hashq_vectors (regs[-3]);
-      return regs[i];
+      res = regs[i];
     }
-  else if (arg1 == MAKE_FIXNUM(10))
+  else if (arg[1] == MAKE_FIXNUM(10))
     {
       /* suspend (cont) */
-      suspend (arg2);
-      return BOOL_F;
+      suspend (arg[2]);
+      res = BOOL_F;
     }
-  else if (arg1 == MAKE_FIXNUM(11))
+  else if (arg[1] == MAKE_FIXNUM(11))
     {
       /* argdump */
       int i, n;
@@ -1503,50 +1834,28 @@ sys (int n_args,
       for (i = 1; i < n+1; i++)
 	dump (regs[i]);
       fprintf (stderr, "\n");
-      return BOOL_F;
+      res = BOOL_F;
     }
-  else if (arg1 == MAKE_FIXNUM(12))
+  else if (arg[1] == MAKE_FIXNUM(12))
     {
       /* find_referrers */
-      return find_referrers (arg2, arg3);
+      res = find_referrers (arg[2], arg[3]);
     }
-  else if (arg1 == MAKE_FIXNUM(13))
+  else if (arg[1] == MAKE_FIXNUM(13))
     {
       /* find_instances */
-      return find_instances (arg2, arg3);
+      res = find_instances (arg[2], arg[3]);
     }
-  else if (arg1 == MAKE_FIXNUM(14))
+  else if (arg[1] == MAKE_FIXNUM(14))
     {
       /* transmogrify_objects */
-      transmogrify_objects (arg2, arg3);
-      return BOOL_T;
+      transmogrify_objects (arg[2], arg[3]);
+      res = BOOL_T;
     }
+  else
+    res = BOOL_T;
 
-  if (super_verbose)
-    {
-      fprintf (stderr, "syscall");
-      if (n_args > 0)
-	dump (arg1);
-      if (n_args > 1)
-	dump (arg2);
-      if (n_args > 2)
-	dump (arg3);
-      if (n_args > 3)
-	dump (arg4);
-      if (n_args > 4)
-	dump (arg5);
-      if (n_args > 5)
-	dump (arg6);
-      if (n_args > 6)
-	dump (arg7);
-      if (n_args > 7)
-	fprintf (stderr, " ...");
-      fprintf (stderr, " |");
-      dump_regs ();
-      fprintf (stderr, "\n");
-    }
-
-  return BOOL_T;
+  regs[return_register] = res;
 }
 
 void
@@ -1568,12 +1877,14 @@ boot (val closure, val *free, val *end)
   regs[0] = MAKE_FIXNUM(4);
   regs[1] = closure;
   regs[2] = BOOL_F;  // cont of boot procedure
+  
+  reg_src = reg_dst = NULL;
+  reg_count = 0;
 
-  reg_code = RECORD_REF(closure,0);
   reg_free = free;
   reg_end = end;
   
-  reg_pc = ((word *)reg_code) + 1;
+  do_GO (RECORD_REF(closure,0));
 
   run_cpu ();
 }

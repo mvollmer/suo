@@ -12,7 +12,7 @@
 
 (define (cps-asm-insn-2-with-laboff ctxt op x lab)
   (cps-asm-u16 ctxt (+ (* op 256) x))
-  (cps-asm-s16-with-laboff ctxt 0 lab))
+  (cps-asm-s16-with-laboff2 ctxt 0 lab))
 
 (define (cps-asm-insn-3 ctxt op x y z)
   (cps-asm-u16 ctxt (+ (* op 256) x))
@@ -21,10 +21,10 @@
 (define (u8-const? obj off)
   (and (cps-quote? obj)
        (let ((val (cps-quote-value obj)))
-	 (and (fixnum? obj)
+	 (and (fixnum? val)
 	      (<= 0 (+ val off))
 	      (< (+ val off) 256)))))
-	 
+
 (define (s16-const? obj)
   (and (cps-quote? obj)
        (let ((val (cps-quote-value obj)))
@@ -41,18 +41,19 @@
 (define MISC           4)
 (define MOVE           8)
 (define REF           12)
-(define SET           16)
-(define SETL          20)
-(define CMP           24)
-(define TRAP          28)
+(define REFI          16)
+(define SET           20)
+(define SETL          24)
+(define SETI          28)
+(define CMP           32)
+(define TRAP          36)
 
 (define MOVEI        128)
-(define REFI         129)
-(define SETI         130)
-(define ALLOCI       131)
-(define INITI        132)
-(define FILLI        133)
-(define CHECK_ALLOCI 134)
+(define ALLOCI       129)
+(define INITI        130)
+(define FILLI        131)
+(define CHECK_ALLOCI 132)
+(define INIT_VECI    133)
 
 (define BRANCH       255)
 
@@ -77,8 +78,11 @@
 
 (define IF_FALSE             0)
 
+(define IMM_UNSPEC 26)
 
-(define (cps-asm-reglit-instr ctxt op x y z)
+(define TAG_VECTOR 3)
+
+(define (cps-asm-reglit-insn ctxt op x y z)
 
   (define (val p)
     (cond ((cps-reg? p)
@@ -87,60 +91,62 @@
 	   (cps-asm-litidx ctxt (cps-quote-value p)))
 	  (else
 	   p)))
-
-  (cps-asm-instr-3 ctxt (+ op
-			   (if (cps-quote? y) 2 0)
-			   (if (cps-quote? z) 1 0))
-		   (cps-reg-idx x) (val y) (val z)))
+  
+  (cps-asm-insn-3 ctxt (+ op
+			  (if (cps-quote? y) 2 0)
+			  (if (cps-quote? z) 1 0))
+		  (if (cps-reg? x) (cps-reg-idx x) x) (val y) (val z)))
 
 (define (cps-asm-branch ctxt op lab)
   (cps-asm-insn-2-with-laboff ctxt BRANCH op lab))
-	
+
 (define (cps-asm-shuffle ctxt from to)
 
   (define (move src dst)
     (if cps-verbose
 	(pk (cps-render src) '-> (cps-render dst)))
-    (let ((src (if (eq? src 'tmp) 255))
-	  (dst (if (eq? dst 'tmp) 255)))
+    (let ((src (if (eq? src 'tmp) 255 src))
+	  (dst (if (eq? dst 'tmp) 255 dst)))
       (if (s16-const? src)
 	  (cps-asm-insn-2 ctxt MOVEI 
 			  (if (cps-reg? dst)
 			      (cps-reg-idx dst)
 			      dst)
 			  (cps-quote-value src))
-	  (cps-asm-reglit-instr ctxt MOVE dst src 0))))
+	  (cps-asm-reglit-insn ctxt MOVE dst src 0))))
   
   (cps-asm-shuffle-with-move ctxt from to move))
 
 (define (cps-asm-go ctxt to)
-  (cps-asm-reglit-instr ctxt MISC 0 to MISCOP_GO))
+  (cps-asm-reglit-insn ctxt MISC 0 to MISCOP_GO))
 
 (define (cps-asm-prologue ctxt sig alloc-size)
-  (cps-asm-insn-2 ctxt CHECK_CALLSIG 0 sig)
+  (cps-asm-reglit-insn ctxt TRAP sig 0 TRAPOP_CHECK_CALLSIG)
   (cps-asm-insn-1 ctxt CHECK_ALLOCI alloc-size))
 
 (define-primop (syscall (res) args)
   (asm
-   (cps-asm-insn-1 ctxt SYSCALL (length args))
+   (cps-asm-reglit-insn ctxt TRAP
+			(length args) (cps-reg-idx res) TRAPOP_SYSCALL)
    (for-each (lambda (a)
 	       (cond ((cps-reg? a)
 		      (cps-asm-u16 ctxt 0)
 		      (cps-asm-u16 ctxt (cps-reg-idx a)))
 		     (else
 		      (cps-asm-u16 ctxt #x8000)
-		      (cps-asm-s16-with-litoff ctxt 0 (cps-quote-value a)))))
+		      (cps-asm-u16 ctxt
+				   (cps-asm-litidx ctxt (cps-quote-value a))))))
 	     args)))
 
 (define (cps-asm-panic ctxt)
   (cps-asm-insn-1 ctxt HALT 0))
-  
+
 (define-primop (record (res) (desc . values))
   (alloc-size
    (1+ (length values)))
   (asm
-   (cps-asm-insn-2 ctxt ALLOCI (cps-reg-idx dst) (1+ (length values)))
-   (cps-asm-reglit-insn ctxt MISC 0 desc MISCOP_INIT_DESC)
+   (cps-asm-insn-2 ctxt ALLOCI (cps-reg-idx res) (1+ (length values)))
+   (cps-asm-reglit-insn ctxt MISC 0 desc MISCOP_INIT_REC)
    (for-each (lambda (v)
 	       (cps-asm-reglit-insn ctxt MISC 0 v MISCOP_INIT))
 	     values)))
@@ -150,7 +156,7 @@
    #t)
   (asm
    (cps-asm-reglit-insn ctxt MISC res n-fields MISCOP_ALLOC)
-   (cps-asm-reglit-insn ctxt MISC 0 desc MISCOP_INIT_DESC)
+   (cps-asm-reglit-insn ctxt MISC 0 desc MISCOP_INIT_REC)
    (cps-asm-reglit-insn ctxt MISC 0 init MISCOP_FILL)))
 
 (define-primif (if-record? (obj desc) (else-label))
@@ -159,7 +165,7 @@
    (if (not (and (cps-quote? desc)
 		 (eq? (cps-quote-value desc) #t)))
        (cps-asm-reglit-insn ctxt MISC 0 desc MISCOP_TEST_DESC))
-   (cps-asm-insn-branch ctxt IF_FALSE else-label))
+   (cps-asm-branch ctxt IF_FALSE else-label)))
 
 (define-primop (record-desc (res) (rec))
   (asm
@@ -167,9 +173,11 @@
 
 (define-primop (record-ref (res) (rec idx))
   (asm
-   (if (u8-const? idx)
-       (cps-asm-reglit-insn ctxt REFI res rec (cps-quote-value idx))
-       (cps-asm-reglit-insn ctxt REF res rec idx))))
+   (if (u8-const? idx 1)
+       (cps-asm-reglit-insn ctxt REFI res rec (1+ (cps-quote-value idx)))
+       (begin
+	 (pk 'non-u8-const-record-ref (cps-quote-value idx))
+	 (cps-asm-reglit-insn ctxt REF res rec idx)))))
 
 (define-primop (record-set (res) (rec idx val))
   (asm
@@ -178,20 +186,19 @@
 	   (cps-asm-reglit-insn ctxt SETI rec val (1+ (cps-quote-value idx)))
 	   (cps-asm-reglit-insn ctxt SET rec val idx))
        (cps-asm-reglit-insn ctxt SETL rec val idx))
-   (cps-asm-set ctxt rec idx val)
-   (cps-asm-get ctxt (cps-reg-idx res) (cps-quote (if #f #f)))))
-  
+   (cps-asm-insn-2 ctxt MOVEI (cps-reg-idx res) IMM_UNSPEC)))
+
 (define-primif (if-vector? (a) (else-label))
   (asm
    (cps-asm-reglit-insn ctxt MISC TAG_VECTOR obj MISCOP_TEST_VEC)
-   (cps-asm-insn-branch ctxt IF_FALSE else-label))
+   (cps-asm-branch ctxt IF_FALSE else-label)))
 
 (define-primop (vector (res) values)
   (alloc-size
    (1+ (length values)))
   (asm
-   (cps-asm-insn-2 ctxt ALLOCI (cps-reg-idx dst) (1+ (length values)))
-   (cps-asm-reglit-insn ctxt MISC TAG_VECTOR desc MISCOP_INIT_VEC)
+   (cps-asm-insn-2 ctxt ALLOCI (cps-reg-idx res) (1+ (length values)))
+   (cps-asm-insn-1 ctxt INIT_VECI (+ (* 16 (1+ (length values))) TAG_VECTOR))
    (for-each (lambda (v)
 	       (cps-asm-reglit-insn ctxt MISC 0 v MISCOP_INIT))
 	     values)))
@@ -200,7 +207,7 @@
   (alloc-size
    #t)
   (asm
-   (cps-asm-reglit-insn ctxt MISC res n-fields MISCOP_ALLOC)
+   (cps-asm-reglit-insn ctxt MISC res n MISCOP_ALLOC)
    (cps-asm-reglit-insn ctxt MISC TAG_VECTOR n MISCOP_INIT_VEC)
    (cps-asm-reglit-insn ctxt MISC 0 init MISCOP_FILL)))
 
@@ -210,24 +217,23 @@
 
 (define-primop (vector-ref (res) (vec idx))
   (asm
-   (if (u8-const? idx)
-       (cps-asm-reglit-insn ctxt REFI res rec (cps-quote-value idx))
-       (cps-asm-reglit-insn ctxt REF res rec idx))))
+   (if (u8-const? idx 1)
+       (cps-asm-reglit-insn ctxt REFI res vec (1+ (cps-quote-value idx)))
+       (cps-asm-reglit-insn ctxt REF res vec idx))))
 
 (define-primop (vector-set (res) (vec idx val))
   (asm
    (if (cps-reg? rec)
        (if (u8-const? idx 1)
-	   (cps-asm-reglit-insn ctxt SETI rec val (1+ (cps-quote-value idx)))
-	   (cps-asm-reglit-insn ctxt SET rec val idx))
-       (cps-asm-reglit-insn ctxt SETL rec val idx))
-   (cps-asm-set ctxt rec idx val)
-   (cps-asm-get ctxt (cps-reg-idx res) (cps-quote (if #f #f)))))
-  
+	   (cps-asm-reglit-insn ctxt SETI vec val (1+ (cps-quote-value idx)))
+	   (cps-asm-reglit-insn ctxt SET vec val idx))
+       (cps-asm-reglit-insn ctxt SETL vec val idx))
+   (cps-asm-insn-2 ctxt MOVEI (cps-reg-idx res) IMM_UNSPEC)))
+
 (define-primif (if-eq? (v1 v2) (else-label))
   (asm
    (cps-asm-reglit-insn ctxt CMP CMPOP_EQ v1 v2)
-   (cps-asm-insn-branch ctxt IF_FALSE else-label)))
+   (cps-asm-branch ctxt IF_FALSE else-label)))
 
 (define-primop (cons (res) (a b))
   (alloc-size
@@ -239,7 +245,7 @@
 
 ;; (define-primop (car (res) (a))
 ;;   (asm))
-  
+
 ;; (define-primop (cdr (res) (a))
 ;;   (asm))
 
@@ -251,7 +257,7 @@
 
 ;; (define-primif (if-fixnum? (v) (else-label))
 ;;   (asm))
-  
+
 ;; (define-primitive (add-fixnum (res) (arg1 arg2) (overflow))
 ;;   (asm))
 
@@ -263,7 +269,7 @@
 
 ;; (define-primitive (sub-fixnum (res) (arg1 arg2) (overflow))
 ;;   (asm))
-  
+
 ;; (define-primitive (sub-fixnum2 (hi lo) (a b k) ())
 ;;   (asm))
 
@@ -272,7 +278,7 @@
 
 ;; (define-primitive (mul-fixnum2 (hi lo) (a b c k) ())
 ;;   (asm))
-  
+
 ;; (define-primitive (quotrem-fixnum2 (q r) (a b c) ())
 ;;   (asm))
 
@@ -304,10 +310,10 @@
 ;;   (alloc-size
 ;;    #t)
 ;;   (asm))
-  
+
 ;; (define-primop (bytevec-length-8 (res) (a))
 ;;   (asm))
-  
+
 ;; (define-primop (bytevec-ref-u8 (res) (vec idx))
 ;;   (asm))
 
@@ -322,13 +328,13 @@
 
 ;; (define-primop (bytevec-set-u16 (res) (vec idx val))
 ;;   (asm))
-  
+
 ;; (define-primif (if-code? (a) (else-label))
 ;;   (asm))
 
 ;; (define-primop (code-insn-length (res) (c))
 ;;   (asm))
-  
+
 ;; (define-primop (code-lit-length (res) (c))
 ;;   (asm))
 
