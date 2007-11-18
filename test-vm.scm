@@ -6,7 +6,7 @@
 
 (debug-enable 'debug)
 (debug-enable 'backtrace)
-(debug-set! stack 2000000)
+(debug-set! stack 20000000)
 (read-enable 'positions)
 (read-set! keywords 'prefix)
 
@@ -62,12 +62,13 @@
   (boot-eval '(set! cps-verbose #t))
   (make-bootstrap-image
    '(begin
-      (define (foo) 12)
-      (foo))
+      (primif (if-< 3 2)
+	      (primop syscall 0 #t)
+	      (primop syscall 0 #f)))
    "minimal"))
 
-(compile-base)
-;;(compile-compiler)
+;;(compile-base)
+(compile-compiler)
 ;;(compile-minimal)
 
 (boot-eval '(dump-sigs-n-calls))

@@ -9,11 +9,14 @@
 #include <fcntl.h>
 #include <string.h>
 #include <signal.h>
+#include <sys/mman.h>
 
 #define DEBUG 0
 
-int verbose = 0;
-int super_verbose = 0;
+int trace_gc       = 0;
+int trace_syscalls = 0;
+int trace_insns    = 0;
+int trace_go       = 0;
 
 void
 breakpoint ()
@@ -49,6 +52,9 @@ typedef         word val;
 #define BOOL_F             MAKE_IMM(2)
 #define UNSPEC             MAKE_IMM(3)
 
+#define MIN_FIXNUM_VAL     -536870912
+#define MAX_FIXNUM_VAL      536870911
+
 #define FIXNUM_P(v)        (((v)&3)==1)
 #define FIXNUM_VAL(v)      (((sword)(v))>>2)
 #define MAKE_FIXNUM(n)     (((word)(n))<<2|1)
@@ -60,7 +66,13 @@ typedef         word val;
 #define HEAP_P(v)          (((v)&3)==0)
 #define FIELD_LOC(o,i)     (((val *)(o))+i)
 #define FIELD_REF(o,i)     (((val *)(o))[i])
-#define FIELD_SET(o,i,v)   (((val *)(o))[i]=(v))
+#define UNCHECKED_FIELD_SET(o,i,v)   (((val *)(o))[i]=(v))
+
+#if 1
+#define FIELD_SET(o,i,v)   UNCHECKED_FIELD_SET(o,i,v)
+#else
+#define FIELD_SET(o,i,v)   checking_field_set ((val)o, i, v)
+#endif
 
 #define HEADER_PAIR_P(v)   (((v)&3)!=3)
 
@@ -68,6 +80,7 @@ typedef         word val;
 #define CAR(p)             FIELD_REF(p,0)
 #define CDR(p)             FIELD_REF(p,1)
 #define CDR_LOC(p)         FIELD_LOC(p,1)
+#define SET_CAR(p,v)       UNCHECKED_FIELD_SET(p,0,v)
 #define SET_CDR(p,v)       FIELD_SET(p,1,v)
 
 #define HEADER_RECORD_P(v)       (((v)&0x80000003)==0x00000003)
@@ -106,6 +119,46 @@ typedef         word val;
 #define CODE_LIT_LENGTH(v)  (HEADER_CODE_LIT_LENGTH(FIELD_REF(v,0)))
 
 
+void
+checking_field_set (val obj, int idx, val v)
+{
+  int start, len;
+
+  if (PAIR_P (obj))
+    {
+      start = 0;
+      len = 2;
+    }
+  else if (VECTOR_P (obj))
+    {
+      start = 1;
+      len = VECTOR_LENGTH (obj);
+    }
+  else if (RECORD_P (obj))
+    {
+      start = 1;
+      len = RECORD_LENGTH (obj);
+    }
+  else if (CODE_P (obj))
+    {
+      start = 1 + CODE_INSN_LENGTH (obj);
+      len = CODE_LIT_LENGTH (obj);
+    }
+  else
+    {
+      fprintf (stderr, "FIELD_SET on non fielded object\n");
+      abort ();
+    }
+
+  if (idx >= start && idx < start + len)
+    (((val *)(obj))[idx]=(v));
+  else
+    {
+      fprintf (stderr, "FIELD_SET %d out of bounds %d %d\n", idx, start, len);
+      abort ();
+    }
+}
+
 #define HEAP_SIZE  (32*1024*1024)
 #define SPACE_SIZE (HEAP_SIZE/2)
 
@@ -115,11 +168,23 @@ int active_space;
 void
 init_heap ()
 {
-  spaces[0] = malloc (HEAP_SIZE * sizeof(val));
+  // spaces[0] = malloc (HEAP_SIZE * sizeof(val));
+
+  spaces[0] = mmap ((void *)0x10000000, HEAP_SIZE * sizeof(val),
+		    PROT_READ | PROT_WRITE,
+		    MAP_PRIVATE | MAP_ANON,
+		    0, 0);
+  
+  if (((val)spaces[0]) >= 0x80000000)
+    perror_exit ("above 2 GiB");
   if (spaces[0] == NULL)
     perror_exit ("malloc");
   spaces[1] = spaces[0] + SPACE_SIZE;
   active_space = 0;
+
+  if (trace_gc)
+    fprintf (stderr, "heap: %p %p %p\n",
+	     spaces[0], spaces[1], spaces[1] + SPACE_SIZE);
 }
 
 
@@ -209,7 +274,7 @@ unswizzle_objects (val *mem, size_t off, word n)
 	ptr += -size;
     }
 
-  if (verbose)
+  if (trace_gc)
     {
       fprintf (stderr, "booting with %d objects, %d words.\n",
 	       count, ptr - mem);
@@ -323,7 +388,7 @@ unswizzle_objects (val *mem, size_t off, word n)
 
    - ALLOC D S                == MISC D S MISCOP_ALLOC
 
-   count = FIXNUM_VAL (reglit[S])
+   count = FIXNUM_VAL (reglit[S]) + 1
    reg[D] = free
    dst = free
    free += count
@@ -441,16 +506,23 @@ unswizzle_objects (val *mem, size_t off, word n)
    else
      count = 0
 
+   - TEST_PAIR S              == MISC 0 S MISCOP_TEST_PAIR
+
+   if (HEAP_P (reglit[S]))
+     {
+       dst = reglit[S][0];
+       count = HEADER_PAIR_P (dst);
+     }
+   else
+     count = 0
+
    - BRANCH C O
 
    If condition C is true, pc += O.
 
    Conditions are
    
-     IF_TRUE:    count != 0
-     IF_RECORD:  dst & 0x80000003 == 3
-
-     IFNOT variants also exist.
+     XXX
 
 
    ** Complex instructions
@@ -460,11 +532,11 @@ unswizzle_objects (val *mem, size_t off, word n)
    implemented somewhere in ROM, using an instruction set from above
    plus whatever is needed in addition.
 
-   - SYSCALL N V            == TRAP N V TRAPOP_SYSCALL
+   - SYSCALL N V            == TRAP V N TRAPOP_SYSCALL
 
-   Trap into the operation system to perform syscall number S.  The
-   next N words of the instruction stream are used as parameters for
-   the syscall.  Each word is either of the form
+   Trap into the operation system to perform a syscall.  The next N
+   words of the instruction stream are used as parameters for the
+   syscall.  Each word is either of the form
 
        R    or   0x80000000 + L
 
@@ -473,6 +545,7 @@ unswizzle_objects (val *mem, size_t off, word n)
 
    The result is delivered in register V.
 
+   - CHECK_ALLOC S            == TRAP 0 S TRAPOP_CHECK_ALLOC
    - CHECK_ALLOCI S
 
    If FREE + S >= END, run the garbage collector.  If there still
@@ -554,6 +627,20 @@ word *reg_end;
 #define SETI          28
 #define CMP           32
 #define TRAP          36
+#define REFU8         40
+#define SETU8         44
+#define REFU16        48
+#define SETU16        52
+#define ADD           56
+#define SUB           60
+#define MUL           64
+#define DIV           68
+#define REM           72
+#define ADD16         76
+#define SUB16         80
+#define MUL16         84
+#define DIV16         88
+#define ADD16I        92
 
 #define MOVEI        128
 #define ALLOCI       129
@@ -576,14 +663,34 @@ word *reg_end;
 #define MISCOP_TEST_REC      9
 #define MISCOP_TEST_VEC     10
 #define MISCOP_TEST_DESC    11
+#define MISCOP_TEST_PAIR    12
+#define MISCOP_LOAD_LENGTH_HALF 13
+#define MISCOP_ALLOC_BYTES  14
+#define MISCOP_TEST_CHAR    15
+#define MISCOP_MAKE_CHAR    16
+#define MISCOP_CHAR_VALUE   17
+#define MISCOP_TEST_FIXNUM  18
+#define MISCOP_SET_COUNT    19
+#define MISCOP_SET_COUNT_HI 20
+#define MISCOP_GET_COUNT    21
+#define MISCOP_GET_COUNT_HI 22
+#define MISCOP_LOAD_INSN_LENGTH 23
+#define MISCOP_LOAD_LIT_LENGTH 24
+#define MISCOP_ALLOC_CODE   25
+#define MISCOP_INIT_CODE    26
 
 #define CMPOP_EQ             0
+#define CMPOP_FIXNUMS        1
 
 #define TRAPOP_SYSCALL       0
 #define TRAPOP_CHECK_CALLSIG 1
 #define TRAPOP_CHECK_ALLOC   2
+#define TRAPOP_CHECK_ALLOC_BYTES 3
+#define TRAPOP_CHECK_ALLOC_CODE  4
 
 #define IF_FALSE             0
+#define IF_GTE               1
+
 
 #define IMM_UNSPEC 26
 
@@ -591,9 +698,18 @@ word *reg_end;
 
 #define rlop(op) op+RR: case op+RL: case op+LR: case op+LL
 
+void discode (FILE *f, val code);
+
 void
 do_GO (val code)
 {
+  if (trace_go)
+    {
+      fprintf (stderr, "GO\n");
+      discode (stderr, code);
+      fprintf (stderr, "\n");
+    }
+
   reg_code = code;
   reg_pc = ((word *)reg_code) + 1;
   reg_lit = ((word *)reg_code) + 1 + CODE_INSN_LENGTH (reg_code);
@@ -602,6 +718,8 @@ do_GO (val code)
 void do_syscall (word n_args, word return_register);
 void check_callsig (word expected_sig, int caller_sig_reg);
 void gc (word size);
+
+val *disinsn (FILE *f, val code, val *pc, int reg_hints);
 
 void
 run_cpu ()
@@ -623,7 +741,11 @@ run_cpu ()
       word *yp = (op & 2)? reg_lit : regs;
       word *zp = (op & 1)? reg_lit : regs;
 
-      // printf ("%08x: %d %d %d %d\n", reg_pc-1, op, x, y, z);
+      if (trace_insns)
+	{
+	  disinsn (stderr, reg_code, reg_pc - 1, 1);
+	  fprintf (stderr, "\n");
+	}
 
       /* Execute
        */
@@ -641,7 +763,7 @@ run_cpu ()
 	      break;
 
 	    case MISCOP_ALLOC:
-	      reg_count = FIXNUM_VAL (yp[y]);
+	      reg_count = FIXNUM_VAL (yp[y]) + 1;
 	      regs[x] = (val) reg_free;
 	      reg_dst = reg_free;
 	      reg_free += reg_count;
@@ -660,7 +782,7 @@ run_cpu ()
 	      break;
 
 	    case MISCOP_INIT_VEC:
-	      reg_dst[0] = FIXNUM_VAL (yp[y]) << 4 | 0x80000000 | x;
+	      reg_dst[0] = (FIXNUM_VAL (yp[y]) << 4) | 0x80000000 | x;
 	      reg_dst++;
 	      reg_count--;
 	      break;
@@ -719,7 +841,86 @@ run_cpu ()
 		reg_count = 0;
 	      break;
 
+	    case MISCOP_TEST_PAIR:
+	      if (HEAP_P (yp[y]))
+		{
+		  reg_dst = (val *)FIELD_REF (yp[y], 0);
+		  reg_count = HEADER_PAIR_P ((val)reg_dst);
+		}
+	      else
+		reg_count = 0;
+	      break;
+
+	    case MISCOP_LOAD_LENGTH_HALF:
+	      regs[x] = MAKE_FIXNUM ((FIELD_REF(yp[y], 0)&~0x80000000) >> 5);
+	      break;
+
+	    case MISCOP_ALLOC_BYTES:
+	      reg_count = (FIXNUM_VAL (yp[y]) + 3) / 4 + 1;
+	      regs[x] = (val) reg_free;
+	      reg_dst = reg_free;
+	      reg_free += reg_count;
+	      break;
+
+	    case MISCOP_TEST_CHAR:
+	      reg_count = CHAR_P (yp[y]);
+	      break;
+
+	    case MISCOP_MAKE_CHAR:
+	      regs[x] = MAKE_CHAR (FIXNUM_VAL (yp[y]));
+	      break;
+
+	    case MISCOP_CHAR_VALUE:
+	      regs[x] = MAKE_FIXNUM (CHAR_VAL (yp[y]));
+	      break;
+
+	    case MISCOP_TEST_FIXNUM:
+	      reg_count = FIXNUM_P (yp[y]);
+	      break;
+
+	    case MISCOP_SET_COUNT:
+	      reg_count = FIXNUM_VAL (yp[y]);
+	      break;
+
+	    case MISCOP_SET_COUNT_HI:
+	      reg_count = (reg_count & 0xFFFF) | (FIXNUM_VAL (yp[y]) << 16);
+	      break;
+
+	    case MISCOP_GET_COUNT:
+	      regs[x] = MAKE_FIXNUM (reg_count);
+	      break;
+
+	    case MISCOP_GET_COUNT_HI:
+	      regs[x] = MAKE_FIXNUM (reg_count >> 16);
+	      break;
+
+	    case MISCOP_LOAD_INSN_LENGTH:
+	      regs[x] =
+		MAKE_FIXNUM (HEADER_CODE_INSN_LENGTH (FIELD_REF(yp[y], 0)));
+	      break;
+
+	    case MISCOP_LOAD_LIT_LENGTH:
+	      regs[x] =
+		MAKE_FIXNUM (HEADER_CODE_LIT_LENGTH (FIELD_REF(yp[y], 0)));
+	      break;
+
+	    case MISCOP_ALLOC_CODE:
+	      reg_count = reg_count + FIXNUM_VAL (yp[y]) + 1;
+	      regs[x] = (val) reg_free;
+	      reg_dst = reg_free;
+	      reg_free += reg_count;
+	      break;
+
+	    case MISCOP_INIT_CODE:
+	      reg_dst[0] =
+		0x8000000F | (reg_count << 12) | (FIXNUM_VAL (yp[y]) << 4);
+	      reg_dst += 1 + reg_count;
+	      reg_count = FIXNUM_VAL (yp[y]);
+	      break;
+
 	    default:
+	      disinsn (stderr, reg_code, reg_pc - 1, 1);
+	      fprintf (stderr, "\n");
 	      abort ();
 	    }
 	  break;
@@ -754,7 +955,12 @@ run_cpu ()
 	    case CMPOP_EQ:
 	      reg_count = (yp[y] == zp[z]);
 	      break;
+	    case CMPOP_FIXNUMS:
+	      reg_count = (yp[y] - zp[z]);
+	      break;
 	    default:
+	      disinsn (stderr, reg_code, reg_pc - 1, 1);
+	      fprintf (stderr, "\n");
 	      abort ();
 	    }
 	  break;
@@ -763,18 +969,142 @@ run_cpu ()
 	  switch (z)
 	    {
 	    case TRAPOP_SYSCALL:
-	      do_syscall (x, y);
+	      do_syscall (y, x);
 	      break;
 	    case TRAPOP_CHECK_CALLSIG:
-	      check_callsig (x, y);
+	      if (x != FIXNUM_VAL (regs[y]))
+		check_callsig (x, y);
 	      break;
 	    case TRAPOP_CHECK_ALLOC:
 	      if (reg_free + FIXNUM_VAL(yp[y]) + 1 >= reg_end)
 		gc (FIXNUM_VAL(yp[y]) + 1);
 	      break;
+	    case TRAPOP_CHECK_ALLOC_BYTES:
+	      {
+		int n = (FIXNUM_VAL(yp[y]) + 3) / 4 + 1;
+		if (reg_free + n >= reg_end)
+		  gc (n);
+	      }
+	    case TRAPOP_CHECK_ALLOC_CODE:
+	      {
+		int n = reg_count + FIXNUM_VAL(yp[y]) + 1;
+		if (reg_free + n >= reg_end)
+		  gc (n);
+	      }
+	      break;
 	    default:
+	      disinsn (stderr, reg_code, reg_pc - 1, 1);
+	      fprintf (stderr, "\n");
 	      abort ();
 	    }
+	  break;
+
+	case REFU8:
+	  {
+	    unsigned char *bytes = BYTEVEC_BYTES(yp[y]);
+	    word idx = FIXNUM_VAL(zp[z]);
+	    regs[x] = MAKE_FIXNUM (bytes[idx]);
+	  }
+	  break;
+
+	case SETU8:
+	  {
+	    unsigned char *bytes = BYTEVEC_BYTES(regs[x]);
+	    word idx = FIXNUM_VAL(zp[z]);
+	    bytes[idx] = FIXNUM_VAL(yp[y]);
+	  }
+	  break;
+
+	case REFU16:
+	  {
+	    unsigned short *wydes = (unsigned short *)BYTEVEC_BYTES(yp[y]);
+	    word idx = FIXNUM_VAL(zp[z]);
+	    regs[x] = MAKE_FIXNUM (wydes[idx]);
+	  }
+	  break;
+
+	case SETU16:
+	  {
+	    unsigned short *wydes = (unsigned short *)BYTEVEC_BYTES(regs[x]);
+	    word idx = FIXNUM_VAL(zp[z]);
+	    wydes[idx] = FIXNUM_VAL(yp[y]);
+	  }
+	  break;
+
+	case ADD:
+	  {
+	    sword a = FIXNUM_VAL(yp[y]);
+	    sword b = FIXNUM_VAL(zp[z]);
+	    sword c = a + b;
+	    regs[x] = MAKE_FIXNUM (c);
+	    reg_count = MIN_FIXNUM_VAL <= c && c <= MAX_FIXNUM_VAL;
+	  }
+	  break;
+
+	case SUB:
+	  {
+	    sword a = FIXNUM_VAL(yp[y]);
+	    sword b = FIXNUM_VAL(zp[z]);
+	    sword c = a - b;
+	    regs[x] = MAKE_FIXNUM (c);
+	    reg_count = MIN_FIXNUM_VAL <= c && c <= MAX_FIXNUM_VAL;
+	  }
+	  break;
+
+	case MUL:
+	  {
+	    signed long long a = FIXNUM_VAL(yp[y]);
+	    signed long long b = FIXNUM_VAL(zp[z]);
+	    signed long long c = a * b;
+	    regs[x] = MAKE_FIXNUM (c);
+	    reg_count = MIN_FIXNUM_VAL <= c && c <= MAX_FIXNUM_VAL;
+	  }
+	  break;
+
+	case DIV:
+	  {
+	    sword a = FIXNUM_VAL(yp[y]);
+	    sword b = FIXNUM_VAL(zp[z]);
+	    sword c = a / b;
+	    regs[x] = MAKE_FIXNUM (c);
+	    reg_count = MIN_FIXNUM_VAL <= c && c <= MAX_FIXNUM_VAL;
+	  }
+	  break;
+
+	case REM:
+	  {
+	    sword a = FIXNUM_VAL(yp[y]);
+	    sword b = FIXNUM_VAL(zp[z]);
+	    sword c = a % b;
+	    regs[x] = MAKE_FIXNUM (c);
+	    reg_count = MIN_FIXNUM_VAL <= c && c <= MAX_FIXNUM_VAL;
+	  }
+	  break;
+
+	case ADD16:
+	  reg_count += FIXNUM_VAL (yp[y]) + FIXNUM_VAL (zp[z]);
+	  regs[x] = MAKE_FIXNUM (reg_count & 0xFFFF);
+	  break;
+
+	case SUB16:
+	  reg_count = (FIXNUM_VAL (yp[y]) - FIXNUM_VAL (zp[z]) 
+		       + (((sword)(reg_count << 16)) >> 16));
+	  regs[x] = MAKE_FIXNUM (reg_count & 0xFFFF);
+	  break;
+
+	case MUL16:
+	  reg_count += FIXNUM_VAL (yp[y]) * FIXNUM_VAL (zp[z]);
+	  regs[x] = MAKE_FIXNUM (reg_count & 0xFFFF);
+	  break;
+
+	case DIV16:
+	  reg_count = reg_count / FIXNUM_VAL (yp[y]);
+	  regs[x] = MAKE_FIXNUM (reg_count & 0xFFFF);
+	  break;
+
+	case ADD16I:
+	  reg_count += FIXNUM_VAL (yp[y]) + z;
+	  regs[x] = MAKE_FIXNUM (reg_count & 0xFFFF);
 	  break;
 
 	case MOVEI:
@@ -819,16 +1149,317 @@ run_cpu ()
 	    {
 	    case IF_FALSE:
 	      if (reg_count == 0)
-		reg_pc += (sword)xyz;
+		reg_pc += (sword)yz;
+	      break;
+	    case IF_GTE:
+	      if (((sword)reg_count) >= 0)
+		reg_pc += (sword)yz;
 	      break;
 	    default:
+	      disinsn (stderr, reg_code, reg_pc - 1, 1);
+	      fprintf (stderr, "\n");
 	      abort ();
 	    }
 	  break;
 
 	default:
+	  disinsn (stderr, reg_code, reg_pc - 1, 1);
+	  fprintf (stderr, "\n");
 	  abort ();
 	}
+    }
+}
+
+/* Disassembler
+ */
+
+char
+type_code (val header)
+{
+  if (HEADER_PAIR_P (header))
+    return 'p';
+  else if (HEADER_RECORD_P (header))
+    return 'r';
+  else if (HEADER_VECTOR_P (header))
+    return 'v';
+  else if (HEADER_BYTEVEC_P (header))
+    return 'b';
+  else if (HEADER_CODE_P (header))
+    return 'c';
+  else
+    abort ();
+}
+
+void
+dumpf (FILE *f, val v)
+{
+  if (FIXNUM_P(v))
+    fprintf (f, "%d", FIXNUM_VAL (v));
+  else if (CHAR_P(v))
+    fprintf (f, "#\\%c", CHAR_VAL (v));
+  else if (v == NIL)
+    fprintf (f, "nil");
+  else if (v == BOOL_T)
+    fprintf (f, "#t");
+  else if (v == BOOL_F)
+    fprintf (f, "#f");
+  else if (v == UNSPEC)
+    fprintf (f, "unspec");
+  else if (BYTEVEC_P(v))
+    fprintf (f, "/%.*s/", BYTEVEC_LENGTH(v), BYTEVEC_BYTES(v));
+#if 0
+  else if (RECORD_P(v) 
+	   && RECORD_LENGTH(v) > 0
+	   && BYTEVEC_P (RECORD_REF (v, 0)))
+    {
+      /* Might be a string.
+       */
+      val s = RECORD_REF (v, 0);
+      fprintf (f, "\"%.*s\"", BYTEVEC_LENGTH(v), BYTEVEC_BYTES(v));
+    }
+  else if (RECORD_P(v)
+	   && RECORD_LENGTH(v) > 0
+	   && RECORD_P (RECORD_REF (v, 0))
+	   && RECORD_LENGTH (RECORD_REF (v, 0)) > 0
+	   && BYTEVEC_P (RECORD_REF (RECORD_REF (v, 0), 0)))
+    {
+      /* Might be a symbol
+       */
+      val s = RECORD_REF (RECORD_REF (v, 0), 0);
+      fprintf (f, "'%.*s", BYTEVEC_LENGTH(v), BYTEVEC_BYTES(v));
+    }
+#endif
+  else
+    fprintf (f, "%c", type_code (FIELD_REF(v,0)));
+}
+
+void
+disfmt (FILE *f, const char *fmt, word insn, val *lit, int reg_hints)
+{
+  const char *p;
+  
+  word op = insn >> 24;
+  word x = (insn >> 16) & 0xFF;
+  word y = (insn >> 8) & 0xFF;
+  word z = insn & 0xFF;
+  word yz = insn & 0xFFFF;
+  word xyz = insn & 0xFFFFFF;
+
+  if (fmt == NULL)
+    fmt = "OP %o %x %y %z";
+
+  for (p = fmt; *p; p++)
+    {
+      if (*p == '%')
+	{
+	  p++;
+	  switch (*p)
+	    {
+	    case 'o':
+	      fprintf (f, "%d", op);
+	      break;
+	    case 'x':
+	      fprintf (f, "%d", x);
+	      break;
+	    case 'y':
+	      fprintf (f, "%d", y);
+	      break;
+	    case 'z':
+	      fprintf (f, "%d", z);
+	      break;
+	    case 'v':
+	      fprintf (f, "%d", yz);
+	      break;
+	    case 'w':
+	      fprintf (f, "%d", xyz);
+	      break;
+	    case 'X':
+	      fprintf (f, "r%d", x);
+	      break;
+	    case 'L':
+	      dumpf (f, lit[x]);
+	      break;
+	    case 'Y':
+	      if (op & 2)
+		dumpf (f, lit[y]);
+	      else
+		{
+		  fprintf (f, "r%d", y);
+		  if (reg_hints)
+		    {
+		      fprintf (f, "=");
+		      dumpf (f, regs[y]);
+		    }
+		}
+	      break;
+	    case 'Z':
+	      if (op & 2)
+		dumpf (f, lit[z]);
+	      else
+		{
+		  fprintf (f, "r%d", z);
+		  if (reg_hints)
+		    {
+		      fprintf (f, "=");
+		      dumpf (f, regs[y]);
+		    }
+		}
+	      break;
+	    case 'd':
+	      if (reg_hints)
+		fprintf (f, "dst=%8x", reg_dst);
+	      break;
+	    case 'D':
+	      if (reg_hints)
+		{
+		  fprintf (f, "dst=", reg_dst);
+		  dumpf (f, (val)reg_dst);
+		}
+	      break;
+	    case 'c':
+	      if (reg_hints)
+		fprintf (f, "count=%d", reg_count);
+	      break;
+	    default:
+	      fprintf (f, "?");
+	      break;
+	    }
+	}
+      else
+	fputc (*p, f);
+    }
+}
+
+const char *reglitop_fmt[128] = {
+  [HALT]   = "HALT %x %y %z",
+  [MISC]   = NULL,
+  [MOVE]   = "MOVE %X %Y",
+  [REF]    = "REF %X %Y %Z", 
+  [REFI]   = "REFI %X %Y %z",
+  [SET]    = "SET %X %Y %Z", 
+  [SETL]   = "SETL %L %Y %Z",
+  [SETI]   = "SETI %X %Y %z",
+  [CMP]    = "CMP %x %Y %Z", 
+  [TRAP]   = NULL,
+  [REFU8]  = "REFU8 %X %Y %Z",
+  [SETU8]  = "SETU8 %X %Y %Z",
+  [REFU16] = "REFU16 %X %Y %Z",
+  [SETU16] = "SETU16 %X %Y %Z",
+  [ADD]    = "ADD %X %Y %Z",
+  [SUB]    = "SUB %X %Y %Z",
+  [MUL]    = "MUL %X %Y %Z",
+  [DIV]    = "DIV %X %Y %Z",
+  [REM]    = "REM %X %Y %Z",
+  [ADD16]  = "ADD16 %X %Y %Z %c",
+  [SUB16]  = "SUB16 %X %Y %Z %c",
+  [MUL16]  = "MUL16 %X %Y %Z %c",
+  [DIV16]  = "DIV16 %X %Y %Z %c",
+  [ADD16I] = "ADD16I %X %Y %z %c"
+};
+
+const char *op_fmt[256] = {
+  [MOVEI] = "MOVEI %X %v",        
+  [ALLOCI] = "ALLOCI %X %v",       
+  [INITI] = "INITI %w %d",        
+  [FILLI] = "FILLI %w %d %c",        
+  [CHECK_ALLOCI] = "CHECK_ALLOCI %w",
+  [INIT_VECI] = "INIT_VECI %w %d",
+  [BRANCH] = "BRANCH %x %v %c",
+};
+
+const char *miscop_fmt[256] = {
+  [MISCOP_GO]               = "GO %Y",
+  [MISCOP_ALLOC]            = "ALLOC %X %Y",
+  [MISCOP_INIT]             = "INIT %Y %d",
+  [MISCOP_INIT_REC]         = "INIT_REC %Y %d",
+  [MISCOP_INIT_VEC]         = "INIT_VEC %Y %d",
+  [MISCOP_FILL]             = "FILL %Y %d %c",
+  [MISCOP_COPY]             = "COPY %d %c",
+  [MISCOP_LOAD_DESC]        = "LOAD_DESC %X %Y",
+  [MISCOP_LOAD_LENGTH]      = "LOAD_LENGTH %X %Y",
+  [MISCOP_TEST_REC]         = "TEST_REC %Y",
+  [MISCOP_TEST_VEC]         = "TEST_VEC %Y",
+  [MISCOP_TEST_DESC]        = "TEST_DESC %Y %d",
+  [MISCOP_TEST_PAIR]        = "TEST_PAIR %Y",
+  [MISCOP_LOAD_LENGTH_HALF] = "LOAD_LENGTH_HALF %X %Y",
+  [MISCOP_ALLOC_BYTES]      = "ALLOC_BYTES %Y",
+  [MISCOP_TEST_CHAR]        = "TEST_CHAR %Y",
+  [MISCOP_MAKE_CHAR]        = "MAKE_CHAR %Y",
+  [MISCOP_CHAR_VALUE]       = "CHAR_VALUE %Y",
+  [MISCOP_TEST_FIXNUM]      = "TEST_FIXNUM %Y",
+  [MISCOP_SET_COUNT]        = "SET_COUNT %Y",
+  [MISCOP_SET_COUNT_HI]     = "SET_COUNT_HI %Y %c",
+  [MISCOP_GET_COUNT]        = "GET_COUNT %X",
+  [MISCOP_GET_COUNT_HI]     = "GET_COUNT_HI %X",
+  [MISCOP_LOAD_INSN_LENGTH] = "LOAD_INSN_LENGTH %X %Y",
+  [MISCOP_LOAD_LIT_LENGTH]  = "LOAD_LIT_LENGTH %X %Y",
+  [MISCOP_ALLOC_CODE]       = "ALLOC_CODE %X %Y %c",
+  [MISCOP_INIT_CODE]        = "INIT_CODE %Y %c",
+};
+
+const char *trapop_fmt[256] = {
+  [TRAPOP_SYSCALL]           = NULL,
+  [TRAPOP_CHECK_CALLSIG]     = "CHECK_CALLSIG %x %Y",
+  [TRAPOP_CHECK_ALLOC]       = "CHECK_ALLOC %Y",
+  [TRAPOP_CHECK_ALLOC_BYTES] = "CHECK_ALLOC_BYTES %Y",
+  [TRAPOP_CHECK_ALLOC_CODE]  = "CHECK_ALLOC_CODE %Y %c"
+};
+
+val *
+disinsn (FILE *f, val code, val *pc, int reg_hints)
+{
+  val *lit = ((val *)code) + 1 + CODE_INSN_LENGTH (code);
+  word insn = *pc++;
+  word op = insn >> 24;
+  word x = (insn >> 16) & 0xFF;
+  word y = (insn >> 8) & 0xFF;
+  word z = insn & 0xFF;
+  
+  fprintf (f, "%3d: %08x ", pc - ((val *)code) - 2, insn);
+ 
+  if ((op&~3) == MISC)
+    disfmt (f, miscop_fmt[z], insn, lit, reg_hints);
+  else if ((op&~3) == TRAP)
+    {
+      if (z == TRAPOP_SYSCALL)
+	{
+	  word n = y;
+
+	  disfmt (f, "SYSCALL %X", insn, lit, reg_hints);
+	  while (n > 0)
+	    {
+	      word a = *pc++;
+	      fprintf (stderr, " ");
+	      if (a & 0x80000000)
+		dumpf (f, lit[a & 0xFF]);
+	      else
+		fprintf (f, "r%d", a & 0xFF);
+	      n--;
+	    }
+	}
+      else
+	disfmt (f, trapop_fmt[z], insn, lit, reg_hints);
+    }
+  else if (op < 128)
+    disfmt (f, reglitop_fmt[op & ~3], insn, lit, reg_hints);
+  else
+    disfmt (f, op_fmt[op], insn, lit, reg_hints);
+
+  return pc;
+}
+
+
+void
+discode (FILE *f, val code)
+{
+  int count = CODE_INSN_LENGTH (code);
+  val *pc = ((val *)code) + 1;
+
+  while (count > 0)
+    {
+      pc = disinsn (f, code, pc, 0);
+      fprintf (f, "\n");
+      count--;
     }
 }
 
@@ -840,11 +1471,64 @@ check_callsig (word expected_sig, int caller_sig_reg)
 {
   word caller_sig = FIXNUM_VAL (regs[caller_sig_reg]);
 
-  if (expected_sig == caller_sig)
-    return;
+  int n_expected = expected_sig >> 1, rest_expected = expected_sig & 1;
+  int n_caller = caller_sig >> 1, rest_caller = caller_sig & 1;
+  
+  if (n_caller < n_expected)
+    {
+      if (!rest_caller)
+	goto wrong_num_args;
 
+      while (n_caller < n_expected)
+	{
+	  if (!HEAP_P (regs[n_caller+1]))
+	    goto wrong_num_args;
+
+	  regs[n_caller+2] = CDR (regs[n_caller+1]);
+	  regs[n_caller+1] = CAR (regs[n_caller+1]);
+	  n_caller++;
+	}
+    }
+  else if (n_expected < n_caller)
+    {
+      if (!rest_expected)
+	goto wrong_num_args;
+
+      if (!rest_caller)
+	{
+	  regs[n_caller+1] = NIL;
+	  rest_caller = 1;
+	}
+
+      if (reg_free + (2*(n_caller - n_expected)) >= reg_end)
+	gc (2*(n_caller - n_expected));
+
+      while (n_expected < n_caller)
+	{
+	  val p = (val)reg_free;
+	  reg_free += 2;
+	  SET_CAR (p, regs[n_caller]);
+	  SET_CDR (p, regs[n_caller+1]);
+	  regs[n_caller] = p;
+	  n_caller--;
+	}
+    }
+
+  if (rest_expected && !rest_caller)
+    regs[n_caller+1] = NIL;
+  else if (!rest_expected && rest_caller && regs[n_caller+1] != NIL)
+    goto wrong_num_args;
+
+  return;
+
+ wrong_num_args:
+  // fprintf (stderr, "wrong number of arguments\n");
   if (HEAP_P (regs[-6]))
-    do_GO (regs[-6]);
+    {
+      regs[0] = MAKE_FIXNUM (2*2+0);
+      regs[1] = regs[-6];
+      do_GO (RECORD_REF (regs[-6], 0));
+    }
   else
     abort ();
 }
@@ -901,6 +1585,13 @@ copy (val ptr)
       return ptr2;
     }
 
+  if ((val *)ptr < spaces[1 - active_space]
+      || (val *)ptr >= spaces[1 - active_space] + SPACE_SIZE)
+    {
+      fprintf (stderr, "rogue pointer: %p\n", ptr);
+      breakpoint ();
+    }
+  
   header = FIELD_REF(ptr,0);
 
 #if DEBUG
@@ -915,6 +1606,13 @@ copy (val ptr)
   else if (HEADER_RECORD_P (header))
     {
       val desc = snap_pointer (HEADER_RECORD_DESC (header));
+#if 0
+      if (!RECORD_P (desc))
+	{
+	  fprintf (stderr, "desc not record (copy)\n");
+	  abort ();
+	}
+#endif
       type = "record";
       size = FIXNUM_VAL(RECORD_REF(desc,0)) + 1;
     }
@@ -942,7 +1640,7 @@ copy (val ptr)
 #endif
   
   memcpy (to_ptr, (val *)ptr, size*sizeof(val));
-  FIELD_SET(ptr, 0, (val)to_ptr);
+  UNCHECKED_FIELD_SET (ptr, 0, (val)to_ptr);
   to_ptr += size;
 
   return (val)(to_ptr - size);
@@ -978,7 +1676,14 @@ scan (val *ptr)
   else if (HEADER_RECORD_P (header))
     {
       val desc = copy (HEADER_RECORD_DESC (header));
-      FIELD_SET (ptr, 0, MAKE_HEADER_RECORD (desc));
+#if 0
+      if (!RECORD_P (desc))
+	{
+	  fprintf (stderr, "desc not record\n");
+	  abort ();
+	}
+#endif
+      UNCHECKED_FIELD_SET (ptr, 0, MAKE_HEADER_RECORD (desc));
       type = "record";
       size = FIXNUM_VAL(RECORD_REF(desc,0));
       ptr++;
@@ -1048,11 +1753,12 @@ gc (word size)
   for (ptr = to_space, count = 0; ptr < to_ptr; count++)
     ptr = scan (ptr);
 
-  if (verbose)
+  if (trace_gc)
     fprintf (stderr, "GC: copied %d objects, %d words (%02f%%)\n",
 	     count, to_ptr - to_space, (to_ptr - to_space)*100.0/SPACE_SIZE);
 
   reg_pc = (word *)reg_code + pc_off;
+  reg_lit = ((word *)reg_code) + 1 + CODE_INSN_LENGTH (reg_code);
   reg_free = to_ptr;
   reg_end = to_space + SPACE_SIZE;
 
@@ -1120,7 +1826,7 @@ suspend (val cont)
   if (close (fd) < 0)
     perror_exit (suspend_image);
     
-  if (verbose)
+  if (trace_gc)
     fprintf (stderr, "SUSPEND: wrote %s, %d objects, %d words\n",
 	     suspend_image, count, image_size / sizeof(word));
   exit (0);
@@ -1351,7 +2057,7 @@ scan_for_referrers (val obj, val vec, size_t count, val referrer)
   mark (ptr);
 
 #if DEBUG
-  fprintf (stderr, "Scan %08x (%08x)\n", ptr, v);
+  fprintf (stderr, "Scan %08x (%08x)\n", ptr, header);
 #endif
 
   if (HEADER_PAIR_P (header))
@@ -1621,7 +2327,7 @@ scan_for_transmogrify (val from, val to, val obj)
 void
 transmogrify_objects (val from, val to)
 {
-  if (verbose)
+  if (trace_gc)
     {
       size_t j, n;
       n = VECTOR_LENGTH (from);
@@ -1641,64 +2347,11 @@ transmogrify_objects (val from, val to)
 /* Debugging
  */
 
-char
-type_code (val header)
-{
-  if (HEADER_PAIR_P (header))
-    return 'p';
-  else if (HEADER_RECORD_P (header))
-    return 'r';
-  else if (HEADER_VECTOR_P (header))
-    return 'v';
-  else if (HEADER_BYTEVEC_P (header))
-    return 'b';
-  else if (HEADER_CODE_P (header))
-    return 'c';
-  else
-    abort ();
-}
-
 void
 dump (val v)
 {
-  if (FIXNUM_P(v))
-    fprintf (stderr, " %d", FIXNUM_VAL (v));
-  else if (CHAR_P(v))
-    fprintf (stderr, " #\\%c", CHAR_VAL (v));
-  else if (v == NIL)
-    fprintf (stderr, " nil");
-  else if (v == BOOL_T)
-    fprintf (stderr, " #t");
-  else if (v == BOOL_F)
-    fprintf (stderr, " #f");
-  else if (v == UNSPEC)
-    fprintf (stderr, " unspec");
-  else if (BYTEVEC_P(v))
-    fprintf (stderr, " /%.*s/", BYTEVEC_LENGTH(v), BYTEVEC_BYTES(v));
-#if 0
-  else if (RECORD_P(v) 
-	   && RECORD_LENGTH(v) > 0
-	   && BYTEVEC_P (RECORD_REF (v, 0)))
-    {
-      /* Might be a string.
-       */
-      val s = RECORD_REF (v, 0);
-      fprintf (stderr, " \"%.*s\"", BYTEVEC_LENGTH(v), BYTEVEC_BYTES(v));
-    }
-  else if (RECORD_P(v)
-	   && RECORD_LENGTH(v) > 0
-	   && RECORD_P (RECORD_REF (v, 0))
-	   && RECORD_LENGTH (RECORD_REF (v, 0)) > 0
-	   && BYTEVEC_P (RECORD_REF (RECORD_REF (v, 0), 0)))
-    {
-      /* Might be a symbol
-       */
-      val s = RECORD_REF (RECORD_REF (v, 0), 0);
-      fprintf (stderr, " '%.*s", BYTEVEC_LENGTH(v), BYTEVEC_BYTES(v));
-    }
-#endif
-  else
-    fprintf (stderr, " %c", type_code (FIELD_REF(v,0)));
+  fprintf (stderr, " ");
+  dumpf (stderr, v);
 }
 
 int
@@ -1738,7 +2391,7 @@ do_syscall (word n_args, word return_register)
 	arg[i] = regs[a&0xFF];
     }
 
-  if (super_verbose)
+  if (trace_syscalls)
     {
       fprintf (stderr, "syscall");
 
@@ -1751,18 +2404,17 @@ do_syscall (word n_args, word return_register)
 
   if (n_args == 0)
     {
-      if (verbose)
-	fprintf (stderr, "PANIC\n");
+      fprintf (stderr, "PANIC\n");
       exit (0);
     }
 
-  if (arg[1] == MAKE_FIXNUM(2))
+  if (arg[0] == MAKE_FIXNUM(2))
     {
       /* write (fd, buf, start, end) */
-      word fd = FIXNUM_VAL (arg[2]);
-      char *buf = BYTEVEC_BYTES (arg[3]);
-      word start = FIXNUM_VAL (arg[4]);
-      word end = FIXNUM_VAL (arg[5]);
+      word fd = FIXNUM_VAL (arg[1]);
+      char *buf = BYTEVEC_BYTES (arg[2]);
+      word start = FIXNUM_VAL (arg[3]);
+      word end = FIXNUM_VAL (arg[4]);
       word n;
 
       // fprintf (stderr, "writing %d %p %d %d\n", fd, buf, start, end);
@@ -1770,13 +2422,13 @@ do_syscall (word n_args, word return_register)
 
       res = MAKE_FIXNUM (n);
     }
-  else if (arg[1] == MAKE_FIXNUM(3))
+  else if (arg[0] == MAKE_FIXNUM(3))
     {
       /* read (fd, buf, start, end) */
-      word fd = FIXNUM_VAL (arg[2]);
-      char *buf = BYTEVEC_BYTES (arg[3]);
-      word start = FIXNUM_VAL (arg[4]);
-      word end = FIXNUM_VAL (arg[5]);
+      word fd = FIXNUM_VAL (arg[1]);
+      char *buf = BYTEVEC_BYTES (arg[2]);
+      word start = FIXNUM_VAL (arg[3]);
+      word end = FIXNUM_VAL (arg[4]);
       word n;
 
       // fprintf (stderr, "reading %d %p %d %d\n", fd, buf, start, end);
@@ -1784,47 +2436,47 @@ do_syscall (word n_args, word return_register)
 
       res = MAKE_FIXNUM (n);
     }
-  else if (arg[1] == MAKE_FIXNUM(4))
+  else if (arg[0] == MAKE_FIXNUM(4))
     {
       /* hashq_vector_ref (vec, key, new_pair) */
-      res = hashq_vector_ref (arg[2], arg[3], arg[4]);
+      res = hashq_vector_ref (arg[1], arg[2], arg[3]);
     }
-  else if (arg[1] == MAKE_FIXNUM(5))
+  else if (arg[0] == MAKE_FIXNUM(5))
     {
       /* hashq_vector_del (vec, key) */
-      res = hashq_vector_del (arg[2], arg[3]);
+      res = hashq_vector_del (arg[1], arg[2]);
     }
-  else if (arg[1] == MAKE_FIXNUM(6))
+  else if (arg[0] == MAKE_FIXNUM(6))
     {
       /* hashq_vector_to_alist (vec) */
-      res = hashq_vector_to_alist (arg[2]);
+      res = hashq_vector_to_alist (arg[1]);
     }
-  else if (arg[1] == MAKE_FIXNUM(7))
+  else if (arg[0] == MAKE_FIXNUM(7))
     {
       /* alist_to_hashq_vector (alist, vec) */
-      res = alist_to_hashq_vector (arg[2], arg[3]);
+      res = alist_to_hashq_vector (arg[1], arg[2]);
     }
-  else if (arg[1] == MAKE_FIXNUM(8))
+  else if (arg[0] == MAKE_FIXNUM(8))
     {
       /* get_reg (i) */
-      res = regs[FIXNUM_VAL(arg[2])];
+      res = regs[FIXNUM_VAL(arg[1])];
     }
-  else if (arg[1] == MAKE_FIXNUM(9))
+  else if (arg[0] == MAKE_FIXNUM(9))
     {
       /* set_reg (i, v) */
-      int i = FIXNUM_VAL(arg[2]);
-      regs[i] = arg[3];
+      int i = FIXNUM_VAL(arg[1]);
+      regs[i] = arg[2];
       if (i == -3)
 	rehash_hashq_vectors (regs[-3]);
       res = regs[i];
     }
-  else if (arg[1] == MAKE_FIXNUM(10))
+  else if (arg[0] == MAKE_FIXNUM(10))
     {
       /* suspend (cont) */
-      suspend (arg[2]);
+      suspend (arg[1]);
       res = BOOL_F;
     }
-  else if (arg[1] == MAKE_FIXNUM(11))
+  else if (arg[0] == MAKE_FIXNUM(11))
     {
       /* argdump */
       int i, n;
@@ -1836,20 +2488,20 @@ do_syscall (word n_args, word return_register)
       fprintf (stderr, "\n");
       res = BOOL_F;
     }
-  else if (arg[1] == MAKE_FIXNUM(12))
+  else if (arg[0] == MAKE_FIXNUM(12))
     {
       /* find_referrers */
-      res = find_referrers (arg[2], arg[3]);
+      res = find_referrers (arg[1], arg[2]);
     }
-  else if (arg[1] == MAKE_FIXNUM(13))
+  else if (arg[0] == MAKE_FIXNUM(13))
     {
       /* find_instances */
-      res = find_instances (arg[2], arg[3]);
+      res = find_instances (arg[1], arg[2]);
     }
-  else if (arg[1] == MAKE_FIXNUM(14))
+  else if (arg[0] == MAKE_FIXNUM(14))
     {
       /* transmogrify_objects */
-      transmogrify_objects (arg[2], arg[3]);
+      transmogrify_objects (arg[1], arg[2]);
       res = BOOL_T;
     }
   else
@@ -1902,7 +2554,7 @@ find_markers (val *mem, size_t n)
 {
   int i;
   for (i = 0; i < n; i++)
-    if ((mem[i] & 0xFFFF) == 0xDEAD)
+    if ((mem[i]) == 0x14015140)
       printf ("marker: %p\n", mem+i);
 }
 
@@ -1916,14 +2568,31 @@ main (int argc, char **argv)
 
   if (argc > 1 && !strcmp (argv[1], "-v"))
     {
-      verbose = 1;
+      trace_gc = 1;
       argv++;
       argc--;
     }
 
   if (argc > 1 && !strcmp (argv[1], "-V"))
     {
-      super_verbose = verbose = 1;
+      trace_gc = 1;
+      trace_syscalls = 1;
+      argv++;
+      argc--;
+    }
+
+  if (argc > 1 && !strcmp (argv[1], "-VV"))
+    {
+      trace_gc = 1;
+      trace_syscalls = 1;
+      trace_insns = 1;
+      argv++;
+      argc--;
+    }
+
+  if (argc > 1 && !strcmp (argv[1], "-tg"))
+    {
+      trace_go = 1;
       argv++;
       argc--;
     }
@@ -1974,7 +2643,7 @@ main (int argc, char **argv)
 
   find_markers (space, n/4);
 
-  signal (SIGINT, (void (*) (int))sighandler);
+  // signal (SIGINT, (void (*) (int))sighandler);
 
   boot (((val)space) + head.start - head.origin,
 	space + n/4, space + SPACE_SIZE);

@@ -74,6 +74,11 @@
 	(bytevec-set-u16! wydes idx w)
 	(set! idx (+ idx 1)))
 
+      (define (emit-u32 hi lo)
+	(bytevec-set-u16! wydes idx lo)
+	(bytevec-set-u16! wydes (1+ idx) hi)
+	(set! idx (+ idx 2)))
+
       (define (fixup-s16 idx val)
 	(bytevec-set-u16! wydes idx (+ (bytevec-ref-u16 wydes idx)
 				       (s2val val))))
@@ -113,6 +118,14 @@
 	  (fixup! (lambda ()
 		    (fixup-s16 pos (quotient (- (car lab) (1+ pos)) 2))))))
 
+      (define (emit-u32-with-laboff hi lab)
+	(let ((pos idx))
+	  (bytevec-set-u16! wydes idx 0)
+	  (bytevec-set-u16! wydes (1+ idx) hi)
+	  (fixup! (lambda ()
+		    (fixup-s16 pos (1- (quotient (- (car lab) pos) 2)))))
+	  (set! idx (+ idx 2))))
+
       (define (finish)
 	(for-each (lambda (f) (f)) fixups)
 	(code (bytevec-subvector-u16 wydes 0 idx)
@@ -127,6 +140,10 @@
 	 (emit-s16-with-laboff (car args) (cadr args)))
 	((emit-s16-with-laboff2)
 	 (emit-s16-with-laboff2 (car args) (cadr args)))
+	((emit-u32)
+	 (emit-u32 (car args) (cadr args)))
+	((emit-u32-with-laboff)
+	 (emit-u32-with-laboff (car args) (cadr args)))
 	((litidx)
 	 (litidx (car args)))
 	((make-label)
@@ -155,6 +172,12 @@
 
 (define (cps-asm-s16-with-laboff2 ctxt w label)
   (ctxt 'emit-s16-with-laboff2 w label))
+
+(define (cps-asm-u32-2 ctxt hi lo)
+  (ctxt 'emit-u32 hi lo))
+
+(define (cps-asm-u32-with-laboff ctxt hi lo)
+  (ctxt 'emit-u32-with-laboff hi lo))
 
 (define (cps-asm-u32 ctxt word)
   (cps-asm-u16 ctxt (quotient word #x10000) (remainder word #x10000)))

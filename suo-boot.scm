@@ -20,16 +20,5 @@
 	(values))
       (error "FAIL" val1 val2)))
 
-(define (loop)
-  (:primitive get-reg (res) (-7)
-	      ((:primitive set-reg (unused) (-7 #f)
-			   ((if res (res))))))
-  (loop))
-
-(define (loop)
-  (:primitive get-reg (res) (-7)
-	      ((if res (res))))
-  (loop))
-
 (set-wrong-num-args-hook)
 (repl)

@@ -332,25 +332,23 @@
 (define (suo:bytevec-length-16 v)
   (quotient (u8vector-length v) 2))
 
-(define (suo:bytevec-ref-u16 v i)
-  (+ (* (u8vector-ref v (* 2 i)) #x100)
-     (u8vector-ref v (1+ (* 2 i)))))
+;;; Little endian
 
 (define (suo:bytevec-ref-u16 v i)
-  (+ (* (u8vector-ref v (* 2 i)) #x100)
-     (u8vector-ref v (1+ (* 2 i)))))
+  (+ (* (u8vector-ref v (1+ (* 2 i))) #x100)
+     (u8vector-ref v (* 2 i))))
 
 (define (suo:bytevec-set-u16! v i val)
-  (u8vector-set! v (* 2 i) (quotient val #x100))
-  (u8vector-set! v (1+ (* 2 i)) (remainder val #x100)))
+  (u8vector-set! v (1+ (* 2 i)) (quotient val #x100))
+  (u8vector-set! v (* 2 i) (remainder val #x100)))
 
 (define (suo-bytevec-u8->list bv)
   (u8vector->list bv))
 
 (define (suo-bytevec-u32->list bv)
   (do ((i 0 (1+ i))
-       (res '() (cons (+ (* (suo:bytevec-ref-u16 bv (* 2 i)) #x10000)
-			 (suo:bytevec-ref-u16 bv (1+ (* 2 i))))
+       (res '() (cons (+ (* (suo:bytevec-ref-u16 bv (1+ (* 2 i))) #x10000)
+			 (suo:bytevec-ref-u16 bv (* 2 i)))
 		      res)))
       ((= i (quotient (suo:bytevec-length-16 bv) 2))
        (reverse! res))))
@@ -797,7 +795,7 @@
 	    (u32vector-set! mem i (car w))
 	    (set! bootinfo-idxs (cons i bootinfo-idxs)))))
 
-    (define (bytes->words bytes)
+    (define (bytes->big-endian-words bytes)
       (let loop ((bs bytes)
 		 (ws '())
 		 (w 0)
@@ -815,6 +813,26 @@
 	       (loop (cdr bs)
 		     ws
 		     (+ (ash w 8) (car bs))
+		     (1+ i))))))
+
+    (define (bytes->little-endian-words bytes)
+      (let loop ((bs bytes)
+		 (ws '())
+		 (w 0)
+		 (i 0))
+	(cond ((null? bs)
+	       (reverse (if (zero? i)
+			    ws
+			    (cons w ws))))
+	      ((= i 3)
+	       (loop (cdr bs)
+		     (cons (+ w (ash (car bs) 24)) ws)
+		     0
+		     0))
+	      (else
+	       (loop (cdr bs)
+		     ws
+		     (+ w (ash (car bs) (* i 8)))
 		     (1+ i))))))
 
     (define (emit obj . indirects)
@@ -848,7 +866,7 @@
 		 (ptr (alloc obj (1+ words))))
 	    (apply emit-words ptr
 		   (+ #x80000000 (* len 16) 11)
-		   (bytes->words (suo-bytevec-u8->list obj)))))
+		   (bytes->little-endian-words (suo-bytevec-u8->list obj)))))
 	 ((string? obj)
 	  (let ((suo-str (suo:record suo:string@type
 				     (apply u8vector

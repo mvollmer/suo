@@ -1322,13 +1322,17 @@ Only elements that occur in both lists occur in the result list."
 	    ((and (= i 1) (>= k #xe000))
 	     (+ (bytevec-ref-u16 x 0) (* (- k #x10000) #x10000)))
 	    (else
-	     (pk-dbg 'trunc-to (1+ i))
+	     (pk-mul 'trunc-to (1+ i))
 	     (bignum (bytevec-subvector-u16 x 0 (1+ i))))))))
 
 (define (normalize-bignum b)
   (limbs->bignum (bignum-limbs b)))
 
 (define-macro (pk-dbg . args)
+  (car (last-pair args)))
+  ;;`(pk ,@args))
+
+(define-macro (pk-mul . args)
   (car (last-pair args)))
   ;;`(pk ,@args))
 
@@ -1340,24 +1344,24 @@ Only elements that occur in both lists occur in the result list."
 	  (error:wrong-type n))))
 
 (define (bignum-add a b)
-  (pk-dbg 'add a b)
+  (pk-mul 'add a b)
   (let* ((a-n (bignum-length a))
 	 (b-n (bignum-length b))
 	 (n (1+ (if (> a-n b-n) a-n b-n)))
 	 (z (make-bignum-limbs n)))
-    (pk-dbg a-n b-n n)
+    (pk-mul a-n b-n n)
     (let loop ((i 0)
 	       (k 0))
-      (pk-dbg i)
+      (pk-mul i)
       (if (< i n)
-	  (:primitive add-fixnum2 (hi lo) ((pk-dbg 'a (bignum-ref a i))
-					   (pk-dbg 'b (bignum-ref b i))
-					   (pk-dbg 'k k))
+	  (:primitive add-fixnum2 (hi lo) ((pk-mul 'a (bignum-ref a i))
+					   (pk-mul 'b (bignum-ref b i))
+					   (pk-mul 'k k))
 		      ((begin
-			 (pk-dbg 'res hi lo)
+			 (pk-mul 'res hi lo)
 			 (bytevec-set-u16! z i lo)
 			 (loop (1+ i) hi))))
-	  (limbs->bignum (pk-dbg 'result z))))))
+	  (limbs->bignum (pk-mul 'result z))))))
 
 (define (bignum-sub a b)
   (pk-dbg 'sub a b)
@@ -1382,32 +1386,32 @@ Only elements that occur in both lists occur in the result list."
 (define (bignum-mul a b)
 
   (define (mul a b)
-    (pk-dbg 'mul a b)
+    (pk-mul 'mul a b)
     (let* ((a-n (bignum-length a))
 	   (b-n (bignum-length b))
 	   (n (+ a-n b-n))
 	   (z (make-bignum-limbs-zero n)))
       (let loop-j ((j 0))
-	(pk-dbg 'j j)
+	(pk-mul 'j j)
 	(if (< j a-n)
 	    (let loop-i ((i 0)
 			 (k 0))
-	      (pk-dbg 'i i)
+	      (pk-mul 'i i)
 	      (if (< i b-n)
-		  (:primitive mul-fixnum2 (hi lo) ((pk-dbg 'a (bignum-ref a j))
-						   (pk-dbg 'b (bignum-ref b i))
-						   (pk-dbg 'c
+		  (:primitive mul-fixnum2 (hi lo) ((pk-mul 'a (bignum-ref a j))
+						   (pk-mul 'b (bignum-ref b i))
+						   (pk-mul 'c
 						       (bytevec-ref-u16
 							z (+ i j)))
-						   (pk-dbg 'k k))
+						   (pk-mul 'k k))
 			      ((begin
-				 (pk-dbg 'res hi lo)
+				 (pk-mul 'res hi lo)
 				 (bytevec-set-u16! z (+ i j) lo)
 				 (loop-i (1+ i) hi))))
 		  (begin
 		    (bytevec-set-u16! z (+ i j) k)
 		    (loop-j (1+ j)))))
-	    (limbs->bignum (pk-dbg 'result z))))))
+	    (limbs->bignum (pk-mul 'result z))))))
 
   (if (bignum-negative? a)
       (if (bignum-negative? b)
@@ -1429,17 +1433,17 @@ Only elements that occur in both lists occur in the result list."
 	  #t))))
 
 (define (bignum-less-than a b)
-  (pk-dbg '< a b)
+  (pk-mul '< a b)
   (let* ((a-n (bignum-length a))
 	 (b-n (bignum-length b))
 	 (n (if (> a-n b-n) a-n b-n)))
     (let loop ((i (1- n)))
-      (pk-dbg 'i i)
+      (pk-mul 'i i)
       (if (< i 0)
 	  #f
 	  (let ((v-a (if (= i (1- n)) (bignum-sref a i) (bignum-ref a i)))
 		(v-b (if (= i (1- n)) (bignum-sref b i) (bignum-ref b i))))
-	    (pk-dbg 'a v-a 'b v-b)
+	    (pk-mul 'a v-a 'b v-b)
 	    (cond ((< v-a v-b)
 		   #t)
 		  ((= v-a v-b)
@@ -1475,11 +1479,14 @@ Only elements that occur in both lists occur in the result list."
 	   (r (->bignum (* ww v-shift))))
       (let loop ((ww ww)
 		 (r r))
+	(pk-dbg 'r? r)
 	(pk-dbg 'ww? ww)
 	(if (> r q)
 	    (loop (- ww 1)
 		  (->bignum (- r v-shift)))
-	    (values ww (->bignum (- q r)))))))
+	    (begin
+	      (pk-dbg 'q q 'r r)
+	      (values ww (->bignum (- q r))))))))
 
   (define (non-zero-bignum-length v)
     (let loop ((n (bignum-length v)))
@@ -1689,6 +1696,15 @@ Only elements that occur in both lists occur in the result list."
 	((= i len))
       (output-char port (string-ref str i)))))
 
+(define (output-padded-string port pad-len pad-char str)
+  (let ((len (string-length str)))
+    (do ((i (- pad-len len) (- i 1)))
+	((<= i 0))
+      (output-char port pad-char))
+    (do ((i 0 (+ i 1)))
+	((= i len))
+      (output-char port (string-ref str i)))))
+
 (define (input-char port)
   (port 1 the-eof-object))
 
@@ -1830,16 +1846,21 @@ Only elements that occur in both lists occur in the result list."
 
 (define (print-bytevec v state)
   (let ((port (print-state-port state))
-	(n (bytevec-length-8 v)))
+	(n (bytevec-length-16 v))
+	(n8 (bytevec-length-8 v)))
     (output-string port "/")
     (do ((i 0 (+ i 1)))
 	((= i n))
-      (if (and (> i 0)
-	       (zero? (remainder i 2)))
-	  (output-string port "/"))
-      (output-char port (integer->digit (quotient (bytevec-ref-u8 v i) 16)))
-      (output-char port (integer->digit (remainder (bytevec-ref-u8 v i) 16))))
-    (output-string port "/")))
+      (output-padded-string port
+			    4 #\0
+			    (number->string (bytevec-ref-u16 v i) 16))
+      (output-string port "/"))
+    (cond ((odd? n8)
+	   (output-padded-string port
+				 2 #\0
+				 (number->string
+				  (bytevec-ref-u8 v (1- n8)) 16))
+	   (output-string port "/")))))
 
 (define (print-symbol-name n state)
   (let ((port (print-state-port state)))
@@ -2210,6 +2231,20 @@ Only elements that occur in both lists occur in the result list."
 	  (primop make-code insn-length lit-length)
 	  (error:wrong-type lit-length))
       (error:wrong-type insn-length)))
+
+(define (code-insn-ref-u8 code idx)
+  (if (code? code)
+      (if (and (<= 0 idx) (< idx (* 4 (code-insn-length code))))
+	  (primop bytevec-ref-u8 code idx)
+	  (error:out-of-range idx))
+      (error:wrong-type code)))
+
+(define (code-insn-ref-u16 code idx)
+  (if (code? code)
+      (if (and (<= 0 idx) (< idx (* 2 (code-insn-length code))))
+	  (primop bytevec-ref-u16 code idx)
+	  (error:out-of-range idx))
+      (error:wrong-type code)))
 
 (define (code-insn-set-u16! code idx val)
   (if (code? code)
@@ -3508,6 +3543,13 @@ Only elements that occur in both lists occur in the result list."
 	       (inspect-loop obj
 			     ctxt choices (max 0 (- offset 10))
 			     history))
+	      ((eq? cmd 'd)
+	       (if (code? obj)
+		   (pk '(discode obj))
+		   (begin
+		     (display "not code")
+		     (newline)
+		     (loop))))
 	      (else
 	       (display "huh?")
 	       (newline)
