@@ -3192,17 +3192,20 @@ Only elements that occur in both lists occur in the result list."
 
 ;;; Books, sections, and pages.
 
-;; BOOKs contain the bulk of the code in a Suo system, in a literate
+;; Books contain the bulk of the code in a Suo system, in a literate
 ;; programming kind of way that allows for interactive and incremental
 ;; development.
 ;;
 ;; The basic concept is that of a SECTION: A section contains some
-;; descriptive text, a set of properties, a list of sub-sections, and
-;; a list of expressions.  Sections form a tree: a section can only be
+;; descriptive text, a set of properties, a list of expressions, and a
+;; list of sub-sections.  Sections form a tree: a section can only be
 ;; a sub-section of at most one other section.
 ;;
-;; A book is simply a top-level section.  A page is a section with no
+;; A BOOK is simply a top-level section.  A PAGE is a section with no
 ;; sub-sections.
+;;
+;; The text of a section is a general commentary on the code that
+;; follows.
 ;;
 ;; The properties of a section are used to determine certain defaults
 ;; for its sub-sections.  The most common properties are 'directory',
@@ -3210,74 +3213,99 @@ Only elements that occur in both lists occur in the result list."
 ;; are compiled, and 'open', which determines which directories are
 ;; opened.
 ;;
+;; The list of expressions contain the actual code of the section.
+;; Each expression is either a top-level definition or a action.
+;;
+;; The sub-sections inherit the properties of their parent, but are
+;; otherwise independent.  The tree-structure of a book is mostly
+;; useful for guiding the reader.  Typically, sections either have
+;; expressions, or sub-sections, but not both.
+;;
 ;; A section can actually contain multiple versions of its content.
-;; Two versions have a specific meaning: the 'current' version is the
-;; one that has been committed most recently, and the 'proposed'
-;; version is the one waiting to be comitted.
+;; Right now, only two versions with a specific meaning are allowed:
+;; the 'current' version is the one that has been committed most
+;; recently, and the 'proposed' version is the one waiting to be
+;; comitted.  Preparing a new proposed version of one or more sections
+;; and then committing them is the way to make changes to a book.
 ;;
-;; 'Commiting' a section without any sub-sections means compiling the
-;; expressions of its 'proposed' content and installing the result.
-;; When a section has sub-sections, the sub-sections are compiled
-;; first, but not yet installed.  When all compilations succeed, all
-;; compilation results are installed, together with making the
-;; proposed version the new current one.  If there is an error in any
-;; of the compilations, nothing is installed.
+;; The rules for what happens when you commit a section are designed
+;; so that you can commit a whole book in one go and have things work.
 ;;
-;; Thus, a commit operation applies to a set of sections as a unit.
-;; When looking at properties, they are taken from the proposed
-;; version for sections that are part of the commit (when they have a
-;; proposed version), and from the current version of sections that
-;; are not part of the commit (whether they have a proposed version or
-;; not).
+;; Committing a section will include all its direct and indirect
+;; sub-sections in the commit that have a proposed version.
 ;;
-;; Committing a section that has no proposed version does nothing,
-;; except when the properties of it or one of its parents have changed
-;; such that the current directory or the list of open directories are
-;; now different.  Then it is recompiled nevertheless.
+;; First, the expressions of all involved sections are analyzed as to
+;; what top-level definitions they contain and what top-level
+;; definitions they use.  This information is used to split the commit
+;; into batches so that a function definition only uses macros from
+;; other batches.  Batches will be made as big as possible.  A section
+;; can not be split accros batches.
 ;;
-;; The result of compiling a section content contains definitions and
-;; actions.  When installing the result, the old set of definitions
-;; (from the previously current version) are updated to the new set.
-;; When a definition is only in the new set, it is simply entered into
-;; its directory.  When a definition is only in the old set, it is
-;; simply removed.  When a defintion is both in the old and the new
-;; set, it is updated according to its type.  When the types of the
-;; old and new definition do not agree, the old one is removed and the
-;; new one installed (with a loud complaint).
+;; The batches are then committed in a order so that a macro
+;; definition is committed before the functions that use it.  If there
+;; is no way to split the commit into batches, or there is no suitable
+;; order to commit them in, an error results.
+;;
+;; Commiting a batch happens in three steps: declaring, compiling, and
+;; installing.
+;;
+;; First, all top-level definitions are declared: a entry is created
+;; for them in the directory that has the correct type, etc, but a
+;; useless value.  Existing entries are check for compatibility and
+;; updated for the new definition.  Thus, all top-level definitions
+;; are visible already during the compilation step.  When there is an
+;; error in the middle of this step (such as a existing definition
+;; that can not be compatibly updated), processing stops, but all
+;; already created or updated entries are left in place.
+;;
+;; Then, the value expressions of all top-level definitions and the
+;; actions are compiled (but not evaluated).
+;;
+;; When the this compilation has succeeded, the compiled expressions
+;; are evaluated, which results in the new values finally being entered
+;; into the directories.
+;;
+;; When a old entry already exists for a top-level definition,
+;; different things happen depending on the type of the definition.
 ;;
 ;; When updating a variable, nothing happens.  In particular, the
-;; default value given in the new definition is ignored.
+;; default value given in the new definition is ignored.  The
+;; expression for it is compiled, but not evaluated.
 ;;
-;; When updating a procedure, the procedure is changed 'in-place' to
-;; the new one, without losing the identity of the old procedure.
-;; That is, if you have stored the old procedure object in some data
-;; structure, that old procedure will cange its behavior to that of
-;; the new procedure.
+;; When updating a function, the function is changed 'in-place' to the
+;; new one, without losing the identity of the old function.  That is,
+;; if you have stored the old function object in some data structure,
+;; that old function will cange its behavior to that of the new
+;; function.
 ;;
-;; When updating a macro, the new transformer replaces the old.
+;; When updating a macro, the new transformer replaces the old.  No
+;; automatic recompilation of users of the macro takes place.
 ;;
-;; XXX - these updating rules are going to get much more refined and
-;;       will cover also record types.
+;; When updating a record type, all instances of the old type are
+;; transformed into instances of the new type.
 ;;
-;; After updating the defintions, the actions are simply executed in
-;; sequence.  Since actions are carried out every time a section is
-;; committed (even when they didn't change from the previous version)
-;; they should be idem-potent: running them twice in a row must be
-;; equivalent to running them just once.
+;; The actions are simply evaluated inbetween handling the top-level
+;; definitions, according to their place in the section expressions.
+;; Their result values are ignored.
 ;;
-;; When compiling a section content, the environment needs to be
+;; If the expressions of the current batch have been executed
+;; successfully, the proposed versions of the sections become the
+;; current versions.
+;;
+;;
+;; When compiling the section expressions, the environment needs to be
 ;; defined.  For this, a current directory and a list of open
 ;; directories are found by going up the section tree and looking for
-;; 'directory', 'open', and 'open-only' properties.
+;; 'directory', 'open', and 'open-also' properties.
 ;;
 ;; The current directory is determined by the first 'directory'
 ;; property encountered on the way up to the top-level section.
 ;;
 ;; The list of open directories starts out empty, and the directories
-;; listed in the 'open' properties are collected while going up.
+;; listed in the 'open-also' properties are collected while going up.
 ;; Properties that are farther away from the current section appear
-;; further towards the start of the list.  When a 'open-only' property
-;; is encountered, it is treated as a 'open' property but collecting
+;; further towards the start of the list.  When a 'open' property is
+;; encountered, it is treated as a 'open-also' property but collecting
 ;; stops at that level of the section tree.
 ;;
 ;; The names of the new definitions are interpreted relative to the
@@ -3292,9 +3320,63 @@ Only elements that occur in both lists occur in the result list."
 ;; commit set.
 ;;
 ;; For example, when moving section S from P1 to P2, the proposed
-;; sub-sections of both P1 and P2 and modified to reflect the change
+;; sub-sections of both P1 and P2 are modified to reflect the change
 ;; and the change can only be committed when all of S, P1 and P2 are
 ;; part of the commit set.
+;;
+;;
+;; For interchange with the outside world, sections can be serialized
+;; in a line-orented format.
+;;
+;; The different parts of a section (description, properties,
+;; expressions) are introduced by a header lines starting with "@*",
+;; "@=", and "@@" respectively.  The description part is mandatory,
+;; even when it is empty, but the properties and expression parts can
+;; be ommitted.
+;;
+;; A section ends when the next one starts.  The tree-structure of
+;; sections is expressed by specifying the depth of a section with the
+;; number of stars in its "@*" header.
+;;
+;; The description of a section can include a title.  This title is
+;; written on the header line directly.
+;;
+;; A section can have a unique identifier in its serialized form.
+;; This identifier is used to determine which section to update when
+;; reading in a serialized section.  When there is no identifier, a
+;; new section is created.
+;;
+;; Thus, a section on level two with a sub-section might look like
+;; this:
+;;
+;;     @**    An example section                              [@1567]
+;;
+;;     ;; This is the description.  It is written as a comment to make
+;;     ;; editing with Emacs easier.
+;;
+;;     @=
+;;     (open-also /web/bokeh)
+;;
+;;     @@
+;;
+;;     (define (foo) 
+;;       (create-bokeh 1 2 3))
+;;
+;;     @***   A sub-section                                   [@213]
+;;     @@
+;;
+;;     (define bar (foo))
+;;
+;;
+;; The two stars on the first line signify that this section is at
+;; level two of the book, and the three stars make "A sub-section" a
+;; sub-section of it.
+;;
+;; The "[identifier]" parts of the header lines contain the unique
+;; identifiers.  They have no significance except to associate
+;; sections with their origins when the are read back in.  Once a
+;; section has acquired an identifier, it never changes.
+;;
 ;;
 ;; XXX - in the future, sections should also remember which
 ;;       definitions of other sections they use, so that smart
