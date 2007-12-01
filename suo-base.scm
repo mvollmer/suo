@@ -748,8 +748,11 @@ Only elements that occur in both lists occur in the result list."
       '()))
 
 (define-macro (define-record name . args)
-  (let* ((type-name (symbol-append name '@type))
-	 (pred-name (symbol-append name '?))
+  (let* ((type-name (keyword-ref args :type-name
+				 (symbol-append name '@type)))
+	 (pred-name (keyword-ref args :predicate-name
+				 (symbol-append name '?)))
+	 (prefix (keyword-ref args :prefix name))
 	 (slot-descs (keyword-ref args :slots args))
 	 (slot-code (map (lambda (slot)
 			   (let ((name (if (pair? slot) (car slot) slot)))
@@ -775,7 +778,7 @@ Only elements that occur in both lists occur in the result list."
        (define (,pred-name x) (record-is-a? x ,type-name))
        ,@(map (lambda (slot)
 		(let* ((slot-name (if (pair? slot) (car slot) slot))
-		       (accessor-name (symbol-append name '- slot-name)))
+		       (accessor-name (symbol-append prefix '- slot-name)))
 		  `(define-function ,accessor-name 
 		     (record-type-accessor ,type-name ',slot-name))))
 	      slot-descs)
@@ -1750,6 +1753,23 @@ Only elements that occur in both lists occur in the result list."
 	    (else
 	     (error "not supported"))))))
 
+(define (make-string-input-port str)
+  (let ((pos 0))
+    (lambda (op arg)
+      (cond ((= op 1)
+	     (if (>= pos (string-length str))
+		 arg
+		 (let ((ch (string-ref str pos)))
+		   (set! pos (1+ pos))
+		   ch)))
+	    ((= op 2)
+	     (if (not (eof-object? arg))
+		 (set! pos (1- pos))))
+	    ((= op 0)
+	     (error "can't write to input port"))
+	    (else
+	     (error "not supported"))))))
+
 (define current-input-port (make-parameter (make-sys-input-port 0)))
 (define current-output-port (make-parameter (make-sys-output-port 1)))
 
@@ -2058,7 +2078,12 @@ Only elements that occur in both lists occur in the result list."
 	     (list->string (reverse chars)))
 	    ((eq? ch #\\)
 	     (let ((ch (input-char port)))
-	       (loop (input-char port) (cons ch chars))))
+	       (let ((ch (case ch
+			   ((#\n)
+			    #\newline)
+			   (else
+			    ch))))
+		 (loop (input-char port) (cons ch chars)))))
 	  ((eof-object? ch)
 	   (error "unexpected end of input in string literal"))
 	    (else
@@ -2132,8 +2157,10 @@ Only elements that occur in both lists occur in the result list."
 	   (putback-char (parse-state-port state) ch)
 	   (parse-number-or-pathname state)))))
 
-(define (read)
-  (parse (make-parse-state (current-input-port))))
+(define (read . opt-port)
+  (parse (make-parse-state (if (null? opt-port)
+			       (current-input-port)
+			       (car opt-port)))))
 
 (define (read-line)
   (let loop ((res '())
@@ -3190,201 +3217,17 @@ Only elements that occur in both lists occur in the result list."
    (else
     form)))
 
-;;; Books, sections, and pages.
 
-;; Books contain the bulk of the code in a Suo system, in a literate
-;; programming kind of way that allows for interactive and incremental
-;; development.
-;;
-;; The basic concept is that of a SECTION: A section contains some
-;; descriptive text, a set of properties, a list of expressions, and a
-;; list of sub-sections.  Sections form a tree: a section can only be
-;; a sub-section of at most one other section.
-;;
-;; A BOOK is simply a top-level section.  A PAGE is a section with no
-;; sub-sections.
-;;
-;; The text of a section is a general commentary on the code that
-;; follows.
-;;
-;; The properties of a section are used to determine certain defaults
-;; for its sub-sections.  The most common properties are 'directory',
-;; which specifies which directory should be current when expressions
-;; are compiled, and 'open', which determines which directories are
-;; opened.
-;;
-;; The list of expressions contain the actual code of the section.
-;; Each expression is either a top-level definition or a action.
-;;
-;; The sub-sections inherit the properties of their parent, but are
-;; otherwise independent.  The tree-structure of a book is mostly
-;; useful for guiding the reader.  Typically, sections either have
-;; expressions, or sub-sections, but not both.
-;;
-;; A section can actually contain multiple versions of its content.
-;; Right now, only two versions with a specific meaning are allowed:
-;; the 'current' version is the one that has been committed most
-;; recently, and the 'proposed' version is the one waiting to be
-;; comitted.  Preparing a new proposed version of one or more sections
-;; and then committing them is the way to make changes to a book.
-;;
-;; The rules for what happens when you commit a section are designed
-;; so that you can commit a whole book in one go and have things work.
-;;
-;; Committing a section will include all its direct and indirect
-;; sub-sections in the commit that have a proposed version.
-;;
-;; First, the expressions of all involved sections are analyzed as to
-;; what top-level definitions they contain and what top-level
-;; definitions they use.  This information is used to split the commit
-;; into batches so that a function definition only uses macros from
-;; other batches.  Batches will be made as big as possible.  A section
-;; can not be split accros batches.
-;;
-;; The batches are then committed in a order so that a macro
-;; definition is committed before the functions that use it.  If there
-;; is no way to split the commit into batches, or there is no suitable
-;; order to commit them in, an error results.
-;;
-;; Commiting a batch happens in three steps: declaring, compiling, and
-;; installing.
-;;
-;; First, all top-level definitions are declared: a entry is created
-;; for them in the directory that has the correct type, etc, but a
-;; useless value.  Existing entries are check for compatibility and
-;; updated for the new definition.  Thus, all top-level definitions
-;; are visible already during the compilation step.  When there is an
-;; error in the middle of this step (such as a existing definition
-;; that can not be compatibly updated), processing stops, but all
-;; already created or updated entries are left in place.
-;;
-;; Then, the value expressions of all top-level definitions and the
-;; actions are compiled (but not evaluated).
-;;
-;; When the this compilation has succeeded, the compiled expressions
-;; are evaluated, which results in the new values finally being entered
-;; into the directories.
-;;
-;; When a old entry already exists for a top-level definition,
-;; different things happen depending on the type of the definition.
-;;
-;; When updating a variable, nothing happens.  In particular, the
-;; default value given in the new definition is ignored.  The
-;; expression for it is compiled, but not evaluated.
-;;
-;; When updating a function, the function is changed 'in-place' to the
-;; new one, without losing the identity of the old function.  That is,
-;; if you have stored the old function object in some data structure,
-;; that old function will cange its behavior to that of the new
-;; function.
-;;
-;; When updating a macro, the new transformer replaces the old.  No
-;; automatic recompilation of users of the macro takes place.
-;;
-;; When updating a record type, all instances of the old type are
-;; transformed into instances of the new type.
-;;
-;; The actions are simply evaluated inbetween handling the top-level
-;; definitions, according to their place in the section expressions.
-;; Their result values are ignored.
-;;
-;; If the expressions of the current batch have been executed
-;; successfully, the proposed versions of the sections become the
-;; current versions.
-;;
-;;
-;; When compiling the section expressions, the environment needs to be
-;; defined.  For this, a current directory and a list of open
-;; directories are found by going up the section tree and looking for
-;; 'directory', 'open', and 'open-also' properties.
-;;
-;; The current directory is determined by the first 'directory'
-;; property encountered on the way up to the top-level section.
-;;
-;; The list of open directories starts out empty, and the directories
-;; listed in the 'open-also' properties are collected while going up.
-;; Properties that are farther away from the current section appear
-;; further towards the start of the list.  When a 'open' property is
-;; encountered, it is treated as a 'open-also' property but collecting
-;; stops at that level of the section tree.
-;;
-;; The names of the new definitions are interpreted relative to the
-;; current directory.  When remembering these names, their full
-;; absolute pathnames are stored, so the you can cleanly switch
-;; current directories from one version to the next.
-;;
-;; The list of sub-sections and the parent reference of a section are
-;; also versioned.  When commiting a set of sections, the set must be
-;; consistent with respect to the tree of sections: when the parent of
-;; a section changes, the old and new parents must be part of the
-;; commit set.
-;;
-;; For example, when moving section S from P1 to P2, the proposed
-;; sub-sections of both P1 and P2 are modified to reflect the change
-;; and the change can only be committed when all of S, P1 and P2 are
-;; part of the commit set.
-;;
-;;
-;; For interchange with the outside world, sections can be serialized
-;; in a line-orented format.
-;;
-;; The different parts of a section (description, properties,
-;; expressions) are introduced by a header lines starting with "@*",
-;; "@=", and "@@" respectively.  The description part is mandatory,
-;; even when it is empty, but the properties and expression parts can
-;; be ommitted.
-;;
-;; A section ends when the next one starts.  The tree-structure of
-;; sections is expressed by specifying the depth of a section with the
-;; number of stars in its "@*" header.
-;;
-;; The description of a section can include a title.  This title is
-;; written on the header line directly.
-;;
-;; A section can have a unique identifier in its serialized form.
-;; This identifier is used to determine which section to update when
-;; reading in a serialized section.  When there is no identifier, a
-;; new section is created.
-;;
-;; Thus, a section on level two with a sub-section might look like
-;; this:
-;;
-;;     @**    An example section                              [@1567]
-;;
-;;     ;; This is the description.  It is written as a comment to make
-;;     ;; editing with Emacs easier.
-;;
-;;     @=
-;;     (open-also /web/bokeh)
-;;
-;;     @@
-;;
-;;     (define (foo) 
-;;       (create-bokeh 1 2 3))
-;;
-;;     @***   A sub-section                                   [@213]
-;;     @@
-;;
-;;     (define bar (foo))
-;;
-;;
-;; The two stars on the first line signify that this section is at
-;; level two of the book, and the three stars make "A sub-section" a
-;; sub-section of it.
-;;
-;; The "[identifier]" parts of the header lines contain the unique
-;; identifiers.  They have no significance except to associate
-;; sections with their origins when the are read back in.  Once a
-;; section has acquired an identifier, it never changes.
-;;
-;;
-;; XXX - in the future, sections should also remember which
-;;       definitions of other sections they use, so that smart
-;;       re-compilations can be triggered when macros change etc.
-;;
-;; XXX - more version control things should be defined: logs, diffing,
-;;       branching, merging,
+;;; Interrupts
 
+(define (set-interrupt-handler handler)
+  (primop syscall 9 -8 handler))
+
+(define (get-interrupt-handler)
+  (primop syscall 8 -8))
+
+(define (return-from-interrupt state)
+  (primop syscall 15 state))
 
 ;;; Repl
 
@@ -3466,6 +3309,9 @@ Only elements that occur in both lists occur in the result list."
 
 (define p values)
 
+(define (interrupt-handler state)
+  (error "interrupted"))
+
 (define (repl)
   (call-cc
    (lambda (exit)
@@ -3479,6 +3325,7 @@ Only elements that occur in both lists occur in the result list."
 	 (lambda ()
 	   (call-v (lambda ()
 		     (display "suo> ")
+		     (set-interrupt-handler interrupt-handler)
 		     (let ((form (read-line)))
 		       (cond ((eof-object? form)
 			      (newline)

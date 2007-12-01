@@ -701,7 +701,7 @@ word *reg_end;
 void discode (FILE *f, val code);
 
 void
-do_GO (val code)
+do_GO_with_offset (val code, int offset)
 {
   if (trace_go)
     {
@@ -711,8 +711,14 @@ do_GO (val code)
     }
 
   reg_code = code;
-  reg_pc = ((word *)reg_code) + 1;
+  reg_pc = ((word *)reg_code) + offset;
   reg_lit = ((word *)reg_code) + 1 + CODE_INSN_LENGTH (reg_code);
+}
+
+void
+do_GO (val code)
+{
+  do_GO_with_offset (code, 1);
 }
 
 void do_syscall (word n_args, word return_register);
@@ -1723,6 +1729,7 @@ scan (val *ptr)
 }
 
 void rehash_hashq_vectors (val list);
+void invoke_interrupt_handler ();
 
 void
 gc (word size)
@@ -1733,8 +1740,10 @@ gc (word size)
 
   if (reg_end == 0)
     {
-      fprintf (stderr, "INTERRUPT\n");
+      /* Interrupt
+       */
       reg_end = spaces[active_space] + SPACE_SIZE;
+      invoke_interrupt_handler ();
       return;
     }
 
@@ -2376,6 +2385,8 @@ dump_regs ()
 
 #define MAX_ARGS 16
 
+void return_from_interrupt (val state);
+
 void
 do_syscall (word n_args, word return_register)
 {
@@ -2504,6 +2515,13 @@ do_syscall (word n_args, word return_register)
       transmogrify_objects (arg[1], arg[2]);
       res = BOOL_T;
     }
+  else if (arg[0] == MAKE_FIXNUM(15))
+    {
+      return_from_interrupt (arg[1]);
+      /* Do not touch the return_register
+       */
+      return;
+    }
   else
     res = BOOL_T;
 
@@ -2539,6 +2557,65 @@ boot (val closure, val *free, val *end)
   do_GO (RECORD_REF(closure,0));
 
   run_cpu ();
+}
+
+void
+invoke_interrupt_handler ()
+{
+  /* We create an object that stores the current state.  This object
+     can be used with the return-from-interrupt instruction.  The
+     object contains the living registers and the current code
+     objects.
+  */
+  
+  int n_regs = 256;
+  int n_elts = 2 + n_regs;
+  int i;
+  val state;
+  val handler = regs[-8];
+
+  if (!HEAP_P (handler))
+    return;
+
+  regs[-8] = BOOL_F;
+
+  /* Allocate vector
+   */
+  if (reg_free + n_elts + 1 > reg_end)
+    gc (n_elts + 1);
+  state = (val)reg_free;
+  reg_dst = reg_free;
+  reg_free += n_elts + 1;
+  reg_dst[0] = (n_elts << 4) | 0x80000003;
+  
+  /* Fill with state
+   */
+  VECTOR_SET (state, 0, reg_code);
+  VECTOR_SET (state, 1, MAKE_FIXNUM (reg_pc - (val *)reg_code));
+  for (i = 0; i < n_regs; i++)
+    VECTOR_SET (state, 2+i, regs[i]);
+
+  /* Setup arguments for handler
+   */
+  regs[0] = MAKE_FIXNUM (2*3+0);
+  regs[1] = handler;
+  regs[2] = BOOL_F;
+  regs[3] = state;
+  
+  do_GO (RECORD_REF (handler, 0));
+}
+
+void
+return_from_interrupt (val state)
+{
+  int i, n_regs;
+  
+  n_regs = 256;
+  for (i = 0; i < n_regs; i++)
+    regs[i] = VECTOR_REF (state, 2+i);
+
+  do_GO_with_offset (VECTOR_REF (state, 0),
+		     FIXNUM_VAL (VECTOR_REF (state, 1)));
 }
 
 void
@@ -2643,7 +2720,7 @@ main (int argc, char **argv)
 
   find_markers (space, n/4);
 
-  // signal (SIGINT, (void (*) (int))sighandler);
+  signal (SIGINT, (void (*) (int))sighandler);
 
   boot (((val)space) + head.start - head.origin,
 	space + n/4, space + SPACE_SIZE);
