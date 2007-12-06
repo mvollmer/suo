@@ -1753,6 +1753,23 @@ Only elements that occur in both lists occur in the result list."
 	    (else
 	     (error "not supported"))))))
 
+(define (make-string-output-port)
+  (let ((buf (make-string 1024))
+	(pos 0))
+    (lambda (op arg)
+      (cond ((eq? op 'str)
+	     (substring buf 0 pos))
+	    ((= op 0)
+	     (string-set! buf pos arg)
+	     (set! pos (1+ pos)))
+	    ((= op 1)
+	     (error "can't read from output port"))
+	    (else
+	     (error "not supported"))))))
+
+(define (get-string-output-port-string p)
+  (p 'str #f))
+
 (define (make-string-input-port str)
   (let ((pos 0))
     (lambda (op arg)
@@ -1769,7 +1786,7 @@ Only elements that occur in both lists occur in the result list."
 	     (error "can't write to input port"))
 	    (else
 	     (error "not supported"))))))
-
+    
 (define current-input-port (make-parameter (make-sys-input-port 0)))
 (define current-output-port (make-parameter (make-sys-output-port 1)))
 
@@ -2869,11 +2886,13 @@ Only elements that occur in both lists occur in the result list."
 
 (define (list-entry name ent verbose)
   (let* ((value (entry-value ent))
-	 (type (cond ((directory? value) #\d)
-		     ((variable? value)  #\v)
-		     ((macro? value)     #\m)
-		     ((not value)        #\!)
-		     (else               #\?))))
+	 (type (cond ((directory? value)   #\d)
+		     ((variable? value)    #\v)
+		     ((closure? value)     #\p)
+		     ((record-type? value) #\t)
+		     ((macro? value)       #\m)
+		     ((not value)          #\!)
+		     (else                 #\?))))
     (display type)
     (display #\space)
     (display name)

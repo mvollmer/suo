@@ -216,19 +216,17 @@
 			     (scont-expressions c))))
     (set! (scont-properties c2) (scont-properties c))
     (set! (scont-parent c2) (scont-parent c))
-    (set! (scont-children c2) (scont-children c))))
+    (set! (scont-children c2) (scont-children c))
+    c2))
 
 (define-record section
   :slots (id (committed #f) (proposed #f) (errors #f))
-  :constructor (section id))
+  :constructor (section id committed))
 
 (define (section-proposed! s)
-  (or (section-proposed s)
-      (let ((c (if (section-committed s)
-		   (scont-copy (section-committed s))
-		   (section-content "" ""))))
-	(set! (section-proposed s) c)
-	c)))
+  (if (not (section-proposed s))
+      (set! (section-proposed s) (scont-copy (section-committed s))))
+  (section-proposed s))
 
 (define sections (make-hashq-table 31))
 
@@ -242,33 +240,55 @@
   (if (not id)
       (find-section (next-section-id))
       (or (hashq-ref sections id)
-	  (let ((s (section id)))
-	    (section-proposed! s)
+	  (let ((s (section id (section-content "" ""))))
 	    (hashq-set! sections id s)
 	    s))))
 
-(define section-version (make-parameter section-proposed))
+(define (section-tip s)
+  (or (section-proposed s)
+      (section-committed s)))
 
 (define (section-parent s)
-  (scont-parent ((section-version) s)))
+  (scont-parent (section-tip s)))
 
 (define (section-children s)
-  (scont-children ((section-version) s)))
+  (scont-children (section-tip s)))
 
 (define (section-description s)
-  (scont-description ((section-version) s)))
+  (scont-description (section-tip s)))
 
 (define (section-properties s)
-  (scont-properties ((section-version) s)))
+  (scont-properties (section-tip s)))
 
 (define (section-expressions s)
-  (scont-expressions ((section-version) s)))
+  (scont-expressions (section-tip s)))
 
 (define (section-depth s)
   (if (section-parent s)
       (1+ (section-depth (section-parent s)))
       1))
 
+(define (section-inherited-property s prop)
+  (or (assq-ref (section-properties s) prop)
+      (and (section-parent s)
+	   (section-inherited-property (section-parent s) prop))))
+
+(define (section-directory s)
+  (and=> (section-inherited-property s 'directory) car))
+
+(define (section-open-directories s)
+
+  (define (open-dirs s tail)
+    (let* ((opens (assq-ref (section-properties s) 'open))
+	   (open-alsos (or (assq-ref (section-properties s) 'open-also) '()))
+	   (res (append (if opens opens '()) open-alsos tail)))
+      (if (or opens
+	      (not (section-parent s)))
+	  res
+	  (open-dirs (section-parent s) res))))
+
+  (open-dirs s '()))
+	  
 (define (write-section s)
   ;; time for some routines for formatted output, I s'pose...
 
@@ -311,8 +331,7 @@
 	  (newline)))
     
     (cond ((not (null? (section-properties s)))
-	   (display "@=")
-	   (newline)
+	   (display "=\n")
 	   (for-each (lambda (p)
 		       (write p)
 		       (newline))
@@ -320,17 +339,21 @@
 	   (newline)))
     
     (cond ((not (zero? (string-length (section-expressions s))))
-	   (display "@@")
-	   (newline)
+	   (display "-\n")
 	   (display-with-newline (section-expressions s))))
     
+    (cond ((section-errors s)
+	   (display "!\n")
+	   (display-with-newline (section-errors s))
+	   (newline)))
+
     (for-each write-one (section-children s)))
 
   (write-one s)
   (display "@q\n"))
 
 (define (section-propose-field! s accessor value)
-  (if (not (equal? value (and=> (section-comitted s) accessor)))
+  (if (not (equal? value (accessor (section-tip s))))
       (set! (accessor (section-proposed! s)) value)))
 
 (define (section-propose-description! s desc)
@@ -495,11 +518,17 @@
 		 (read-sections (read-content sec title) new-parents
 				sec (or top-section sec))))))))
 
+  (define (chunk-header? line)
+    (or (string-prefix? line "@")
+	(equal? line "=\n")
+	(equal? line "-\n")
+	(equal? line "!\n")))
+
   (define (read-chunk)
     (let loop ((text ""))
       (let ((line (read-text-line)))
 	(cond ((or (eof-object? line)
-		   (string-prefix? line "@"))
+		   (chunk-header? line))
 	       (values text line))
 	      (else
 	       (loop (string-append text line)))))))
@@ -510,7 +539,7 @@
         (section-propose-description! sec (string-append title "\n" desc))
 	header))
     (define (gobble-props header)
-      (if (string-prefix? header "@=")
+      (if (equal? header "=\n")
 	  (let-values1 (props header (read-chunk))
 	    (section-propose-properties! sec (read-forms-from-string props))
 	    header)
@@ -518,14 +547,19 @@
 	    (section-propose-properties! sec '())
 	    header)))
     (define (gobble-expressions header)
-      (if (string-prefix? header "@@")
+      (if (equal? header "-\n")
 	  (let-values1 (exprs header (read-chunk))
 	    (section-propose-expressions! sec exprs)
 	    header)
 	  (begin
 	    (section-propose-expressions! sec "")
 	    header)))
-    (gobble-expressions (gobble-props (gobble-desc))))
+    (define (gobble-errors header)
+      (if (equal? header "!\n")
+	  (let-values1 (exprs header (read-chunk))
+	    header)
+	  header))
+    (gobble-errors (gobble-expressions (gobble-props (gobble-desc)))))
 
   (define (gobble-until-end)
     (let loop ()
@@ -544,24 +578,107 @@
 (define (read-section-and-write)
   (write-section (read-section)))
 
-@*     Foo                                                           [@123 #.]
+(define (eval-string str)
+  (let ((p (make-string-input-port str)))
+    (let loop ((res (if #f #f)))
+      (let ((f (read p)))
+	(cond ((eof-object? f)
+	       res)
+	      (else
+	       (loop (eval f))))))))
+
+(define (ensure-directory path)
+  (if (not (and=> (and=> (lookup* path) entry-value) directory?))
+      (make-directory path)))
+
+(define (call-with-current-directory path proc)
+  (if path
+      (let* ((abs (pathname-concat (current-directory-path) path))
+	     (e (lookup* abs)))
+	(cond ((directory? (entry-value e))
+	       (call-p current-directory e
+		       (lambda ()
+			 (call-p current-directory-path abs
+				 proc))))
+	      (else
+	       (error "not a directory: " abs))))
+      (proc)))
+
+(define-macro (with-current-directory path . body)
+  `(call-with-current-directory ,path (lambda () ,@body)))
+
+(define (call-with-open-directories paths proc)
+  (let ((dirs (map (lambda (p)
+		     (let ((d (and=> (lookup* p) entry-value)))
+		       (or (directory? d)
+			   (error "not a directory: " p))
+		       d))
+		   paths)))
+    (call-p open-directories dirs proc)))
+
+(define-macro (with-open-directories paths . body)
+  `(call-with-open-directories ,paths (lambda () ,@body)))
+
+(define (eval-section s)
+  (call-cc
+   (lambda (exit)
+     (with-error-handler
+      (lambda args
+	(let ((p (make-string-output-port)))
+	  (call-p current-output-port p
+		  (lambda ()
+		    (apply display-error args)))
+	  (set! (section-errors s) (get-string-output-port-string p))
+	  (exit #f)))
+      (lambda ()
+	(set! (section-errors s) #f)
+	(let ((dir (section-directory s)))
+	  (or (pathname-absolute? dir)
+	      (error "must be absolute: " dir))
+	  (ensure-directory dir)
+	  (with-current-directory (section-directory s)
+	    (with-open-directories (section-open-directories s)
+	      (eval-string (section-expressions s))))
+	  #t))))))
+
+(define (commit-section s)
+  
+  (define (commit-one s)
+    (cond ((and (section-proposed s)
+		(eval-section s))
+	   (set! (section-committed s) (section-proposed s))
+	   (set! (section-proposed s) #f)))
+    (for-each commit-one (section-children s)))
+
+  (commit-one s))
+
+(define (read-commit-write-section)
+  (let ((s (read-section)))
+    (commit-section s)
+    (write-section s)))
+
+@*     Foo                                                           [@123 --]
 
 Hi, this is a top-level section, aka, a book.  This part of it is its
-description.  It ends at the "@=" marker, after which its properties
-are listed.  The code of this section would follow after the "@@"
+description.  It ends at the "=" marker, after which its properties
+are listed.  The code of this section would follow after the "-"
 marker, if it would have any, which it doesn't.
 
-@=
+=
 (directory /test)
 (open /boot)
 
-@**    Bar                                                             [@6 #.]
-@@
-(define (bar) 14)
+@**    Bar                                                             [@6 --]
 
-@**    Bar2                                                            [@8 #.]
-@@
-(define (bar2) 12)
+A sub-section.  This one has some code but no sub-sections of its own.
+Thus, it's a 'page'.
 
-@***   Baz                                                             [@7 #.]
+-
+(define (baaboobaz) 16)
+
+@**    Bar2                                                            [@8 --]
+-
+(define bar2 12)
+
+@***   Baz                                                             [@7 --]
 Hep
