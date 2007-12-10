@@ -578,14 +578,17 @@
 (define (read-section-and-write)
   (write-section (read-section)))
 
-(define (eval-string str)
+(define (read-forms-from-string str)
   (let ((p (make-string-input-port str)))
-    (let loop ((res (if #f #f)))
+    (let loop ((res '()))
       (let ((f (read p)))
 	(cond ((eof-object? f)
-	       res)
+	       (reverse res))
 	      (else
-	       (loop (eval f))))))))
+	       (loop (cons f res))))))))
+
+(define (eval-string str)
+  (eval (cons 'begin (read-forms-from-string str))))
 
 (define (ensure-directory path)
   (if (not (and=> (and=> (lookup* path) entry-value) directory?))
@@ -641,6 +644,21 @@
 	      (eval-string (section-expressions s))))
 	  #t))))))
 
+(define (map-append proc list)
+  (apply append (map proc list)))
+
+(define (top-level-forms form stop-ops)
+  (if (or (not (pair? form))
+	  (memq (car form) stop-ops))
+      (list form)
+      (let ((form (macroexpand form)))
+	(if (and (pair? form)
+		 (eq? (car form) :begin))
+	    (map-append (lambda (f)
+			  (top-level-forms f stop-ops))
+			(cdr form))
+	    (list form)))))
+
 (define (commit-section s)
   
   (define (commit-one s)
@@ -678,7 +696,7 @@ Thus, it's a 'page'.
 
 @**    Bar2                                                            [@8 --]
 -
-(define bar2 12)
+(define bar3 12)
 
 @***   Baz                                                             [@7 --]
 Hep
