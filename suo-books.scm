@@ -220,7 +220,7 @@
     c2))
 
 (define-record section
-  :slots (id (committed #f) (proposed #f) (errors #f))
+  :slots (id (committed #f) (proposed #f) (errors #f) (defined-names '()))
   :constructor (section id committed))
 
 (define (section-proposed! s)
@@ -639,40 +639,76 @@
 	  (or (pathname-absolute? dir)
 	      (error "must be absolute: " dir))
 	  (ensure-directory dir)
-	  (with-current-directory (section-directory s)
+	  (with-current-directory dir
 	    (with-open-directories (section-open-directories s)
-	      (eval-string (section-expressions s))))
-	  #t))))))
+	      (let ((form (cons 'begin (read-forms-from-string 
+					(section-expressions s)))))
+		(eval form)
+		(map (lambda (n) (pathname-concat dir n))
+		     (defined-names form)))))))))))
 
 (define (map-append proc list)
   (apply append (map proc list)))
 
-(define (top-level-forms form stop-ops)
-  (if (or (not (pair? form))
-	  (memq (car form) stop-ops))
-      (list form)
-      (let ((form (macroexpand form)))
-	(if (and (pair? form)
-		 (eq? (car form) :begin))
-	    (map-append (lambda (f)
-			  (top-level-forms f stop-ops))
-			(cdr form))
-	    (list form)))))
+(define (and-map proc list)
+  (cond ((null? list)
+	 #t)
+	((null? (cdr list))
+	 (proc (car list)))
+	(else
+	 (and (proc (car list))
+	      (and-map proc (cdr list))))))
 
-(define (commit-section s)
+(define (top-level-forms form)
+  (let ((form (macroexpand form)))
+    (if (and (pair? form)
+	     (eq? (car form) :begin))
+	(map-append (lambda (f)
+		      (top-level-forms f))
+		    (cdr form))
+	(list form))))
+
+(define (defined-names form)
+  (map-append (lambda (f)
+		(if (and (pair? f)
+			 (memq (car f)
+			       '(:define
+				 :define-function
+				 :define-record-type
+				 :define-macro)))
+		    (list (cadr f))
+		    '()))
+	      (top-level-forms form)))
+
+(define (commit-section s force)
+
+  (define (set-difference-equal l1 l2)
+    "Return elements from list L1 that are not in list L2."
+    (let loop ((l1 l1) (result '()))
+      (cond ((null? l1) (reverse result))
+	    ((member (car l1) l2) (loop (cdr l1) result))
+	    (else (loop (cdr l1) (cons (car l1) result))))))
   
   (define (commit-one s)
-    (cond ((and (section-proposed s)
-		(eval-section s))
-	   (set! (section-committed s) (section-proposed s))
-	   (set! (section-proposed s) #f)))
-    (for-each commit-one (section-children s)))
-
+    (if force
+	(section-proposed! s))
+    (let ((names (and (section-proposed s)
+		      (eval-section s))))
+      (and names
+	   (let ((obsolete-names (set-difference-equal 
+				  (section-defined-names s)
+				  names)))
+	     (set! (section-committed s) (section-proposed s))
+	     (set! (section-defined-names s) names)
+	     (for-each /boot/rm obsolete-names)
+	     (set! (section-proposed s) #f)
+	     (and-map commit-one (section-children s))))))
+  
   (commit-one s))
 
-(define (read-commit-write-section)
+(define (read-commit-write-section force)
   (let ((s (read-section)))
-    (commit-section s)
+    (commit-section s force)
     (write-section s)))
 
 @*     Foo                                                           [@123 --]
@@ -696,7 +732,7 @@ Thus, it's a 'page'.
 
 @**    Bar2                                                            [@8 --]
 -
-(define bar3 12)
+(define bar5 12)
 
 @***   Baz                                                             [@7 --]
 Hep

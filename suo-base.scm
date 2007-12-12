@@ -444,6 +444,14 @@
 	 (list-copy-with-tail (car lists)
 			      (apply append (cdr lists))))))
 
+(define (member elt lst)
+  (cond ((null? lst)
+	 #f)
+	((equal? elt (car lst))
+	 #t)
+	(else
+	 (member elt (cdr lst)))))
+
 (define (memv elt lst)
   (cond ((null? lst)
 	 #f)
@@ -3140,9 +3148,9 @@ Only elements that occur in both lists occur in the result list."
 	     (variable-set! (variable-lookup sym) val)))
 	  ((:define)
 	   (let* ((sym (cadr form))
-		  (var (variable-declare sym))
-		  (val (eval (caddr form))))
-	     (variable-set! var val)))
+		  (var (variable-declare sym)))
+	     (if (eq? (variable-ref var) (begin))
+		 (variable-set! var (eval (caddr form))))))
 	  ((:define-function)
 	   (let* ((sym (cadr form))
 		  (func (function-declare sym))
