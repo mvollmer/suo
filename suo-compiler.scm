@@ -64,10 +64,6 @@
 
 (define-record cps-var name id)
 
-(define-record cps-quote value)
-
-(define-record cps-reg idx)
-
 (define-record cps-app func args restp contp)
 
 (define-record cps-func name args restp contp source parent-cont body)
@@ -1046,15 +1042,6 @@
 
 ;;; Register allocation
 
-(define cps-registers (let ((v (make-vector 256 #f)))
-			(do ((i 0 (1+ i)))
-			    ((= i 256) v)
-			  (vector-set! v i (cps-reg i)))))
-
-
-(define (get-reg idx)
-  (vector-ref cps-registers idx))
-
 (define-param cps-next-register)
 
 (define (cps-register-allocate cps)
@@ -1069,7 +1056,7 @@
 		 (cont))))
 	    (else
 	     (loop (1+ idx)
-		   (cons (get-reg idx) regs)
+		   (cons (cps-get-reg idx) regs)
 		   (cdr rest))))))
 
   (record-case cps
@@ -1159,8 +1146,8 @@
 				     (cps-quote (call-signature args restp)))
 				    (map cps-code-generate args)
 				    (list (cps-code-generate func)))
-			    (map get-reg (iota (+ (length args) 2))))
-	   (cps-asm-go (cps-asm-context) (get-reg (+ (length args) 1))))))
+			    (map cps-get-reg (iota (+ (length args) 2))))
+	   (cps-asm-go (cps-asm-context) (cps-get-reg (+ (length args) 1))))))
 
     ((cps-func label args restp contp source parent-cont body)
      (let ((ctxt (cps-asm-make-context source)))

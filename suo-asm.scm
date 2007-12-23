@@ -1,5 +1,17 @@
 ;;; Machine independent parts of the low-level code generator
 
+(define-record cps-quote value)
+
+(define-record cps-reg idx)
+
+(define cps-registers (let ((v (make-vector 256 #f)))
+			(do ((i 0 (1+ i)))
+			    ((= i 256) v)
+			  (vector-set! v i (cps-reg i)))))
+
+(define (cps-get-reg idx)
+  (vector-ref cps-registers idx))
+
 (define primitives '())
 
 (define (register-primitive name dispatcher)

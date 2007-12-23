@@ -234,7 +234,10 @@
   (let ((i 0))
     (lambda ()
       (set! i (1+ i))
-      (string->symbol (string-append "@" (number->string i))))))
+      (let ((id (string->symbol (string-append "@" (number->string i)))))
+	(if (not (hashq-ref sections id))
+	    id
+	    (next-section-id))))))
 
 (define (find-section id)
   (if (not id)
@@ -504,14 +507,15 @@
 			    ((> depth (section-depth last-section))
 			     ;; moving down
 			     (or (= depth (1+ (section-depth last-section)))
-				 (error "improper sub-section nesting"))
+				 (error "improper sub-section nesting: "
+					header))
 			     (cons last-section parents)))))
 
 		 (cond ((null? new-parents)
 			(or (not last-section)
 			    (error "more than one top section"))
 			(or (= (section-depth sec) depth)
-			    (error "improper section depth")))
+			    (error "improper section depth: " header)))
 		       (else
 			(section-propose-parent! sec (car new-parents))))
 		 

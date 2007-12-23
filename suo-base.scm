@@ -3161,7 +3161,7 @@ Only elements that occur in both lists occur in the result list."
 		 (transmogrify-objects (vector func) (vector val)))))
 	  ((:define-record-type)
 	   (let* ((sym (cadr form))
-		  (old (and=> (lookup sym) entry-value)))
+		  (old (and=> (lookup* sym) entry-value)))
 	     (if (and old (not (record-type? old)))
 		 (error "already declared, but not as record type: " sym))
 	     (let ((new (eval (caddr form))))
