@@ -157,8 +157,52 @@
 
 (boot-import register-boot-macro define-macro)
 
+;; Loading books
+
+;; Suo books have an external representation that is geared towards
+;; editing it directly in a normal text editor.  We load these books
+;; by ignoring the sections structure in them completel and just
+;; evaluating the expressions in them.
+;;
 ;; As promised, we can simply use 'eval' and 'load' to evaluate forms
 ;; in the boot environment.
+
+(define (read-forms-from-string str)
+  (with-input-from-string str
+    (lambda ()
+      (let loop ((res '()))
+	(let ((f (read)))
+	  (cond ((eof-object? f)
+		 (reverse res))
+		(else
+		 (loop (cons f res)))))))))
+
+(define (eval-string str eval)
+  (eval (cons 'begin (read-forms-from-string str))))
+
+(define (load-book filename eval)
+  (with-input-from-file filename
+    (lambda ()
+
+      (define (read-chunk delim)
+	(let loop ((res ""))
+	  (let ((line (read-line)))
+	    (cond ((eof-object? line)
+		   (if (zero? (string-length res))
+		       line
+		       res))
+		  ((string-prefix? delim line)
+		   res)
+		  (else
+		   (loop (string-append res "\n" line)))))))
+
+      (let loop ()
+	(if (not (eof-object? (read-chunk "-")))
+	    (let ((exp (read-chunk "@")))
+	      (if (not (eof-object? exp))
+		  (begin
+		    (eval-string exp eval)
+		    (loop)))))))))
 
 (define (boot-eval form)
   (eval form boot-module))
@@ -169,6 +213,10 @@
    (lambda ()
      (set-current-module boot-module)
      (load filename))))
+
+(define (boot-load-book filename)
+  (pk 'boot-load-book filename)
+  (load-book filename boot-eval))
 
 ;;; Representation of Suo values in the boot environment.
 
@@ -201,14 +249,6 @@
 	     keyword? symbol->keyword keyword->symbol
 
 	     string? make-string string-length string-ref string-set!)
-
-;; Pathnames are restricted to be just symbols in the boot environment
-
-(define suo:pathname? symbol?)
-(define (suo:pathname-absolute? p) #f)
-(define (suo:pathname-components p) (list p))
-
-(boot-import pathname? pathname-absolute? pathname-components)
 
 ;; Records are implemented using, errm, records, but with records of a
 ;; different kind.  The fields of the Suo record are simply stored as
@@ -261,10 +301,14 @@
 (define (suo:record-type-accessor type slot-name)
   (let ((index (list-index (suo:record-ref type 3) slot-name)))
     (if index
-	(lambda (obj)
-	  (if (suo:record-is-a? obj type)
-	      (suo:record-ref obj index)
-	      (error "wrong type: " obj)))
+	(lambda-with-setter ((obj)
+			     (if (suo:record-is-a? obj type)
+				 (suo:record-ref obj index)
+				 (error "wrong type: " obj)))
+			    ((obj val)
+			     (if (suo:record-is-a? obj type)
+				 (suo:record-set! obj index val)
+				 (error "wrong type: " obj))))
 	(error "no such slot: " slot-name))))
 
 (define (suo:record-type-constructor type args)
@@ -418,6 +462,12 @@
 	      (lambda (setter proc)
 		(hashq-set! setters proc setter))))
 
+(define-macro (lambda-with-setter l s)
+  `(let ((l (lambda ,@l))
+	 (s (lambda ,@s)))
+     (hashq-set! setters l s)
+     l))
+
 (boot-import setter init-setter-setter)
 
 ;; Multiple values
@@ -474,7 +524,7 @@
     (let ((ent (lookup sym)))
       (cond ((not ent)
 	     (let ((var (suo:record variable@type (begin))))
-	       (pk 'image-variable sym)
+	       ;;(pk 'image-variable sym)
 	       (enter sym (make-entry var attrs))
 	       var))
 	    ((suo:record-with-type? (entry-value ent) variable@type)
@@ -488,11 +538,11 @@
     (let ((ent (lookup sym)))
       (cond ((not ent)
 	     (let ((func (suo:record closure@type #f #f #f #f)))
-	       (pk 'image-function sym)
+	       ;;(pk 'image-function sym)
 	       (enter sym (make-entry func attrs))
 	       func))
 	    ((suo:record-with-type? (entry-value ent) closure@type)
-	     (pk 'image-function-late sym)
+	     ;;(pk 'image-function-late sym)
 	     (set-cdr! ent attrs)
 	     (entry-value ent))
 	    (else
@@ -502,7 +552,7 @@
   (let ((variable@type (boot-eval 'variable@type)))
     (let ((ent (lookup sym)))
       (cond ((not ent)
-	     (pk 'image-undeclared sym)
+	     ;;(pk 'image-undeclared sym)
 	     (set! undeclared-variables (cons sym undeclared-variables))
 	     (let ((var (suo:record variable@type (if #f #f))))
 	       (enter sym (make-entry var '()))
@@ -516,7 +566,7 @@
   (let ((closure@type (boot-eval 'closure@type)))
     (let ((ent (lookup sym)))
       (cond ((not ent)
-	     (pk 'image-undeclared sym)
+	     ;; (pk 'image-undeclared sym)
 	     (set! undeclared-variables (cons sym undeclared-variables))
 	     (let ((func (suo:record closure@type #f #f #f #f)))
 	       (enter sym (make-entry func '()))
@@ -531,7 +581,7 @@
 
 (define (suo:macro-define sym val)
   (let ((macro@type (boot-eval 'macro@type)))
-    (pk 'image-macro sym)
+    ;; (pk 'image-macro sym)
     (enter sym (make-entry (suo:record macro@type val) '()))))
 
 (define-macro (suo:declare-variables . syms)
@@ -566,7 +616,7 @@
 (define image-expressions '())
 
 (define (add-image-expression exp)
-  (pk 'image-exp exp)
+  ;; (pk 'image-exp exp)
   (set! image-expressions (cons exp image-expressions)))
 
 (define (add-image-variable-init var val)
@@ -679,10 +729,49 @@
 	       (image-eval form)
 	       (loop (read))))))))
 
+(define (suo:read-text-line)
+  (let ((l (read-line)))
+    (if (eof-object? l)
+	l
+	(string-append l "\n"))))
+
+(define suo:the-eof-object (with-input-from-string "" read))
+
+(boot-import read-text-line eof-object? the-eof-object)
+
+(define image-books '())
+
+(define (image-eval-section sec)
+  (let* ((desc (boot-eval `(section-description ',sec)))
+	 (title-len (or (string-index desc #\newline)
+			(string-length desc))))
+    (pk 'compiling (substring desc 0 title-len)))
+  (eval-string (boot-eval `(section-expressions ',sec)) image-eval)
+  (boot-eval `(let ((sec ',sec))
+		(set! (section-id sec) #f)
+		(set! (section-committed sec) (section-proposed sec))
+		(set! (section-proposed sec) #f)))
+  (for-each image-eval-section (boot-eval `(section-children ',sec))))
+
+(define (image-load-book file)
+  (pk 'image-load file)
+  (set! current-bootstrap-phase 'compile-for-image)
+  (with-input-from-file file
+    (lambda ()
+      (let ((sec (boot-eval '(read-section))))
+	(image-eval-section sec)
+	(set! image-books (cons sec image-books))))))
+
+(define (image-import-books)
+  (let ((variable@type (boot-eval 'variable@type)))
+    (enter 'boot-books (make-entry (suo:record variable@type 
+					       (reverse image-books))
+				   '()))))
+  
 ;; We copy some variable bindings from the boot environment over to
 ;; the image environment in order to ease bootstrapping further.  All
 ;; bindings that are copied are for record types that the compiler
-;; uses.  it is easier to define these record types once for both the
+;; uses.  It is easier to define these record types once for both the
 ;; boot and image environment.
 
 (define (import-symbol-definition-from-boot sym)
@@ -936,8 +1025,8 @@
     (asm obj)
 
     ;; The toplevel might contain symbols or keywords that are
-    ;; otherwise unreferenced, and keywords might otherwise unused
-    ;; symbols, so the order here is important.
+    ;; otherwise unreferenced, and keywords might reference otherwise
+    ;; unused symbols, so the order here is important.
     ;;
     (let ((all-bindings (hash-map->list cons boot-bindings)))
       (asm all-bindings)

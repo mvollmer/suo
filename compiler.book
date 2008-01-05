@@ -1,5 +1,3 @@
--*- scheme -*-
-
 @*     The compiler                                                   [@12 --]
 
 ;; The compiler performs the following passes
@@ -616,7 +614,7 @@
 			  (cps-gen-variable-ref result-var (cps-quote thing)
 						cont)))
 		       ((macro? thing)
-			(error "macro used as variable:" exp))
+			(error "macro used as variable: " exp))
 		       (else
 			(c (cps-quote thing)))))
 	       (c (cps-quote exp)))))))
