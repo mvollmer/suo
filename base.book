@@ -5,7 +5,6 @@ numbers, strings, vectors, etc.
 
 =
 (directory /base)
-(open /boot)
 
 @**    Bootstrapping
 -
@@ -20,7 +19,7 @@ that the compiler understands.
 -
 
 (define (macroexpand1 form)
-  (if (and (pair? form) (pathname? (car form)))
+  (if (and (pair? form) (symbol? (car form)))
       (let ((transformer (macro-lookup (car form))))
 	(if transformer
 	    (apply transformer (cdr form))
@@ -129,7 +128,7 @@ that the compiler understands.
       `(define-function ,(car head) (lambda ,(cdr head)
 				      (primop syscall 0
 					      ,(string-bytes
-						(symbol->string (car head))))
+						(symbol-basename (car head))))
 				      (let ()
 					,@body)))
       `(:define ,head ,(car body))))
@@ -732,6 +731,31 @@ Only elements that occur in both lists occur in the result list."
 
 (init-setter-setter setter)   
 
+@**    Symbol preview                                                [@27 *!]
+-
+
+(define (symbol-basename sym)
+  (let ((comps (symbol-components sym)))
+    (if (null? comps)
+	(error "empty symbol")
+	(car (last-pair comps)))))
+
+(define (make-symbol-sibling sym basename)
+  (let ((comps (symbol-components sym)))
+    (symbol (symbol-offset sym)
+	    (append (list-head comps (1- (length comps)))
+		    (list basename)))))
+
+(define (symbol-append sym suffix)
+  (make-symbol-sibling sym (string-append (symbol-basename sym) suffix)))
+
+(define -gensym-counter- 0)
+
+(define (gensym)
+  (set! -gensym-counter- (+ -gensym-counter- 1))
+  (symbol 0 (list (string-append " G"
+				 (number->string -gensym-counter-)))))
+
 @**    Records                                                        [@27 *!]
 -
 
@@ -773,9 +797,9 @@ Only elements that occur in both lists occur in the result list."
 
 (define-macro (define-record name . args)
   (let* ((type-name (keyword-ref args :type-name
-				 (symbol-append name '@type)))
+				 (symbol-append name "@type")))
 	 (pred-name (keyword-ref args :predicate-name
-				 (symbol-append name '?)))
+				 (symbol-append name "?")))
 	 (prefix (keyword-ref args :prefix name))
 	 (slot-descs (keyword-ref args :slots args))
 	 (slot-code (map (lambda (slot)
@@ -795,14 +819,19 @@ Only elements that occur in both lists occur in the result list."
 				     spec)))))
     `(begin
        ,(if (eq? (bootstrap-phase) 'compile-for-image)
-	    `(bootstrap-record-type ,type-name)
+	    `(begin
+	       (:import-boot-record-type ,type-name)
+	       (bootstrap-record-type ,type-name))
 	    `(define-record-type ,type-name 
 	       (make-record-type ',name #f
 				 (list ,@slot-code))))
        (define (,pred-name x) (record-is-a? x ,type-name))
        ,@(map (lambda (slot)
 		(let* ((slot-name (if (pair? slot) (car slot) slot))
-		       (accessor-name (symbol-append prefix '- slot-name)))
+		       (accessor-name 
+			(symbol-append prefix (string-append
+					       "-"
+					       (symbol-basename slot-name)))))
 		  `(define-function ,accessor-name 
 		     (record-type-accessor ,type-name ',slot-name))))
 	      slot-descs)
@@ -938,6 +967,9 @@ Only elements that occur in both lists occur in the result list."
     (vector-set! ancestry (1- (vector-length ancestry)) type)
     type))
 
+(define (make-unspecified-record-type)
+  (make-record-type 'unspecified #f '()))
+
 (define (make-record-type-constructor-code type slot-names)
   (let ((init-exprs (map (lambda (s)
 			   (cond ((memq (car s) slot-names)
@@ -1011,7 +1043,7 @@ Only elements that occur in both lists occur in the result list."
 	    (let* ((name (car pattern))
 		   (args (cdr pattern))
 		   (body (cdr clause)))
-	      `((,(symbol-append name '?) ,tmp)
+	      `((,(symbol-append name "?") ,tmp)
 		((lambda ,args ,@body)
 		 ,@(map (lambda (i)
 			  `(record-ref ,tmp ,i))
@@ -1185,7 +1217,9 @@ Only elements that occur in both lists occur in the result list."
 	       (sign 1))
       (cond ((null? chars)
 	     (if valid?
-		 (* num sign)
+		 (if (< sign 0)
+		     (- num)
+		     num)
 		 #f))
 	    ((and start? (whitespace? (car chars)))
 	     (loop (cdr chars) num #t #f sign))
@@ -1942,27 +1976,24 @@ Only elements that occur in both lists occur in the result list."
 		(output-char port ch))
 	      (string->list n))))
 
-(define (print-symbol s state)
-  (print-symbol-name (symbol->string s) state))
-
 (define (print-keyword k state)
   (output-char (print-state-port state) #\:)
   (print (keyword->symbol k) state))
 
-(define (print-pathname p state)
-  (let ((o (pathname-parent-offset p))
-	(c (pathname-components p)))
+(define (print-symbol s state)
+  (let ((o (symbol-offset s))
+	(c (symbol-components s)))
 
     (define (print-comps comps need-slash)
       (cond ((not (null? comps))
 	     (if need-slash
 		 (output-char (print-state-port state) #\/))
-	     (print (car comps) state)
+	     (print-symbol-name (car comps) state)
 	     (print-comps (cdr comps) #t))))
       
-    (cond ((and (zero? o) (null? c))
+    (cond ((and (equal? o 0) (null? c))
 	   (output-char (print-state-port state) #\.))
-	  ((< o 0)
+	  ((eq? o #t)
 	   (output-char (print-state-port state) #\/)
 	   (print-comps c #f))
 	  (else
@@ -2007,8 +2038,6 @@ Only elements that occur in both lists occur in the result list."
 			 (print-symbol val state))
 			((keyword? val)
 			 (print-keyword val state))
-			((pathname? val)
-			 (print-pathname val state))
 			((pair? val)
 			 (print-list val state))
 			((vector? val)
@@ -2034,7 +2063,7 @@ Only elements that occur in both lists occur in the result list."
   (print val (make-print-state (current-output-port) #t)))
 
 (define (newline)
-  (display #\nl))
+  (display #\newline))
 
 (define (make-parse-state port)
   port)
@@ -2089,10 +2118,10 @@ Only elements that occur in both lists occur in the result list."
 	    (else
 	     (loop (cons ch chars)))))))
 
-(define (parse-number-or-pathname state)
+(define (parse-number-or-symbol state)
   (let ((tok (parse-token state)))
     (or (string->number tok)
-	(string->pathname tok))))
+	(parse-symbol tok))))
 
 (define (parse-hex state)
   (let ((tok (parse-token state)))
@@ -2114,9 +2143,9 @@ Only elements that occur in both lists occur in the result list."
 	  (let ((elt (parse state)))
 	    (if (eof-object? elt)
 		(error "unexpected end of input"))
-	    (if (and (pathname? elt)
-		     (zero? (pathname-parent-offset elt))
-		     (null? (pathname-components elt)))
+	    (if (and (symbol? elt)
+		     (equal? (symbol-offset elt) 0)
+		     (null? (symbol-components elt)))
 		(let ((elt (parse state)))
 		  (must-parse #\) state)
 		  elt)
@@ -2207,7 +2236,7 @@ Only elements that occur in both lists occur in the result list."
 	   (error "unexpected delimiter: " ch))
 	  (else
 	   (putback-char (parse-state-port state) ch)
-	   (parse-number-or-pathname state)))))
+	   (parse-number-or-symbol state)))))
 
 (define (read . opt-port)
   (parse (make-parse-state (if (null? opt-port)
@@ -2432,9 +2461,6 @@ Only elements that occur in both lists occur in the result list."
 (define (string-hash n str)
   (apply mix-hash n (map char->integer (string->list str))))
 
-(define (symbol-hash n sym)
-  (string-hash n (symbol->string sym)))
-
 (define (pair-hash n p)
   (mix-hash n (hash (car p) n) (hash (cdr p) n)))
 
@@ -2448,8 +2474,6 @@ Only elements that occur in both lists occur in the result list."
   (cond
    ((string? obj)
     (string-hash n obj))
-   ((symbol? obj)
-    (symbol-hash n obj))
    ((pair? obj)
     (pair-hash n obj))
    ((vector? obj)
@@ -2532,41 +2556,132 @@ Only elements that occur in both lists occur in the result list."
 	     (loop (cdr lst) (proc (car lst) res)))))))
 
 @**    Symbols                                                        [@42 *-]
+
+Symbols are much like pathnames: they are a list of strings and can be
+absolute or relative.  The components of a symbol are strings and when
+reading/writing a symbol, they are separated by '/' characters.  A
+absolute symbol starts with a '/', while a relative symbol does not.
+
+Naturally, a absolute symbol with a empty list of components refers to
+the root, and a empty relative symbol refers to the current location.
+
+The relative symbol with no compontents is written and read as ".".  A
+real component can not be the string ".".
+
+A relative symbol has a 'parent offset' that specifies how many
+hierarchy levels one should go up before starting to lookup the first
+component.  This parent offset is written and read as a sequence
+of ".." pseudo components.  Real components can not be the
+string "..".
+
+The empty string can not be used as a component of a symbol.
+
+These are some examples of external representations of symbols:
+
+  External representation         Absolute/Offset  Components
+
+  /foo                            absolute         ("foo")
+  foo                             0                ("foo")
+  ../foo                          1                ("foo")
+  foo/bar                         0                ("foo" "bar")
+  .                               0                ()
+  /                               absolute         ()
+
+  ./foo      => ERROR: component can't be "."
+  foo/../bar => ERROR: component can't be ".."
+  foo//bar   => ERROR: component can't be the empty string
+  foo/       => ERROR: component can't be the empty string
+
+Symbol objects are unique: if two symbols have the same offset and the
+same components, they are 'eq?'.
+
+Note that there is no concept of a 'current directory' when looking at
+symbols.  The symbols written "/base/list" and "list" are distinct.
+They usually do refer to the same entry when used as
+identifiers (namely when the current lookup directory is "/base"), but
+that happens because the lookup machinery has been written to behave
+that way, not because "/base/list" and "list" would be the same
+symbol.
+
 -
 
 (define-record symbol
-  name)
+  :slots (offset components)
+  :constructor (create-symbol offset components))
 
 (define boot-symbols (car (bootinfo)))
 
 (define symbols (make-hash-table 511))
 
-(define (symbol->string sym)
-  (symbol-name sym))
+(define (intern-symbol template-sym)
+  (or (hash-ref symbols template-sym)
+      (begin
+	(hash-set! symbols template-sym template-sym)
+	template-sym)))
 
-(define (string->symbol str)
-  (if (string? str)
-      (or (hash-ref symbols str)
-	  (let ((sym (symbol str)))
-	    (hash-set! symbols str sym)
-	    sym))
-      (error:wrong-type str)))
+(define (symbol offset components)
+  (intern-symbol (create-symbol offset components)))
 
-(define (symbol-append . syms)
-  (string->symbol (apply string-append (map symbol->string syms))))
+(define (symbol-absolute? sym)
+  (eq? (symbol-offset sym) #t))
+
+(define (parse-symbol str)
+  (cond 
+   ((equal? str "/")
+    (symbol #t '()))
+   ((equal? str ".")
+    (symbol 0 '()))
+   (else
+    (let ((len (string-length str)))
+      (let loop ((start 0)
+		 (cur 0)
+		 (offset 0)
+		 (comps '()))
+
+	(define (consume-comp)
+	  (let ((n (substring str start cur)))
+	    (cond ((equal? n "")
+		   (error "symbol component can not be empty"))
+		  ((equal? n ".")
+		   (error "symbol component can not be \".\""))
+		  ((equal? n "..")
+		   (if (and (>= offset 0) (null? comps))
+		       (loop (1+ cur) (1+ cur) (1+ offset) comps)
+		       (error "internal symbol component can not be \"..\"")))
+		  (else
+		   (loop (1+ cur) (1+ cur) offset 
+			 (cons n comps))))))
+		  
+	(cond ((> cur len)
+	       (symbol offset (reverse comps)))
+	      ((= cur len)
+	       (consume-comp))
+	      ((eq? (string-ref str cur) #\/)
+	       (if (zero? cur)
+		   (loop 1 1 #t '())
+		   (consume-comp)))
+	      (else
+	       (loop start (1+ cur) offset comps))))))))
+
+(define (symbol-concat s1 s2)
+  (let ((o1 (symbol-offset s1))
+	(l1 (length (symbol-components s1)))
+	(o2 (symbol-offset s2)))
+    (cond ((eq? o2 #t)
+	   s2)
+	  ((<= o2 l1)
+	   (symbol o1 (append (list-head (symbol-components s1)
+					 (- l1 o2))
+			      (symbol-components s2))))
+	  ((eq? o1 #t)
+	   (error "root has no parent"))
+	  (else
+	   (symbol (+ o1 (- o2 l1)) (symbol-components s2))))))
 
 (define (init-symbols)
-  (for-each (lambda (sym)
-	      (hash-set! symbols (symbol->string sym) sym))
-	    boot-symbols))
+  (map1 intern-symbol boot-symbols))
 
 (init-symbols)
-
-(define -gensym-counter- 0)
-
-(define (gensym)
-  (set! -gensym-counter- (+ -gensym-counter- 1))
-  (string->symbol (string-append " G" (number->string -gensym-counter-))))
 
 @**    Keywords                                                       [@43 *-]
 -
@@ -2652,7 +2767,6 @@ Only elements that occur in both lists occur in the result list."
 	     (rest '())
 	     (rest-first #f)
 	     (rest-last #f))
-    (pk 'on spec)
     (cond ((null? spec)
 	   (extarg-spec (apply vector (reverse defs))
 			(reverse names)
@@ -2752,111 +2866,6 @@ Only elements that occur in both lists occur in the result list."
 	(spec (cdr head)))
     `(define-function ,name (lambda* ,spec ,@body))))
 
-@**    Pathnames                                                      [@45 *-]
-
-;; A pathname is a list symbols (called the pathname's components) and
-;; a flag that specifies whether it should be interpreted from the
-;; root location (called a "absolute pathname") or from the current
-;; location (called a "relative pathname").  Thus, a absolute pathname
-;; with a empty list of symbols refers to the root, and a empty
-;; relative pathname refers to the current location.
-;;
-;; A relative pathname has a 'parent offset' that specifies how many
-;; hierarchy levels one should go up before starting to lookup the
-;; first component.  This parent offset is written and read as a
-;; sequence of ".." pseudo components.  Real components can not be
-;; symbols with the name "..".
-;;
-;; The relative pathname with no compontents is written and read as
-;; ".".
-;;
-;; A naked symbol is recognized as a relative pathname with that
-;; symbol as its component.
--
-
-(define-record pathname*
-  parent-offset components)
-
-(define (pathname parent-offset components)
-  (if (and (zero? parent-offset) (= (length components) 1)
-	   (symbol? (car components)))
-      (car components)
-      (pathname* parent-offset components)))
-
-(define (pathname? obj)
-  (or (symbol? obj)
-      (pathname*? obj)))
-
-(define (pathname-absolute? obj)
-  (< (pathname-parent-offset obj) 0))
-
-(define (pathname-parent-offset obj)
-  (if (symbol? obj)
-      0
-      (pathname*-parent-offset obj)))
-
-(define (pathname-components obj)
-  (if (symbol? obj)
-      (list obj)
-      (pathname*-components obj)))
-
-(define (string->pathname str)
-  (cond 
-   ((equal? str "/")
-    (pathname -1 '()))
-   ((equal? str ".")
-    (pathname 0 '()))
-   (else
-    (let ((len (string-length str)))
-      (let loop ((start 0)
-		 (cur 0)
-		 (offset 0)
-		 (comps '()))
-
-	(define (consume-comp)
-	  (let ((n (substring str start cur)))
-	    (cond ((equal? n "")
-		   (error "pathname component can not be empty"))
-		  ((equal? n ".")
-		   (error "pathname component can not be '.'"))
-		  ((equal? n "..")
-		   (if (and (>= offset 0) (null? comps))
-		       (loop (1+ cur) (1+ cur) (1+ offset) comps)
-		       (error "internal pathname component can not be '..'")))
-		  (else
-		   (loop (1+ cur) (1+ cur) offset 
-			 (cons (string->symbol n) comps))))))
-		  
-	(cond ((> cur len)
-	       (pathname offset (reverse comps)))
-	      ((= cur len)
-	       (consume-comp))
-	      ((eq? (string-ref str cur) #\/)
-	       (if (zero? cur)
-		   (loop 1 1 -1 '())
-		   (consume-comp)))
-	      (else
-	       (loop start (1+ cur) offset comps))))))))
-
-(define (pathname-concat p1 p2)
-  (let ((o1 (pathname-parent-offset p1))
-	(l1 (length (pathname-components p1)))
-	(o2 (pathname-parent-offset p2)))
-    (cond ((< o2 0)
-	   p2)
-	  ((<= o2 l1)
-	   (pathname o1 (append (list-head (pathname-components p1)
-					   (- l1 o2))
-				(pathname-components p2))))
-	  ((< o1 0)
-	   (error "root directory has no parent"))
-	  (else
-	   (pathname (+ o1 (- o2 l1)) (pathname-components p2))))))
-
-(define (pathname-head p n)
-  (pathname (pathname-parent-offset p)
-	    (list-head (pathname-components p) n)))
-
 @**    Reverse scanning                                               [@46 *-]
 -
 
@@ -2907,242 +2916,146 @@ Only elements that occur in both lists occur in the result list."
 (define-record macro
   transformer)
 
-@**    Directories                                                    [@48 *-]
+@**    Symbol lookup                                              [@48 *-]
+
+Symbols are used as identifiers in programs and elsewhere.
+
+There is a global hash table that associates a values with absolute
+symbols.  When looking up a relative symbol, it is turned into a
+absolute symbol by prefixing it with the 'current directory'.  In the
+same manner, the 'open directories' are tried (in order) when there is
+no value for the symbol in the current directory.
+
+Directories do not exist as concrete objects.  It is OK to associate
+one value with the symbol /foo and another value with /foo/bar.
+
+The values of symbols are usually variables, macros, functions, or
+record types.  Thus, using 'lookup' with the name of a global variable
+will return the variable object that can then be dereferenced with
+'variable-ref', 'lookup' will not return the value of the variable.
+
+Removing a value association from a symbol is the same as associating
+it with '#f'.
 -
 
-(define entry-value car)
-(define set-entry-value! set-car!)
-(define entry-attributes cdr)
-(define set-entry-attributes! set-cdr!)
+(define symbol-values (make-hashq-table 1023))
 
-(define (make-entry val attrs)
-  (cons val attrs))
+(define symbol-value
+  (lambda-with-setter ((sym)
+		       (if (symbol-absolute? sym)
+			   (hashq-ref symbol-values sym)
+			   (error "absolute symbol expected: " sym)))
+		      ((val sym)
+		       (if (symbol-absolute? sym)
+			   (if val
+			       (hashq-set! symbol-values sym val)
+			       (hashq-del! symbol-values sym))
+			   (error "absolute symbol expected: " sym)))))
 
-(define (entry-attribute ent attr)
-  (assq-ref (entry-attributes ent) attr))
+(define current-directory (make-parameter '/))
+(define open-directories (make-parameter '()))
 
-(define (set-entry-attribute! ent attr val)
-  (set-entry-attributes! ent (acons attr val
-				    (assq-del (entry-attributes ent) attr))))
+(define (try-lookup prefix sym)
+  (symbol-value (symbol-concat prefix sym)))
 
-(define (entry-merge-attrs! ent attrs)
-  ;; XXX - cheap shot
-  (for-each (lambda (attr)
-	      (set-entry-attribute! ent (car attr) (cdr attr)))
-	    attrs))
+(define (lookup* sym in-open-dirs? allow-undefined?)
+  (or (try-lookup (current-directory) sym)
+      (and in-open-dirs?
+	   (or-map (lambda (dir)
+		     (try-lookup dir sym))
+		   (open-directories)))
+      (and (not allow-undefined?)
+	   (error "undefined: " sym))))
 
-(define (list-entry name ent verbose)
-  (let* ((value (entry-value ent))
-	 (type (cond ((directory? value)   #\d)
-		     ((variable? value)    #\v)
-		     ((closure? value)     #\p)
-		     ((record-type? value) #\t)
-		     ((macro? value)       #\m)
-		     ((not value)          #\!)
-		     (else                 #\?))))
+(define (lookup sym)
+  (lookup* sym #t #f))
+
+(define (enter sym val)
+  (set! (symbol-value (symbol-concat (current-directory) sym)) val))
+
+(define (list-entry name value)
+  (let ((type (cond ((variable? value)    #\v)
+		    ((closure? value)     #\f)
+		    ((record-type? value) #\t)
+		    ((macro? value)       #\m)
+		    (else                 #\?))))
     (display type)
     (display #\space)
-    (display name)
-    (newline)
-    (if verbose
-	(for-each (lambda (attr)
-		    (display #\space)
-		    (display #\space)
-		    (display (car attr))
-		    (display #\tab)
-		    (display (cdr attr))
-		    (newline))
-		  (entry-attributes ent)))))
-
-(define-record directory
-  entries)
-
-(define (directory* n)
-  (directory (make-hashq-table n)))
-
-(define (directory-lookup dir sym)
-  (hashq-ref (directory-entries dir) sym))
-
-(define (directory-enter dir sym ent)
-  (hashq-set! (directory-entries dir) sym ent))
-
-(define (directory-remove dir sym)
-  (hashq-del! (directory-entries dir) sym))
-
-(define (directory-list-bindings dir)
-  (hashq-fold '() cons (directory-entries dir)))
-
-(define root-directory (directory* 31))
-(define root-directory-entry (make-entry root-directory '()))
-
-(define boot-directory (directory* 1023))
-(directory-enter root-directory 'boot (make-entry boot-directory '()))
+    (display (symbol-basename name))
+    (newline)))
 
 (define boot-bindings (caddr (bootinfo)))
 
-(define (init-boot-directory)
+(define (init-boot-bindings)
   (for-each (lambda (binding)
 	      (let ((sym (car binding))
-		    (ent (cdr binding)))
-		(directory-enter boot-directory sym ent)))
+		    (val (cdr binding)))
+		(enter sym val)))
 	    boot-bindings))
 
-(init-boot-directory)
+(init-boot-bindings)
 
-(define current-directory (make-parameter root-directory-entry))
-(define current-directory-path (make-parameter (pathname -1 '())))
+(define (make-thing-lookup desc pred)
+  (lambda (name)
+    (let ((val (lookup name)))
+      (or (pred val)
+	  (error "not a " desc ": " name))
+      val)))
 
-(define open-directories (make-parameter '()))
+(define (make-thing-declare desc pred make-unspec)
+  (lambda (name)
+    (let ((old (lookup* name #f #t)))
+      (if (and old
+	       (not (pred old)))
+	  (error "already declared, but not as a " desc ": " name))
+      (if (not old)
+	  (let ((val (make-unspec)))
+	    (enter name val)
+	    val)
+	  old))))
 
-;; LOOKUP-PARENT normally returns two values: a directory and a
-;; symbol, where the symbol is the last component of NAME and the
-;; directory is the parent of it according to NAME.  When NAME refers
-;; to the root directory, LOOKUP-PARENT returns the root directory and
-;; #f.
+(define-function variable-lookup (make-thing-lookup "variable" variable?))
+(define-function function-lookup (make-thing-lookup "function" closure?))
+(define-function record-type-lookup (make-thing-lookup "record type"
+						       record-type?))
 
-(define (lookup-parent name)
+(define-function variable-declare
+  (make-thing-declare "variable" variable?
+		      (lambda ()
+			(variable (begin)))))
 
-  (cond ((symbol? name)
-	 (values (entry-value (current-directory))
-		 name))
-	(else
-	 (let ((name (pathname-concat (current-directory-path) name)))
+(define-function function-declare
+  (make-thing-declare "function" closure? make-unspecified-closure))
 
-	   (define (lookup-in-dir dir comps len)
-	     (cond ((null? comps)
-		    (values dir #f))
-		   ((not (directory? dir))
-		    (error "not a directory: " (pathname-head name len)))
-		   ((null? (cdr comps))
-		    (values dir (car comps)))
-		   (else
-		    (lookup-in-dir (entry-value
-				    (or (directory-lookup dir (car comps))
-					(error "not found: "
-					       (pathname-head name
-							      (1+ len)))))
-				   (cdr comps)
-				   (1+ len)))))
-	 
-	   (lookup-in-dir root-directory (pathname-components name) 0)))))
-	 
-(define (lookup* name)
-  (let-values1 (dir sym (lookup-parent name))
-    (if (not sym)
-	root-directory-entry
-	(directory-lookup dir sym))))
-
-(define (lookup name)
-  (or (lookup* name)
-      (and (symbol? name)
-	   (or-map (lambda (dir)
-		     (directory-lookup dir name))
-		   (open-directories)))))
-
-(define (enter name proc)
-  (let-values1 (dir sym (lookup-parent name))
-    (if (not sym)
-	(error "can't modify root directory")
-	(let ((ent (directory-lookup dir sym)))
-	  (cond (ent
-		 (proc ent)
-		 ent)
-		(else
-		 (if (lookup name)
-		     (pk 'shadows name))
-		 (let ((ent (proc #f)))
-		   (directory-enter dir sym ent)
-		   ent)))))))
-
-(define (variable-lookup name)
-  (let ((ent (lookup name)))
-    (cond ((not ent)
-	   (error "undefined: " name))
-	  ((variable? (entry-value ent))
-	   (entry-value ent))
-	  (else
-	   (error "not a variable:" name)))))
-
-(define (function-lookup name)
-  (let ((ent (lookup name)))
-    (cond ((not ent)
-	   (error "undefined: " name))
-	  ((closure? (entry-value ent))
-	   (entry-value ent))
-	  (else
-	   (error "not a function:" name)))))
-
-(define (variable-declare name . attrs)
-  (entry-value
-   (enter name
-	  (lambda (old)
-	    (cond ((not old)
-		   (make-entry (variable (begin))  attrs))
-		  ((variable? (entry-value old))
-		   (entry-merge-attrs! old attrs)
-		   old)
-		  (else
-		   (error "already declared: " name)))))))
-
-(define (function-declare name . attrs)
-  (entry-value
-   (enter name
-	  (lambda (old)
-	    (cond ((not old)
-		   (make-entry (make-unspecified-closure) attrs))
-		  ((closure? (entry-value old))
-		   (entry-merge-attrs! old attrs)
-		   old)
-		  (else
-		   (error "already declared: " name)))))))
+(define-function record-type-declare
+  (make-thing-declare "record type" record-type? make-unspecified-record-type))
 
 (define (macro-lookup name)
-  (let ((ent (lookup name)))
-    (cond ((or (not ent) (not (macro? (entry-value ent))))
-	   #f)
-	  (else
-	   (macro-transformer (entry-value ent))))))
+  (let ((val (lookup* name #t #t)))
+    (and val
+	 (macro? val)
+	 (macro-transformer val))))
 
 (define (macro-define name val)
-  (enter name
-	 (lambda (old)
-	   (cond ((not old)
-		  (make-entry (macro val) '()))
-		 ((macro? (entry-value old))
-		  (set-entry-value! old (macro val))
-		  old)
-		 (else
-		  (error "already declared: " name))))))
-
-(define (make-directory name)
-  (enter name
-	 (lambda (old)
-	   (cond ((not old)
-		  (make-entry (directory* 31) '()))
-		 (else
-		  (error "already declared: " name))))))
+  (let ((old (lookup* name #f #t)))
+    (if (and old
+	     (not (macro? old)))
+	(error "already declared, but not as a macro: " name))
+    (enter name (macro val))))
 
 (define (cd name)
-  (let* ((n (pathname-concat (current-directory-path) name))
-	 (e (lookup* n)))
-    (cond ((directory? (entry-value e))
-	   (current-directory e)
-	   (current-directory-path n)
-	   n)
-	  (else
-	   (error "not a directory: " n)))))
+  (current-directory (symbol-concat (current-directory) name)))
 
 (define (pwd)
-  (write (current-directory-path))
+  (write (current-directory))
   (newline)
   (values))
 
 (define (list-directory name verbose)
   (pk 'list name)
-  (let ((dir (entry-value (lookup name))))
-    (hashq-fold #f (lambda (elt res)
-		     (list-entry (car elt) (cdr elt) verbose))
-		(directory-entries dir))))
+  (hashq-fold #f (lambda (elt res)
+		   (list-entry (car elt) (cdr elt)))
+	      symbol-values))
 
 (define* (ls :flags v :rest names)
   (if (null? names)
@@ -3153,13 +3066,7 @@ Only elements that occur in both lists occur in the result list."
   (values))
 
 (define (rm name)
-  (let-values1 (dir sym (lookup-parent name))
-    (if (not sym)
-	(error "can't remove root directory")
-	(directory-remove dir sym))))
-
-(define-macro (mkdir name)
-  `(make-directory ',name))
+  (enter name #f))
 
 @**    Eval                                                           [@49 *-]
 -
@@ -3167,16 +3074,14 @@ Only elements that occur in both lists occur in the result list."
 (define (eval form)
   (let ((form (compile form)))
     (cond
-     ((pathname? form)
-      (let ((ent (and=> (lookup form) entry-value)))
-	(cond ((not ent)
-	       (error "undefined: " form))
-	      ((variable? ent)
-	       (variable-ref ent))
-	      ((macro? ent)
+     ((symbol? form)
+      (let ((val (lookup form)))
+	(cond ((variable? val)
+	       (variable-ref val))
+	      ((macro? val)
 	       (error "is a macro: " form))
 	      (else
-	       ent))))
+	       val))))
      ((pair? form)
       (let ((op (car form)))
 	(case op
@@ -3193,23 +3098,19 @@ Only elements that occur in both lists occur in the result list."
 		 (variable-set! var (eval (caddr form))))))
 	  ((:define-function)
 	   (let* ((sym (cadr form))
-		  (func (function-declare sym))
-		  (val (eval (caddr form))))
-	     (if (not (closure? val))
-		 (error "not a function: " val))
-	     (if (not (eq? func val))
-		 (transmogrify-objects (vector func) (vector val)))))
+		  (old (function-declare sym))
+ 		  (new (eval (caddr form))))
+	     (if (not (closure? new))
+		 (error "not a function: " new))
+	     (if (not (eq? old new))
+		 (transmogrify-objects (vector old) (vector new)))))
 	  ((:define-record-type)
 	   (let* ((sym (cadr form))
-		  (old (and=> (lookup* sym) entry-value)))
-	     (if (and old (not (record-type? old)))
-		 (error "already declared, but not as record type: " sym))
-	     (let ((new (eval (caddr form))))
-	       (if (not (record-type? new))
-		   (error "not a record type: " new))
-	       (if old
-		   (record-type-transmogrify old new)
-		   (enter sym (lambda (old-ent) (make-entry new '())))))))
+		  (old (record-type-declare sym))
+ 		  (new (eval (caddr form))))
+	     (if (not (record-type? new))
+		 (error "not a record type: " new))
+	     (record-type-transmogrify old new)))
 	  ((:define-macro)
 	   (let* ((sym (cadr form))
 		  (val (eval (caddr form))))
@@ -3235,7 +3136,7 @@ Only elements that occur in both lists occur in the result list."
 
 ;; SHEVAL is a variant of eval, intended for use in the repl to give
 ;; it a more shell-like character.  It differs from eval in that
-;; pathnames evaluate to themselves and not to the item they refer to,
+;; symbols evaluate to themselves and not to the item they refer to,
 ;; except in the first position of a form.  This makes it possible to
 ;; write commands such as 'cd', 'ls', and 'mkdir' as functions and not
 ;; have to quote their arguments all the time.
@@ -3251,7 +3152,7 @@ Only elements that occur in both lists occur in the result list."
 ;; with sheval.  Quote is also recognized.
 ;;
 ;; You can not escape from eval to sheval, just use quote to stop
-;; literal pathnames from evaluating, as usual.
+;; literal symbols from evaluating, as usual.
 ;;
 ;; Macros in general are not allowed in Sheval forms, you have to use
 ;; something like
@@ -3271,10 +3172,10 @@ Only elements that occur in both lists occur in the result list."
 	  ((eq? (car form) 'quote)
 	   (cadr form))
 	  ((and (null? (cdr form))
-		(pathname? (car form))
-		(let ((ent (lookup (car form))))
-		  (if (and ent (variable? (entry-value ent)))
-		      (entry-value ent)
+		(symbol? (car form))
+		(let ((val (lookup* (car form) #t #t)))
+		  (if (variable? val)
+		      val
 		      #f)))
 	   => (lambda (var)
 		(variable-ref var)))
@@ -3314,25 +3215,28 @@ Only elements that occur in both lists occur in the result list."
 				repl-commands))))
 
 (define-repl-command (ls)
-  (list-directory '. #f)
+  (inspect symbol-values)
   (values))
 
 (define-repl-command (pwd)
-  (current-directory-path))
+  (current-directory))
+
+(define-repl-command (pod)
+  (open-directories))
 
 (define-repl-command (cd name)
-  (or (pathname-absolute? name)
-      (error "can only cd to absolute names"))
-  (let ((new (lookup* name)))
-    (cond ((directory? (entry-value new))
-	   (current-directory new)
-	   (current-directory-path name))
-	  (else
-	   (error "not a directory: " name)))))
+  (current-directory (symbol-concat (current-directory) name)))
 
-(define-repl-command (open-cwd)
-  (open-directories (cons (entry-value (current-directory))
-			  (open-directories))))
+(define-repl-command (open name)
+  (let ((full (symbol-concat (current-directory) name)))
+    (open-directories (cons full
+			    (delq1 full
+				   (open-directories))))))
+
+(define-repl-command (close name)
+  (let ((full (symbol-concat (current-directory) name)))
+    (open-directories (delq1 full
+			     (open-directories)))))
 
 (define (eval-repl-command form)
   (cond ((not (pair? form))

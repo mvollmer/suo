@@ -1,4 +1,7 @@
 @* Assembler
+=
+(directory /assembler)
+(open /base)
 
 @** Machine independent parts of the low-level code generator
 -
@@ -301,7 +304,7 @@
 @** Code generation and assembling
 -
 
-(declare-variables cps-verbose)
+(declare-variables /compiler/cps-verbose)
 
 (define (cps-asm-insn-1 ctxt op xyz)
   (cps-asm-u32-2 ctxt
@@ -437,8 +440,8 @@
 (define (cps-asm-shuffle ctxt from to)
 
   (define (move src dst)
-    (if cps-verbose
-	(pk (cps-render src) '-> (cps-render dst)))
+    (if /compiler/cps-verbose
+	(pk (/compiler/cps-render src) '-> (/compiler/cps-render dst)))
     (let ((src (if (eq? src 'tmp) 255 src))
 	  (dst (if (eq? dst 'tmp) 255 dst)))
       (if (s16-const? src)

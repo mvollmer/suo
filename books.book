@@ -1,4 +1,4 @@
-@* Books, sections, and pages.
+@*     Books, sections, and pages.                                     [@1 --]
 
 Books contain the bulk of the code in a Suo system, in a literate
 programming kind of way that allows for interactive and incremental
@@ -146,7 +146,7 @@ in a line-orented format.
 
 The different parts of a section (description, properties,
 expressions) are introduced by a header lines starting with "@*",
-"@=", and "@@" respectively.  The description part is mandatory,
+"=", and "-" respectively.  The description part is mandatory,
 even when it is empty, but the properties and expression parts can
 be ommitted.
 
@@ -169,18 +169,14 @@ this:
 
     ;; This is the description.  It is written as a comment to make
     ;; editing with Emacs easier.
-
-    @=
+    =
     (open-also /web/bokeh)
-
-    @@
-
+    -
     (define (foo) 
       (create-bokeh 1 2 3))
 
     @***   A sub-section without description                [@213]
-    @@
-
+    -
     (define bar (foo))
 
 
@@ -202,6 +198,10 @@ XXX - in the future, sections should also remember which
 
 XXX - more version control things should be defined: logs, diffing,
       branching, merging,
+=
+(directory /books)
+(open /base)
+
 -
 
 (define-record section-content
@@ -242,7 +242,7 @@ XXX - more version control things should be defined: logs, diffing,
   (let ((i 0))
     (lambda ()
       (set! i (1+ i))
-      (let ((id (string->symbol (string-append "@" (number->string i)))))
+      (let ((id (symbol 0 (list (string-append "@" (number->string i))))))
 	(if (not (hashq-ref sections id))
 	    id
 	    (next-section-id))))))
@@ -334,7 +334,7 @@ XXX - more version control things should be defined: logs, diffing,
 	   (desc-len (string-length desc))
 	   (title-len (or (string-index desc #\newline)
 			  (string-length desc)))
-	   (id (symbol->string (section-id s))))
+	   (id (symbol-basename (section-id s))))
       (display "@")
       (display-multi depth #\*)
       (display-multi (max (- 6 depth) 1) #\space)
@@ -502,11 +502,9 @@ XXX - more version control things should be defined: logs, diffing,
 		    (else
 		     (loop)))))))
 
-    (pk 'reading title)
-
     (values depth title id)))
 
-(define (read-section)
+(define (read-section import?)
 		 
   (define (read-sections header parents last-section top-section)
     (cond ((or (eof-object? header)
@@ -514,7 +512,7 @@ XXX - more version control things should be defined: logs, diffing,
 	   top-section)
 	  (else
 	   (let-values1 (depth title id (parse-section-header header))
-	     (let ((sec (if (eq? (bootstrap-phase) 'compile-for-image)
+	     (let ((sec (if import?
 			    (make-section)
 			    (find-section id))))
 	       (let ((new-parents
@@ -553,13 +551,13 @@ XXX - more version control things should be defined: logs, diffing,
 	(equal? line "!\n")))
 
   (define (read-chunk)
-    (let loop ((text ""))
+    (let loop ((lines '()))
       (let ((line (read-text-line)))
 	(cond ((or (eof-object? line)
 		   (chunk-header? line))
-	       (values text line))
+	       (values (apply string-append (reverse lines)) line))
 	      (else
-	       (loop (string-append text line)))))))
+	       (loop (cons line lines)))))))
     
   (define (read-content sec title)
     (define (gobble-desc)
@@ -603,9 +601,6 @@ XXX - more version control things should be defined: logs, diffing,
    (lambda ()
      (read-sections (read-nonblank-text-line) '() #f #f))))
 
-(define (read-section-and-write)
-  (write-section (read-section)))
-
 (define (read-forms-from-string str)
   (let ((p (make-string-input-port str)))
     (let loop ((res '()))
@@ -618,34 +613,17 @@ XXX - more version control things should be defined: logs, diffing,
 (define (eval-string str)
   (eval (cons 'begin (read-forms-from-string str))))
 
-(define (ensure-directory path)
-  (if (not (and=> (and=> (lookup* path) entry-value) directory?))
-      (make-directory path)))
-
 (define (call-with-current-directory path proc)
   (if path
-      (let* ((abs (pathname-concat (current-directory-path) path))
-	     (e (lookup* abs)))
-	(cond ((directory? (entry-value e))
-	       (call-p current-directory e
-		       (lambda ()
-			 (call-p current-directory-path abs
-				 proc))))
-	      (else
-	       (error "not a directory: " abs))))
+      (call-p current-directory (symbol-concat (current-directory) path)
+	      proc)
       (proc)))
 
 (define-macro (with-current-directory path . body)
   `(call-with-current-directory ,path (lambda () ,@body)))
 
 (define (call-with-open-directories paths proc)
-  (let ((dirs (map (lambda (p)
-		     (let ((d (and=> (lookup* p) entry-value)))
-		       (or (directory? d)
-			   (error "not a directory: " p))
-		       d))
-		   paths)))
-    (call-p open-directories dirs proc)))
+  (call-p open-directories paths proc))
 
 (define-macro (with-open-directories paths . body)
   `(call-with-open-directories ,paths (lambda () ,@body)))
@@ -664,15 +642,14 @@ XXX - more version control things should be defined: logs, diffing,
       (lambda ()
 	(set! (section-errors s) #f)
 	(let ((dir (section-directory s)))
-	  (or (pathname-absolute? dir)
+	  (or (symbol-absolute? dir)
 	      (error "must be absolute: " dir))
-	  (ensure-directory dir)
 	  (with-current-directory dir
 	    (with-open-directories (section-open-directories s)
 	      (let ((form (cons 'begin (read-forms-from-string 
 					(section-expressions s)))))
 		(eval form)
-		(map (lambda (n) (pathname-concat dir n))
+		(map (lambda (n) (symbol-concat dir n))
 		     (defined-names form)))))))))))
 
 (define (map-append proc list)
@@ -728,7 +705,9 @@ XXX - more version control things should be defined: logs, diffing,
 					  names)))
 		     (set! (section-committed s) (section-proposed s))
 		     (set! (section-defined-names s) names)
-		     (for-each /boot/rm obsolete-names)
+		     (for-each (lambda (n)
+				 (set! (symbol-value n) #f))
+			       obsolete-names)
 		     (set! (section-proposed s) #f)
 		     #t)
 		   #f)))
@@ -737,15 +716,17 @@ XXX - more version control things should be defined: logs, diffing,
   (commit-one s))
 
 (define (read-commit-write-section force)
-  (let ((s (read-section)))
+  (let ((s (read-section #f)))
     (commit-section s force)
     (write-section s)))
 
 (define (get-section id)
   (write-section (find-section id)))
 
+(define all-books '())
+
 (define (get-book title-prefix)
-  (let loop ((b boot-books))
+  (let loop ((b all-books))
     (cond ((null? b)
 	   (display "No such book: ")
 	   (display title-prefix)
@@ -757,13 +738,16 @@ XXX - more version control things should be defined: logs, diffing,
 	   (loop (cdr b))))))
 
 (define (put-section)
-  (write-section (read-section)))
+  (write-section (read-section #f)))
 
-(define (fix-section sec)
-  (if (eq? (section-defined-names sec) #t)
-      (begin
-	(pk 'fixing (section-id sec))
-	(set! (section-defined-names sec) '()))))
+(define (append-new-section)
+  (let* ((s (read-section #f))
+	 (n (make-section)))
+    (section-propose-description! n "Untitled")
+    (section-propose-parent! n s)
+    (write-section s)))
 
-(define (fix-all-sections)
-  (for-each fix-section (all-sections)))
+(define (import-book)
+  (let ((s (read-section #t)))
+    (set! all-books (cons s all-books))
+    (write-section s)))

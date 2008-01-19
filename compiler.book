@@ -5,10 +5,9 @@
 ;; - conversion to continuation-passing-style
 ;; - closure and argument conversion
 ;; - code generation
-
 =
 (directory /compiler)
-(open /boot)
+(open /assembler /utils /base)
 
 @**    CPS data structures                                            [@13 --]
 
@@ -250,7 +249,7 @@
 
 (define (genvar)
   (set! genvar-counter (1+ genvar-counter))
-  (cps-var (string->symbol (string-append "v" (number->string genvar-counter)))
+  (cps-var (symbol-append 'v (number->string genvar-counter)) 
 	   genvar-counter))
 
 @**    Code generation hooks for the compiler                         [@16 --]
@@ -413,7 +412,7 @@
 
   (define (lookup-thing name env)
     (or (lookup-env-symbol name env)
-	(and=> (lookup name) entry-value)))
+	(lookup* name #t #t)))
 
   (define (conv-func func-label args body env)
     (let* ((cont-arg (genvar))
@@ -596,14 +595,14 @@
 	   (conv-apply ?func ?args #t env c))
 	
 	  ((?func . ?args)
-	   (let ((transformer (and (pathname? ?func)
+	   (let ((transformer (and (symbol? ?func)
 				   (lookup-macro-transformer ?func env))))
 	     (if transformer
 		 (conv (apply transformer ?args) env c)
 		 (conv-apply ?func ?args #f env c))))
 
 	  (else
-	   (if (pathname? exp)
+	   (if (symbol? exp)
 	       (let ((thing (or (lookup-thing exp env)
 				(lookup-function exp env))))
 		 (cond ((cps-var? thing)
@@ -802,7 +801,7 @@
 -
 
 (define-macro (define-dynamic-attr name)
-  (let ((parm-name (symbol-append name '@parm)))
+  (let ((parm-name (symbol-append name "@parm")))
     `(begin (define ,parm-name (make-parameter '()))
  	    (define (,name obj)
  	      (assq-ref (,parm-name) obj)))))
@@ -810,7 +809,7 @@
 (define-macro (with-attr attr-obj-val . body)
   ;; attr-obj-val -> (attr obj val)
   (let* ((attr-name (car attr-obj-val))
-	 (parm-name (symbol-append attr-name '@parm))
+	 (parm-name (symbol-append attr-name "@parm"))
 	 (obj-exp (cadr attr-obj-val))
 	 (val-exp (caddr attr-obj-val)))
     `(call-p ,parm-name (acons ,obj-exp ,val-exp (,parm-name))
@@ -827,7 +826,7 @@
 (define-macro (with-attr* attr-objs-vals . body)
   ;; attr-objs-vals -> (attr objs vals)
   (let* ((attr-name (car attr-objs-vals))
-	 (parm-name (symbol-append attr-name '@parm))
+	 (parm-name (symbol-append attr-name "@parm"))
 	 (objs-exp (cadr attr-objs-vals))
 	 (vals-exp (caddr attr-objs-vals)))
     `(call-p ,parm-name (acons* ,objs-exp ,vals-exp (,parm-name))
@@ -955,7 +954,7 @@
 ;;
 (define (cps-gen-closure-ref-code result closure error-cont cont)
   (if error-cont
-      (let* ((error-closure (function-lookup 'error:not-a-closure))
+      (let* ((error-closure (function-lookup '/base/error:not-a-closure))
 	     (error-code (if (eq? error-closure (if #f #f))
 			     #f
 			     (record-ref error-closure 0))))
@@ -1207,10 +1206,10 @@
 @**    Putting it together                                            [@24 --]
 -
 
-(define cps-verbose #f)
+(define /compiler/cps-verbose #f)
 
 (define (cps-dbg tag cps)
-  (cond (cps-verbose
+  (cond (/compiler/cps-verbose
 	 (pk tag)
 	 (cps-print-stat cps 0)
 	 (newline))))
@@ -1233,7 +1232,7 @@
 ;; Takes EXP and returns a new expression that has the same effect as
 ;; EXP when evaluated.
 
-(define (compile exp)
+(define (/base/compile exp)
   (set! genvar-counter 0)
   (let ((exp (macroexpand exp)))
     (if (and (pair? exp) (eq? (car exp) :lambda))

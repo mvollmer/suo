@@ -1,0 +1,8 @@
+@* Minimal
+=
+(directory /minimal)
+-
+
+(define (bar) 12)
+
+(define foo (bar))

@@ -1,4 +1,7 @@
 @* Booting
+=
+(directory /boot)
+(open /base)
 -
 
 (display "Hello, Suo!")

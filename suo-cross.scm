@@ -161,12 +161,22 @@
 
 ;; Suo books have an external representation that is geared towards
 ;; editing it directly in a normal text editor.  We load these books
-;; by ignoring the sections structure in them completel and just
+;; by ignoring the sections structure in them completely and just
 ;; evaluating the expressions in them.
 ;;
 ;; As promised, we can simply use 'eval' and 'load' to evaluate forms
 ;; in the boot environment.
 
+(define (suofy-symbols form)
+  (cond ((symbol? form)
+	 (suo:intern-symbol
+	  (suo:create-symbol 0 (list (symbol->string form)))))
+	((pair? form)
+	 (cons (suofy-symbols (car form))
+	       (suofy-symbols (cdr form))))
+	(else
+	 form)))
+	
 (define (read-forms-from-string str)
   (with-input-from-string str
     (lambda ()
@@ -207,13 +217,6 @@
 (define (boot-eval form)
   (eval form boot-module))
 
-(define (boot-load filename)
-  (pk 'boot-load filename)
-  (save-module-excursion
-   (lambda ()
-     (set-current-module boot-module)
-     (load filename))))
-
 (define (boot-load-book filename)
   (pk 'boot-load-book filename)
   (load-book filename boot-eval))
@@ -229,13 +232,79 @@
 ;; environment.
 ;;
 ;; Singletons like '#f' and '()', numbers, characters, pairs, vectors,
-;; symbols, keywords and strings are implemented directly by using the
-;; host Scheme data tyes.  The compiler uses nothing Suo specific
-;; about them.
+;; keywords and strings are implemented directly by using the host
+;; Scheme data tyes.  The compiler uses nothing Suo specific about
+;; them.
+;;
+;; Suo symbols are richer than normal Scheme symbols: they have a list
+;; of strings as their components instead of just a single string as
+;; the name.  But symbols need to be available from the start for
+;; bootstrapping reasons and thus we have to implement them here as
+;; well.
+
+;; (define suo-symbol-type
+;;   (make-record-type 'symbol '(offset components)))
+
+;; (define suo:symbol? (record-predicate suo-symbol-type))
+;; (define suo:create-symbol (record-constructor suo-symbol-type))
+;; (define suo:symbol-offset (record-accessor suo-symbol-type 'offset))
+;; (define suo:symbol-components (record-accessor suo-symbol-type 'components))
+
+;; (define boot-symbols (make-hash-table 511))
+
+(define symbol-extra-info (make-hash-table 511))
+
+(define (make-symbol-extra-info sym)
+  (let ((str (symbol->string sym)))
+    (cond ((equal? str ".")
+	   (cons 0 '()))
+	  ((equal? str "/")
+	   (cons #t '()))
+	  (else
+	   (let ((comps (string-split (symbol->string sym) #\/)))
+	     (if (equal? "" (car comps))
+		 (cons #t (cdr comps))
+		 (cons 0 comps)))))))
+
+(define (get-symbol-extra-info sym)
+  (or (hashq-ref symbol-extra-info sym)
+      (let ((info (make-symbol-extra-info sym)))
+	(hashq-set! symbol-extra-info sym info)
+	info)))
+
+(define (suo:symbol-offset sym)
+  (car (get-symbol-extra-info sym)))
+
+(define (suo:symbol-components sym)
+  (cdr (get-symbol-extra-info sym)))
+
+(define (string-concat del . strings)
+  (cond ((null? strings)
+	 "")
+	((null? (cdr strings))
+	 (car strings))
+	(else
+	 (apply string-concat del
+		(string-append (car strings) del (cadr strings))
+		(cddr strings)))))
+
+(define (suo:symbol offset components)
+  (cond ((and (equal? offset 0)
+	      (null? components))
+	 '.)
+	(else
+	 (or (eq? #t offset)
+	     (zero? offset)
+	     (error "symbol offsets not supported, sorry:" offset components))
+	 (let ((name (apply string-concat "/" components)))
+	   (string->symbol (if (eq? offset #t)
+			       (string-append "/" name)
+			       name))))))
 
 (boot-import eq?
 
-	     + - * < = > <= >= quotient remainder
+	     + - * < = > <= >= quotient remainder 1- 1+
+	     number->string zero?
 
 	     pair? cons car cdr set-car! set-cdr!
 
@@ -244,11 +313,12 @@
 	     vector? vector-length make-vector vector-ref vector-set!
 	     vector->list
 
-	     symbol? symbol->string string->symbol gensym symbol-append
+	     symbol? symbol symbol-offset symbol-components
 
 	     keyword? symbol->keyword keyword->symbol
 
-	     string? make-string string-length string-ref string-set!)
+	     string? make-string string-length string-ref string-set!
+	     string-append)
 
 ;; Records are implemented using, errm, records, but with records of a
 ;; different kind.  The fields of the Suo record are simply stored as
@@ -318,7 +388,6 @@
 
 (define (suo:make-record-type name parent-type slots)
   (pk 'boot-record-type name slots)
-  (set! boot-record-types (cons (symbol-append name '@type) boot-record-types))
   (if parent-type
       (error "inheritance not supported"))
   (let* ((ancestry (vector #f))
@@ -336,7 +405,7 @@
 
 (boot-import record? record-with-type?
 	     type-of-record record-length record-ref record-set!
-	     record-type-type record make-record make-record-type
+	     record make-record make-record-type
 	     record-type-accessor record-type-constructor)
 
 ;; Code objects are implemented as records with explicit bytevec and
@@ -487,22 +556,24 @@
 
 (define boot-bindings (make-hash-table 513))
 
-(define (lookup sym)
-  (hashq-ref boot-bindings sym))
+(define symbol-value
+  (lambda-with-setter ((sym)
+		       ;;(pk 'image-value sym)
+		       (hashq-ref boot-bindings sym))
+		      ((sym val)
+		       ;;(pk 'image-binding sym val)
+		       (hashq-set! boot-bindings sym val))))
+		      
+(define (lookup* sym in-open-dirs? allow-undefined?)
+  (boot-eval `(lookup* ',sym ',in-open-dirs? ',allow-undefined?)))
 
-(define (make-entry val attrs)
-  (cons val attrs))
-
-(define entry-value car)
-
-(define (enter sym ent)
-  (hashq-set! boot-bindings sym ent))
+(define (enter sym val)
+  (boot-eval `(enter ',sym ',val)))
 
 (define undeclared-variables '())
 
 (define (image-lookup sym)
-  (or (resolve-transmogrification (entry-value (lookup sym)))
-      (error "undeclared in image: " sym)))
+  (resolve-transmogrification (lookup* sym #t #t)))
 
 (define (check-undefined-variables)
   (let ((variable@type (boot-eval 'variable@type))
@@ -519,60 +590,59 @@
 			 (pk 'huh? sym)))))
 	      undeclared-variables)))
 
-(define (suo:variable-declare sym . attrs)
-  (let ((variable@type (boot-eval 'variable@type)))
-    (let ((ent (lookup sym)))
-      (cond ((not ent)
-	     (let ((var (suo:record variable@type (begin))))
-	       ;;(pk 'image-variable sym)
-	       (enter sym (make-entry var attrs))
-	       var))
-	    ((suo:record-with-type? (entry-value ent) variable@type)
-	     (set-cdr! ent attrs)
-	     (entry-value ent))
-	    (else
-	     (error "already declared, but not as variable: " sym))))))
+;; (define (suo:variable-declare sym)
+;;   (let ((variable@type (boot-eval 'variable@type)))
+;;     (let ((old (lookup* sym #f #t)))
+;;       (cond ((not old)
+;; 	     (let ((var (suo:record variable@type (begin))))
+;; 	       ;;(pk 'image-variable sym)
+;; 	       (enter sym var)
+;; 	       var))
+;; 	    ((suo:record-with-type? old variable@type)
+;; 	     old)
+;; 	    (else
+;; 	     (error "already declared, but not as variable: " sym))))))
 
-(define (suo:function-declare sym . attrs)
+(define (suo:function-declare sym)
   (let ((closure@type (boot-eval 'closure@type)))
-    (let ((ent (lookup sym)))
-      (cond ((not ent)
+    (let ((old (lookup* sym #f #t)))
+      (cond ((not old)
 	     (let ((func (suo:record closure@type #f #f #f #f)))
 	       ;;(pk 'image-function sym)
-	       (enter sym (make-entry func attrs))
+	       (enter sym func)
 	       func))
-	    ((suo:record-with-type? (entry-value ent) closure@type)
+	    ((suo:record-with-type? old closure@type)
 	     ;;(pk 'image-function-late sym)
-	     (set-cdr! ent attrs)
-	     (entry-value ent))
+	     old)
 	    (else
 	     (error "already declared, but not as function: " sym))))))
 
-(define (suo:variable-lookup sym)
-  (let ((variable@type (boot-eval 'variable@type)))
-    (let ((ent (lookup sym)))
-      (cond ((not ent)
-	     ;;(pk 'image-undeclared sym)
-	     (set! undeclared-variables (cons sym undeclared-variables))
-	     (let ((var (suo:record variable@type (if #f #f))))
-	       (enter sym (make-entry var '()))
-	       var))
-	    ((suo:record-with-type? (entry-value ent) variable@type)
-	     (entry-value ent))
-	    (else
-	     (error "not a variable: " sym))))))
+;; (define (suo:variable-lookup sym)
+;;   (let ((variable@type (boot-eval 'variable@type)))
+;;     (let ((val (lookup* sym #t #t)))
+;;       (cond ((not val)
+;; 	     ;;(pk 'image-undeclared sym)
+;; 	     (set! undeclared-variables (cons sym undeclared-variables))
+;; 	     (let ((var (suo:record variable@type (if #f #f))))
+;; 	       (enter sym var)
+;; 	       var))
+;; 	    ((suo:record-with-type? val variable@type)
+;; 	     val)
+;; 	    (else
+;; 	     (error "not a variable: " sym))))))
 
 (define (suo:function-lookup sym)
-  (let ((closure@type (boot-eval 'closure@type)))
-    (let ((ent (lookup sym)))
-      (cond ((not ent)
+  (let ((closure@type (boot-eval 'closure@type))
+	(full-name (boot-eval `(symbol-concat (current-directory) ',sym))))
+    (let ((val (lookup* sym #t #t)))
+      (cond ((not val)
 	     ;; (pk 'image-undeclared sym)
-	     (set! undeclared-variables (cons sym undeclared-variables))
+	     (set! undeclared-variables (cons full-name undeclared-variables))
 	     (let ((func (suo:record closure@type #f #f #f #f)))
-	       (enter sym (make-entry func '()))
+	       (enter sym func)
 	       func))
-	    ((suo:record-with-type? (entry-value ent) closure@type)
-	     (resolve-transmogrification (entry-value ent)))
+	    ((suo:record-with-type? val closure@type)
+	     (resolve-transmogrification val))
 	    (else
 	     (error "not a function: " sym))))))
 
@@ -580,9 +650,10 @@
   (assq-ref boot-macro-transformers sym))
 
 (define (suo:macro-define sym val)
-  (let ((macro@type (boot-eval 'macro@type)))
+  (let* ((macro@type (boot-eval 'macro@type))
+	 (mac (suo:record macro@type val)))
     ;; (pk 'image-macro sym)
-    (enter sym (make-entry (suo:record macro@type val) '()))))
+    (boot-eval `(enter ',sym ',mac))))
 
 (define-macro (suo:declare-variables . syms)
   ;; Nothing to do when loading into host Scheme
@@ -591,22 +662,21 @@
 (register-boot-macro
  'declare-variables
  (lambda syms
-   (let ((variable@type (boot-eval 'variable@type)))
-     (apply pk 'image-declare syms)
-     (for-each (lambda (sym)
-		 (enter sym
-			(make-entry (suo:record variable@type
-						(if #f #f))
-				    '()))
-		 #f)
-	       syms)
-     '(begin))))
+   (apply pk 'image-declare syms)
+   (for-each (lambda (sym)
+	       (boot-eval `(variable-declare ',sym)))
+	     syms)
+   '(begin)))
 
-(boot-import lookup
-	     variable-declare variable-lookup
-	     function-declare function-lookup
-	     macro-lookup macro-define
-	     declare-variables)
+(boot-import symbol-value
+	     ;; lookup* lookup
+	     ;; variable-declare variable-lookup
+	     function-declare
+	     function-lookup
+	     macro-lookup
+	     ;; macro-define
+	     ;; declare-variables
+	     )
 
 ;; Some of the toplevel forms that are compiled are simple enough that
 ;; they can be carried out at compile time.  Other forms are collected
@@ -620,13 +690,10 @@
   (set! image-expressions (cons exp image-expressions)))
 
 (define (add-image-variable-init var val)
-  (add-image-expression `(primop record-set ',var 0 ,val)))
+  (add-image-expression `(record-set! ',var 0 ,val)))
 
 (define (add-image-closure-transmogrify clos val)
   (add-image-expression `(transmogrify-objects (vector ',clos) (vector ,val))))
-
-(define (image-expression)
-  (cons 'begin (reverse image-expressions)))
 
 (define transmogrifications (make-hash-table 1023))
 
@@ -653,16 +720,16 @@
 (define (image-eval form)
 
   (define (compile form)
-    (boot-eval `(compile ',form)))
+    (boot-eval `(/base/compile ',form)))
 
   (define (variable-lookup sym)
     (boot-eval `(variable-lookup ',sym)))
 
-  (define (variable-declare sym . attrs)
-    (apply (boot-eval 'variable-declare) sym attrs))
+  (define (variable-declare sym)
+    ((boot-eval 'variable-declare) sym))
 
-  (define (function-declare sym . attrs)
-    (apply (boot-eval 'function-declare) sym attrs))
+  (define (function-declare sym)
+    ((boot-eval 'function-declare) sym))
 
   (define (macro-define sym val)
     (boot-eval `(macro-define ',sym ',val)))
@@ -690,7 +757,7 @@
 	       (if #f #f)))
 	    ((:define)
 	     (let* ((name (cadr exp))
-		    (var (variable-declare name (cons 'source (caddr exp))))
+		    (var (variable-declare name))
 		    (val-exp (compile (caddr exp))))
 	       (if (constant? val-exp)
 		   (suo:record-set! var 0 (constant-value val-exp))
@@ -698,8 +765,12 @@
 	       (if #f #f)))
 	    ((:define-function)
 	     (let* ((name (cadr exp))
-		    (func (function-declare name (cons 'source (caddr exp))))
+		    (full-name (boot-eval `(symbol-concat
+					    (current-directory) ',name)))
+		    (func (function-declare name))
 		    (val-exp (compile (caddr exp))))
+	       (set! undeclared-variables
+		     (delq full-name undeclared-variables))
 	       (if (constant? val-exp)
 		   (transmogrify-objects func (constant-value val-exp))
 		   (add-image-closure-transmogrify func val-exp))
@@ -711,6 +782,10 @@
 		   (macro-define name (constant-value val-exp))
 		   (error "macro transformer not constant: " val-exp)))
 	     (if #f #f))
+	    ((:import-boot-record-type)
+	     (let ((name (cadr exp)))
+	       (pk 'imported-boot-record-type name)
+	       (enter name (boot-eval name))))
 	    (else
 	     (add-image-expression exp)))
 	  (error "useless form at toplevel: " exp))))
@@ -746,28 +821,58 @@
 	 (title-len (or (string-index desc #\newline)
 			(string-length desc))))
     (pk 'compiling (substring desc 0 title-len)))
-  (eval-string (boot-eval `(section-expressions ',sec)) image-eval)
+  (image-eval (cons 'begin
+		   (boot-eval `(read-forms-from-string
+				(section-expressions ',sec)))))
   (boot-eval `(let ((sec ',sec))
 		(set! (section-id sec) #f)
 		(set! (section-committed sec) (section-proposed sec))
 		(set! (section-proposed sec) #f)))
   (for-each image-eval-section (boot-eval `(section-children ',sec))))
 
+(define suo:call-cc call/cc)
+
+(define image-boot-procs '())
+
+(define (suo:eval form)
+  (set! image-expressions '())
+  (image-eval form)
+  (if (not (null? image-expressions))
+      (let ((comp (boot-eval
+		   `(/base/compile
+		     '(:lambda () ,@(reverse image-expressions))))))
+	(or (constant? comp)
+	    (error "expected constant"))
+	(set! image-boot-procs (cons (constant-value comp)
+				     image-boot-procs)))))
+
+(define (image-expression)
+  `((:lambda (loop) (loop loop ',(reverse image-boot-procs)))
+    (:lambda (loop procs)
+      (:primitive if-eq? () (procs '())
+		  ((:begin)
+		   (:primitive car (proc) (procs)
+			       ((:begin
+				 (proc)
+				 (:primitive cdr (rest) (procs)
+					     ((loop loop rest)))))))))))
+
+(boot-import eval call-cc)
+
 (define (image-load-book file)
   (pk 'image-load file)
   (set! current-bootstrap-phase 'compile-for-image)
   (with-input-from-file file
     (lambda ()
-      (let ((sec (boot-eval '(read-section))))
-	(image-eval-section sec)
+      (let ((sec (boot-eval '(read-section #t))))
+	(boot-eval `(commit-section ',sec #t))
 	(set! image-books (cons sec image-books))))))
 
 (define (image-import-books)
-  (let ((variable@type (boot-eval 'variable@type)))
-    (enter 'boot-books (make-entry (suo:record variable@type 
-					       (reverse image-books))
-				   '()))))
-  
+  (let ((variable@type (boot-eval 'variable@type))
+	(all-books-variable (boot-eval '(variable-lookup '/books/all-books))))
+    (suo:record-set! all-books-variable 0 (reverse image-books))))
+
 ;; We copy some variable bindings from the boot environment over to
 ;; the image environment in order to ease bootstrapping further.  All
 ;; bindings that are copied are for record types that the compiler
@@ -775,10 +880,13 @@
 ;; boot and image environment.
 
 (define (import-symbol-definition-from-boot sym)
-  (let ((variable@type (boot-eval 'variable@type)))
-    (enter sym (make-entry (suo:record variable@type
-				       (boot-eval sym))
-			   '()))))
+  (let* ((old (symbol-value sym))
+	 (name (boot-eval `(symbol-basename ',sym)))
+	 (new (boot-eval (string->symbol name))))
+    (pk 'importing sym old new)
+    (if old
+	(transmogrify-objects old new)
+	(enter sym new))))
 
 (define-macro (image-import-from-boot . syms)
   `(begin
@@ -787,7 +895,6 @@
 	    syms)))
 
 (define (image-import-boot-record-types)
-  (image-import-from-boot record-type-type)
   (for-each import-symbol-definition-from-boot boot-record-types))
 
 ;;; Dumping Suo objects into a u32vector
@@ -963,7 +1070,9 @@
 						 (string->list obj))))))
 	    (emit suo-str obj)))
 	 ((symbol? obj)
-	  (let ((suo-sym (suo:record suo:symbol@type (symbol->string obj))))
+	  (let ((suo-sym (suo:record suo:symbol@type 
+				     (suo:symbol-offset obj)
+				     (suo:symbol-components obj))))
 	    (set! all-symbols (cons obj all-symbols))
 	    (emit suo-sym obj)))
 	 ((keyword? obj)
@@ -985,6 +1094,10 @@
 		   (append (suo-bytevec-u32->list insns)
 			   (map asm (vector->list literals))))))
 	 ((integer? obj)
+	  (pk 'bignum obj
+	      (suo:fixnum? obj)
+	      (= -536870912 obj))
+	      
 	  ;; bignum, fixnums are handled by asm below
 	  (let ((suo-bignum (integer->bignum obj)))
 	    (emit suo-bignum obj)))
@@ -1033,9 +1146,10 @@
       (asm all-keywords)
       (asm all-symbols)
       (for-each (lambda (idx)
-		  (emit-words idx (asm (list all-symbols
-					     all-keywords
-					     all-bindings))))
+		  (pk 'bootindex idx)
+		  (emit-words idx (pk 'word (asm (list all-symbols
+						       all-keywords
+						       all-bindings)))))
 		bootinfo-idxs))
 
     (u32subvector mem 0 idx)))

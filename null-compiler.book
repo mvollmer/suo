@@ -2,7 +2,10 @@
 
 This is used to quickly test changes to the bootstrapping process
 when bootstrapping the real compiler would be too slow.
+=
+(directory /compiler)
+(open /base)
 -
 
-(define (compile exp)
+(define (/base/compile exp)
   (macroexpand exp))

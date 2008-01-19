@@ -27,7 +27,6 @@
 (boot-load-book "assembler.book")
 (boot-load-book "compiler.book")
 (boot-load-book "books.book")
-(image-import-boot-record-types)
 
 (define (write-image mem file)
   (let* ((port (open-output-file file)))
@@ -36,9 +35,10 @@
 
 (define (make-bootstrap-image exp file)
   (let ((comp-exp (boot-eval
-		   `(compile '(lambda ()
-				,exp
-				(primop syscall))))))
+		   `(/base/compile '(:lambda ()
+					     ,exp
+					     (:primitive syscall (result) ()
+							 ((:begin))))))))
     (or (constant? comp-exp)
 	(error "expected constant"))
     (write-image (dump-object (constant-value comp-exp))
@@ -49,6 +49,7 @@
   (image-load-book "null-compiler.book")
   (image-load-book "books.book")
   (image-load-book "boot.book")
+  (image-import-boot-record-types)
   (image-import-books)
   (make-bootstrap-image (image-expression) "base"))
 
@@ -59,18 +60,17 @@
   (image-load-book "compiler.book")
   (image-load-book "books.book")
   (image-load-book "boot.book")
+  (image-import-boot-record-types)
   (image-import-books)
   (make-bootstrap-image (image-expression) "compiler"))
 
 (define (compile-minimal)
   (boot-eval '(set! cps-verbose #t))
-  (make-bootstrap-image
-   '(begin
-      (define foo 12))
-   "minimal"))
+  (image-load-book "minimal.book")
+  (make-bootstrap-image (image-expression) "minimal"))
 
-(compile-base)
-;;(compile-compiler)
+;;(compile-base)
+(compile-compiler)
 ;;(compile-minimal)
 
 (boot-eval '(dump-sigs-n-calls))
