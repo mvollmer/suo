@@ -120,7 +120,7 @@
 ;;
 ;;   TEXT can be a string, or it can be a list of the forms
 ;;
-;;     (text STRING PROP...)
+;;     (text TEXT PROP...)
 ;;     (seq TEXT...)
 ;;
 ;;   PROP can be any text property that Emacs understands.
@@ -211,9 +211,9 @@
 (defun suo-ok ()
   (suo-respond 'ok))
 
-(defun suo-event (ev)
-  (message "* %S" ev)
-  (suo-respond (cons 'event ev)))
+(defun suo-event (id ev)
+  (message "* %s %S" id ev)
+  (suo-respond (list 'event id ev)))
 
 (defun suo-dispatch (buffer)
   (let (req)
@@ -333,7 +333,7 @@
 	       (setf (suo-segment-dirtyp seg) t)
 	       (let ((id (suo-get-id seg)))
 		 (if id
-		     (suo-event `(dirty ,id)))))))))
+		     (suo-event id 'dirty))))))))
 
 (defun suo-commit ()
   (interactive)
@@ -390,11 +390,11 @@
 
       seg)))
 
-(defun suo-define-key (seg key event)
+(defun suo-define-key (seg key)
   (define-key (suo-segment-keymap seg) (read-kbd-macro key)
     `(lambda ()
        (interactive)
-       (suo-event '(key ,(suo-get-id seg) ,event)))))
+       (suo-event ',(suo-get-id seg) ',key))))
 
 (defun suo-destroy-segment (seg)
   (set-marker (suo-segment-min seg) nil)
@@ -406,6 +406,10 @@
 
 (defun suo-show-segment (seg)
   (overlay-put (suo-segment-over seg) 'invisible nil))
+
+(defun suo-goto-segment (seg)
+  (with-current-buffer (suo-segment-buffer seg)
+    (goto-char (suo-segment-min seg))))
 
 (defun suo-segment-apply-props (seg)
   (if (plist-get (suo-segment-props seg) 'read-only)
@@ -425,13 +429,23 @@
 	(suo-segment-destroy seg)
 	(setq suo-segments (delq seg suo-segments))))))
 
+(defun suo-insert-structured-text (text)
+  (cond ((stringp text)
+	 (insert text))
+	((eq (car text) 'text)
+	 (let ((p (point)))
+	   (suo-insert-structured-text (cadr text))
+	   (add-text-properties p (point) (cddr text))))
+	((eq (car text) 'seq)
+	 (mapcar 'suo-insert-structured-text (cdr text)))))
+
 (defun suo-set-text (seg text)
   (with-current-buffer (suo-segment-buffer seg)
     (save-excursion
       (let ((inhibit-read-only t))
 	(delete-region (suo-segment-min seg) (suo-segment-max seg))
 	(goto-char (suo-segment-min seg))
-	(insert text)
+	(suo-insert-structured-text text)
 	(suo-segment-apply-props seg)))))
 
 (defun suo-append-text (seg text)
@@ -439,7 +453,7 @@
     (save-excursion
       (let ((inhibit-read-only t))
 	(goto-char (suo-segment-max seg))
-	(insert text)
+	(suo-insert-structured-text text)
 	(suo-segment-apply-props seg)))))
 
 (defun suo-get-text (seg)
@@ -489,6 +503,10 @@
   (suo-show-segment (suo-get seg))
   (suo-ok))
 
+(def-suo-req goto-segment (seg)
+  (suo-goto-segment (suo-get seg))
+  (suo-ok))
+
 (def-suo-req remove-segment (id)
   (suo-remove-segment (suo-get id))
   (suo-ok))
@@ -508,6 +526,6 @@
   (suo-clear-dirty (suo-get seg))
   (suo-ok))
 
-(def-suo-req define-key (seg key event)
-  (suo-define-key (suo-get seg) key event)
+(def-suo-req define-key (seg key)
+  (suo-define-key (suo-get seg) key)
   (suo-ok))

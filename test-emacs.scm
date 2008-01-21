@@ -40,17 +40,17 @@
 
 (define event-handlers (make-hash-table))
 
-(define (register-handler obj tag handler)
-  (hash-set! event-handlers (cons obj tag) handler))
+(define (register-handler id tag handler)
+  (hash-set! event-handlers (list id tag) handler))
 
 (define (handle-event ev)
   (pk ev)
-  (let* ((tag (car ev))
-	 (obj (cadr ev))
-	 (args (cddr ev))
-	 (handler (hash-ref event-handlers (cons obj tag))))
+  (let ((handler (hash-ref event-handlers ev)))
     (if handler
-	(apply handler args))))
+	(handler)
+	(let ((handler (hash-ref event-handlers (car ev))))
+	  (if handler
+	      (handler (cadr ev)))))))
 
 (define (create-buffer name)
   (do-request `(create-buffer ,name)))
@@ -67,6 +67,9 @@
 (define (show-segment seg)
   (do-request `(show-segment ,seg)))
 
+(define (goto-segment seg)
+  (do-request `(goto-segment ,seg)))
+
 (define (set-text segment text)
   (do-request `(set-text ,segment ,text)))
 
@@ -79,25 +82,40 @@
 (define (get-text segment)
   (do-request `(get-text ,segment)))
 
-(define (define-key segment key event)
-  (do-request `(define-key ,segment ,key ,event)))
+(define (define-key segment key handler)
+  (do-request `(define-key ,segment ,key))
+  (register-handler segment key handler))
 
 (define (emacs-repl)
   (let* ((buffer     (create-buffer "*suo-repl*"))
 	 (transcript (create-segment buffer 0 '(read-only t)))
-	 (cmdline    (create-segment buffer 1 '())))
+	 (ts-empty   #t)
+	 (cmdline    (create-segment buffer 1 '()))
+	 (alertbox   (create-segment buffer 2 '(read-only t))))
+
+    (define (alert msg)
+      (set-text alertbox msg)
+      (clear-dirty cmdline))
+
+    (define (dirty)
+      (set-text alertbox ""))
 
     (define (submit)
-      (let ((str (get-text cmdline)))
-	(cond ((equal? str "show")
-	       (show-segment transcript))
-	      ((equal? str "hide")
-	       (hide-segment transcript)))
-	(append-text transcript (string-append "\n" str))
-	(set-text cmdline "")))
+      (let ((text `(text ,(get-text cmdline) face bold)))
+	(cond (ts-empty
+	       (append-text transcript text)
+	       (show-segment transcript)
+	       (set! ts-empty #f))
+	      (else
+	       (append-text transcript `(seq "\n" ,text))))
+	(set-text cmdline "")
+	(alert "done")))
       
-    (define-key cmdline "RET" 'submit)
-    (register-handler cmdline 'key (lambda (arg) (submit)))
+    (define-key cmdline "RET" submit)
+    (register-handler cmdline 'dirty dirty)
+
+    (hide-segment transcript)
+    (goto-segment cmdline)
     (show-buffer buffer)
     (event-loop)))
 
