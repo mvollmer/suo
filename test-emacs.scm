@@ -99,6 +99,15 @@
 						      :inherit italic))))
 	 (submitted #f))
 
+    (define (create-code-segment pos)
+      (let ((seg (create-segment buffer pos '(face nil
+					    active-face (:background
+							 "grey95")
+					    mode code))))
+	(define-key seg "C-c C-c"
+	  (lambda ()
+	    (eval-and-print (get-text seg))))))
+
     (define (message str)
       (set-text alertbox str))
 
@@ -136,21 +145,34 @@
       (message ""))
 
     (define (print-error args)
-      (output `(text ,(object->string args)
-		     :foreground "red" :inherit italic))
-      (message ""))
+      (let ((str (if (>= (length args) 4)
+		     (apply simple-format #f (caddr args) (cadddr args))
+		     (object->string args))))
+	(output `(text ,str :foreground "red" :inherit italic))
+	(message "")))
 
-    (define (repl)
+    (define (eval-and-print string)
       (catch #t
 	     (lambda ()
-	       (print-result (eval (with-input-from-string (input) read)
+	       (print-result (eval (with-input-from-string string read)
 				   (current-module))))
 	     (lambda args
-	       (print-error args)))
+	       (if (eq? (car args) 'quit)
+		   (begin
+		     (output `(text "quitting..." :inherit italic))
+		     (exit 0))
+		   (print-error args)))))
+      
+    (define (repl)
+      (eval-and-print (input))
       (repl))
 
     (define-key cmdline "RET" submit)
     (register-handler cmdline 'dirty dirty)
+
+    (create-code-segment 3)
+    (create-code-segment 4)
+    (create-code-segment 5)
 
     (hide-segment transcript)
     (goto-segment cmdline)

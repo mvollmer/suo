@@ -177,7 +177,7 @@
       (signal-process suo-process 15)))
 
 (defun suo-sentinel (proc msg)
-  (message "Suo: %s" msg)
+  (message "Suo: %s" (substring msg 0 -1))
   (suo-destroy-all-objects)
   (suo-reset-ids)
   (setq suo-process nil))
@@ -204,7 +204,7 @@
 ;;; Requests, responses, and events
 
 (defun suo-respond (response)
-  (message "> %S" response)
+  ;; (message "> %S" response)
   (process-send-string suo-process (prin1-to-string response))
   (process-send-string suo-process "\n"))
 
@@ -212,13 +212,13 @@
   (suo-respond 'ok))
 
 (defun suo-event (id ev)
-  (message "* %s %S" id ev)
+  ;; (message "* %s %S" id ev)
   (suo-respond (list 'event id ev)))
 
 (defun suo-dispatch (buffer)
   (let (req)
     (while (setq req (suo-read-form))
-      (message "< %S" req)
+      ;; (message "< %S" req)
       (condition-case err
 	  (let ((handler (get (car req) 'suo-handler)))
 	    (or handler
@@ -288,7 +288,12 @@
       (setq suo-segments '())
       (make-local-variable 'after-change-functions)
       (setq after-change-functions (cons 'suo-modified-hook
-					 after-change-functions)))
+					 after-change-functions))
+      (make-local-variable 'indent-line-function)
+      (make-local-variable 'suo-mode-name)
+      (setq mode-line-format '("Suo: "
+			       suo-mode-name
+			       mode-line-position)))
     buffer))
 
 (defun suo-show-buffer (buffer)
@@ -300,11 +305,12 @@
 (defun suo-destroy-buffer (buffer)
   (if (buffer-name buffer)
       (with-current-buffer buffer
+	(setq buffer-read-only t)
 	(rename-buffer (concat (buffer-name buffer) " (destroyed)") t))))
 
 ;;; Segments
 
-;; Segments are defined by text properties.  A segment can never be
+;; Segments are defined by an overlay.  A segment can never be
 ;; empty, it always ends in a read-only newline character.  This way,
 ;; the point can never be between segments: placing it before the
 ;; final newline puts it at the end of the segment that owns the
@@ -319,28 +325,23 @@
 ;; excluding the final newline.  That is, the max marker points just
 ;; before the final newline.
 ;;
-;; All characters of the segment (including the final newline) have a
-;; 'suo-segment' property that points to the segment structure.  They
-;; also have a 'keymap' property that receives the segment specific
-;; key bindings.  They all have the visual properties determined by
-;; the segment properties.
+;; The overlay of the segment includes the final newline.  I't has a
+;; 'suo-segment' property that points to the segment structure.  It
+;; also has a 'keymap' property that receives the segment specific key
+;; bindings.  The overlay also controls visibility and default
+;; background color
 ;;
-;; The characters of a read-only segment have a read-only property of
-;; t, naturally.
+;; The characters of a read-only segment have a read-only text
+;; property of t, naturally.
 ;;
-;; The properties of the final newline are non-rearsticky and always
-;; read-only.  That way, it can not be removed and the segment
+;; The text properties of the final newline are non-rearsticky and
+;; always read-only.  That way, it can not be removed and the segment
 ;; properties do not bleed into the next segment.  (However, the final
-;; newline of the final segment could be made rear-stick to prevent
+;; newline of the final segment could be made rear-sticky to prevent
 ;; typing into never never land.)
-;;
-;; The properties are front-sticky so that newly inserted text
-;; inherits the properties from the final newline.  When making
-;; programmatic changes to the text of the segment, all the properties
-;; are reset.
 
 (defstruct suo-segment
-  buffer min max keymap dirtyp props face-attrs)
+  buffer min max props overlay keymap dirtyp text-props)
 
 (defun insert-into-list (list elt pos)
   (if (= pos 0)
@@ -358,7 +359,7 @@
 (defun suo-modified-hook (beg end pre)
   (let ((seg (get-char-property beg 'suo-segment)))
     (cond ((and seg (not (suo-segment-dirtyp seg)))
-	   (message "dirty")
+	   ;; (message "dirty")
 	   (setf (suo-segment-dirtyp seg) t)
 	   (let ((id (suo-get-id seg)))
 	     (if id
@@ -369,16 +370,16 @@
       nil
     (cons (car plist) (get-prop-names (cddr plist)))))
 
-(defun suo-compute-text-props (seg props keymap)
-  (let* ((text-props `(suo-segment ,seg
-	 	       keymap ,keymap
-		       ,@(if (plist-get props 'read-only)
-			     '(read-only t)
-			   nil))))
-    (append (list 'front-sticky
-		  (cons 'face
-			(get-prop-names text-props)))
-	    text-props)))
+(defun suo-enter-leave-trampoline (pos func)
+  (let ((seg (get-char-property pos 'suo-segment)))
+    (if seg
+	(funcall func seg))))
+
+(defun suo-make-enter-func (func)
+  `(lambda (old new) (suo-enter-leave-trampoline new ',func)))
+
+(defun suo-make-leave-func (func)
+  `(lambda (old new) (suo-enter-leave-trampoline old ',func)))
 
 (defun suo-create-segment (buffer pos props)
   (with-current-buffer buffer
@@ -394,12 +395,7 @@
 				  :max max-marker
 				  :keymap keymap
 				  :dirtyp nil
-				  :props nil)))
-
-      (setf (suo-segment-props seg)
-	    (suo-compute-text-props seg props keymap))
-      (setf (suo-segment-face-attrs seg)
-	    (plist-get props 'face))
+				  :props props)))
 
       (set-marker min-marker (if next-seg
 				 (suo-segment-min next-seg)
@@ -408,15 +404,41 @@
       (set-marker-insertion-type min-marker nil)
       (set-marker-insertion-type max-marker t)
 
+      (let ((text-props '()))
+	(if (plist-get (suo-segment-props seg) 'read-only)
+	    (setq text-props (append '(read-only t) text-props)))
+	(let* ((mode (plist-get (suo-segment-props seg) 'mode))
+	       (enter-func (or (get mode 'suo-enter-func)
+			       'suo-plain-mode))
+	       (leave-func (or (get mode 'suo-leave-func)
+			       'suo-mode-leave)))
+	  (setq text-props
+		(append `(point-entered ,(suo-make-enter-func enter-func)
+			  point-left ,(suo-make-leave-func leave-func))
+			text-props))
+	  (setf (suo-segment-text-props seg) text-props)))
+
       (save-excursion
 	(goto-char min-marker)
 	(insert "\n")
 	(if next-seg
 	    (set-marker (suo-segment-min next-seg) max-marker))
-	(set-marker max-marker min-marker))
+	(let ((inhibit-read-only t))
+	  (put-text-property min-marker max-marker 'rear-nonsticky t)
+	  (put-text-property min-marker max-marker
+			     'front-sticky (get-prop-names 
+					    (suo-segment-text-props seg)))
+	  (add-text-properties min-marker max-marker
+			       (suo-segment-text-props seg))
+	  (put-text-property min-marker max-marker 'read-only t)
+	  (set-marker max-marker min-marker)))
 
-      (let ((inhibit-read-only t))
-	(suo-segment-apply-props seg))
+      (let ((overlay (make-overlay min-marker (+ max-marker 1)
+				   nil nil nil)))
+	(setf (suo-segment-overlay seg) overlay)
+	(overlay-put overlay 'suo-segment seg)
+	(overlay-put overlay 'keymap keymap)
+	(overlay-put overlay 'face (plist-get props 'face)))
 
       (setq suo-segments (insert-into-list suo-segments seg pos))
 
@@ -443,13 +465,6 @@
 							    attrs))
 	(setq pos next-pos)))))
 
-(defun suo-segment-apply-props (seg)
-  (let ((min (suo-segment-min seg))
-	(max (suo-segment-max seg)))
-    (suo-submerge-face-attrs min (+ max 1) (suo-segment-face-attrs seg))
-    (add-text-properties     min (+ max 1) (suo-segment-props seg))
-    (add-text-properties     max (+ max 1) '(read-only t rear-nonsticky t))))
-
 (defun suo-define-key (seg key)
   (define-key (suo-segment-keymap seg) (read-kbd-macro key)
     `(lambda ()
@@ -462,16 +477,10 @@
   (setf (suo-segment-buffer seg) nil))
 
 (defun suo-hide-segment (seg)
-  (with-current-buffer (suo-segment-buffer seg)
-    (let ((inhibit-read-only t))
-      (put-text-property (suo-segment-min seg) (+ (suo-segment-max seg) 1)
-			 'invisible t))))
+  (overlay-put (suo-segment-overlay seg) 'invisible t))
 
 (defun suo-show-segment (seg)
-  (with-current-buffer (suo-segment-buffer seg)
-    (let ((inhibit-read-only t))
-      (put-text-property (suo-segment-min seg) (+ (suo-segment-max seg) 1)
-			 'invisible nil))))
+  (overlay-put (suo-segment-overlay seg) 'invisible nil))
 
 (defun suo-goto-segment (seg)
   (with-current-buffer (suo-segment-buffer seg)
@@ -500,6 +509,11 @@
 	((eq (car text) 'seq)
 	 (mapcar 'suo-insert-structured-text (cdr text)))))
 
+(defun suo-update-text-props (seg)
+  (let ((min (suo-segment-min seg))
+	(max (+ (suo-segment-max seg) 1)))
+    (add-text-properties min max (suo-segment-text-props seg))))
+
 (defun suo-set-text (seg text)
   (with-current-buffer (suo-segment-buffer seg)
     (save-excursion
@@ -508,7 +522,7 @@
 	(delete-region (suo-segment-min seg) (suo-segment-max seg))
 	(goto-char (suo-segment-min seg))
 	(suo-insert-structured-text text)
-	(suo-segment-apply-props seg)))))
+  	(suo-update-text-props seg)))))
 
 (defun suo-append-text (seg text)
   (with-current-buffer (suo-segment-buffer seg)
@@ -517,7 +531,7 @@
 	    (inhibit-modification-hooks t))
 	(goto-char (suo-segment-max seg))
 	(suo-insert-structured-text text)
-	(suo-segment-apply-props seg)))))
+	(suo-update-text-props seg)))))
 
 (defun suo-get-text (seg)
   (with-current-buffer (suo-segment-buffer seg)
@@ -526,6 +540,36 @@
 
 (defun suo-clear-dirty (seg)
   (setf (suo-segment-dirtyp seg) nil))
+
+;;; Segment modes
+
+;; Segment modes are implemented by having one of the modes functions
+;; be called when a segment is entered.
+
+(defun suo-generic-mode (seg name)
+  (setq suo-mode-name name)
+  (force-mode-line-update)
+  (let ((active-face (plist-get (suo-segment-props seg) 'active-face)))
+    (if active-face
+	(overlay-put (suo-segment-overlay seg) 'face active-face))))
+  
+(defun suo-code-mode (seg)
+  (setq indent-line-function 'lisp-indent-line)
+  (suo-generic-mode seg "code   "))
+
+(put 'code 'suo-enter-func 'suo-code-mode)
+(put 'code 'suo-leave-func 'suo-mode-leave)
+
+(defun suo-plain-mode (seg)
+  (setq indent-line-function 'indent-relative)
+  (suo-generic-mode seg "plain  "))
+
+(put 'plain 'suo-enter-func 'suo-plain-mode)
+(put 'plain 'suo-leave-func 'suo-mode-leave)
+
+(defun suo-mode-leave (seg)
+  (overlay-put (suo-segment-overlay seg) 
+	       'face (plist-get (suo-segment-props seg) 'face)))
 
 ;;; The protocol
   
