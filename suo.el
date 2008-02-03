@@ -148,84 +148,151 @@
   "Emacs as the Suo display server."
   :group 'scheme)
 
-;;; Running the sub-process
+;;; Server
 
-;(setq suo-command "netcat -l -p 6666 localhost")
-(setq suo-command "guile -s test-emacs.scm")
+(defvar suo-server nil)
+(defvar suo-clients nil)
 
-(defvar suo-process nil)
-(defvar suo-buffer nil)
-(defvar suo-read-marker nil)
+(defun start-suo-server ()
+  (interactive)
+  (stop-suo-server)
+  (setq suo-process (make-network-process :name "suo"
+					  :server t
+					  :family nil
+					  :service 7000
+					  :host 'local
+					  :sentinel 'suo-sentinel
+					  :filter 'suo-filter)))
 
-(defun run-suo ()
+(defun stop-suo-server ()
   (interactive)
   (if suo-process
-      (error "suo already running"))
-  (suo-reset-ids)
-  (setq suo-buffer (get-buffer-create "*suo-process*"))
-  (with-current-buffer suo-buffer
-    (delete-region (point-min) (point-max))
-    (setq suo-read-marker (point-marker)))
-  (setq suo-process (start-process-shell-command "suo" suo-buffer
-						 suo-command))
-  (set-process-sentinel suo-process 'suo-sentinel)
-  (set-process-filter suo-process 'suo-filter))
-
-(defun kill-suo ()
-  (interactive)
-  (if suo-process
-      (signal-process suo-process 15)))
-
-(defun suo-sentinel (proc msg)
-  (message "Suo: %s" (substring msg 0 -1))
-  (suo-destroy-all-objects)
-  (suo-reset-ids)
+      (delete-process suo-process))
   (setq suo-process nil))
 
-(defun suo-filter (proc string)
-  (with-current-buffer (process-buffer proc)
-    (save-excursion
-      (goto-char (process-mark proc))
-      (insert string)
-      (set-marker (process-mark proc) (point))))
-  (suo-dispatch (process-buffer proc)))
+(defun suo-sentinel (proc msg)
+  (let ((status (process-status proc)))
+    ;;(message "Suo: %s (%s)" (substring msg 0 -1) status)
+    (cond ((eq status 'open)
+	   (suo-client-open proc))
+	  ((eq status 'closed)
+	   (suo-client-closed (suo-client-from-proc proc))))))
 
-(defun suo-read-form ()
-  (condition-case err
-      (with-current-buffer suo-buffer
-	(save-excursion
-	  (goto-char suo-read-marker)
-	  (prog1
-	      (read buffer)
-	    (set-marker suo-read-marker (point)))))
-      (end-of-file
-       nil)))
+(defun suo-filter (proc string)
+  (suo-client-input (suo-client-from-proc proc) string))
+
+;;; Clients
+
+(defvar suo-next-client-id 0)
+(defvar suo-clients nil)
+
+(defstruct suo-client
+  id proc pending-input)
+
+(defun suo-client-open (proc)
+  (let ((id suo-next-client-id))
+    (incf suo-next-client-id)
+    (message "Suo: client %s connected" id)
+    (let ((client (make-suo-client :id id
+				   :proc proc
+				   :pending-input "")))
+      (process-put proc 'suo-client client)
+      (if (null suo-clients)
+	  (suo-reset-ids))
+      (setq suo-clients (cons client suo-clients))
+      client)))
+
+(defun suo-client-from-proc (proc)
+  (or (process-get proc 'suo-client)
+      (error "not a suo process: %s" proc)))
+
+(defun suo-client-closed (client)
+  (message "Suo: client %s disconnected" (suo-client-id client))
+  (suo-destroy-client-objects client)
+  (setq suo-clients (delq client suo-clients))
+  (if (null suo-clients)
+      (setq suo-next-client-id 0)))
+
+(defun suo-client-input (client string)
+  (let* ((input (concat (suo-client-pending-input client) string))
+	 (form-and-pos (condition-case err
+			   (read-from-string input)
+			 (end-of-file
+			  nil))))
+    (cond (form-and-pos
+	   (let ((form (car form-and-pos))
+		 (pos (cdr form-and-pos)))
+	     (setf (suo-client-pending-input client) (substring input pos))
+	     (suo-dispatch client form)))
+	  (t
+	   (setf (suo-client-pending-input client) input)))))
+
+(defun suo-client-output (client string)
+  (process-send-string (suo-client-proc client) string))
+
+;;; Objects and Ids
+
+(defstruct suo-object
+  client id)
+
+(defvar suo-next-id 0)
+(defvar suo-objects nil)
+
+(defun suo-reset-ids ()
+  (setq suo-next-id 0)
+  (setq suo-objects (make-hash-table)))
+
+(defun suo-make-id ()
+  (prog1
+      suo-next-id
+    (incf suo-next-id)))
+  
+(defun suo-put (id client obj)
+  (puthash id obj suo-objects)
+  (setf (suo-object-id obj) id)
+  (setf (suo-object-client obj) client))
+
+(defun suo-get (id)
+  (or (gethash id suo-objects)
+      (error "no such object: %s" id)))
+
+(defun suo-remove-obj (obj)
+  (let ((id (suo-object-id obj)))
+    (remhash id suo-objects)))
+
+(defun suo-destroy-client-objects (client)
+  (maphash (lambda (id obj)
+	     (if (eq (suo-object-client obj) client)
+		 (cond ((suo-buffer-p obj)
+			(suo-destroy-buffer obj))
+		       ((suo-segment-p obj)
+			(suo-destroy-segment obj)))))
+	   suo-objects))
 
 ;;; Requests, responses, and events
 
-(defun suo-respond (response)
+(defun suo-respond (client response)
   ;; (message "> %S" response)
-  (process-send-string suo-process (prin1-to-string response))
-  (process-send-string suo-process "\n"))
+  (suo-client-output client (prin1-to-string response))
+  (suo-client-output client "\n"))
 
-(defun suo-ok ()
-  (suo-respond 'ok))
+(defun suo-ok (client)
+  (suo-respond client 'ok))
 
-(defun suo-event (id ev)
-  ;; (message "* %s %S" id ev)
-  (suo-respond (list 'event id ev)))
+(defun suo-event (obj ev)
+  (let ((id (suo-object-id obj)))
+    ;; (message "* %s %S" id ev)
+    (suo-respond (suo-object-client obj) (list 'event id ev))))
 
-(defun suo-dispatch (buffer)
-  (let (req)
-    (while (setq req (suo-read-form))
-      ;; (message "< %S" req)
-      (condition-case err
-	  (let ((handler (get (car req) 'suo-handler)))
-	    (or handler
-		(error "unknown request: %s" (car req)))
-	    (apply handler (cdr req)))
-	(error
-	 (suo-respond (list 'error (error-message-string err))))))))
+(defun suo-dispatch (client req)
+  ;; (message "< %S" req)
+  (condition-case err
+      (let ((handler (get (car req) 'suo-handler)))
+	(or handler
+	    (error "unknown request: %s" (car req)))
+	(apply handler client (cdr req)))
+    (error
+     (suo-respond client (list 'error (error-message-string err))))))
 
 (defmacro def-suo-req (name args &rest body)
   (let ((fun (intern (concat "suo-req-" (symbol-name name)))))
@@ -233,59 +300,26 @@
        (put ',name 'suo-handler ',fun)
        (defun ,fun ,args ,@body))))
 
-;;; Objects and Ids
-
-(defvar suo-next-id 0)
-(defvar suo-objects nil)
-(defvar suo-ids nil)
-
-(defun suo-reset-ids ()
-  (setq suo-next-id 0)
-  (setq suo-objects (make-hash-table))
-  (setq suo-ids (make-hash-table)))
-
-(defun suo-make-id ()
-  (prog1
-      suo-next-id
-    (incf suo-next-id)))
-  
-(defun suo-put (id obj)
-  (puthash id obj suo-objects)
-  (puthash obj id suo-ids))
-
-(defun suo-get (id)
-  (or (gethash id suo-objects)
-      (error "no such object: %s" id)))
-
-(defun suo-get-id (obj)
-  (gethash obj suo-ids))
-
-(defun suo-remove-id (id)
-  (let ((obj (suo-get id)))
-    (remhash id suo-objects)
-    (remhash obj suo-ids)))
-
-(defun suo-destroy-all-objects ()
-  (maphash (lambda (id obj)
-	     (cond ((bufferp obj)
-		    (suo-destroy-buffer obj))
-		   ((suo-segment-p obj)
-		    (suo-destroy-segment obj))))
-	   suo-objects))
-
 ;;; Buffers
 
+(defstruct (suo-buffer (:include suo-object))
+  buffer segments)
+
 (defun suo-buffer-killed ()
-  (let ((id (suo-get-id (current-buffer))))
-    (if id
-	(suo-event `(killed ,id)))))
+  (if suo-current-buffer
+      (suo-event suo-current-buffer 'killed)))
+
+(defun suo-client-kill ()
+  (interactive)
+  (delete-process (suo-client-proc (suo-object-client suo-current-buffer))))
 
 (defun suo-create-buffer (name)
-  (let ((buffer (generate-new-buffer name)))
-    (with-current-buffer buffer
+  (let* ((emacs-buffer (generate-new-buffer name))
+	 (buffer (make-suo-buffer :buffer emacs-buffer)))
+    (with-current-buffer emacs-buffer
+      (make-local-variable 'suo-current-buffer)
+      (setq suo-current-buffer buffer)
       (add-hook 'kill-buffer-hook 'suo-buffer-killed nil t)
-      (make-local-variable 'suo-segments)
-      (setq suo-segments '())
       (make-local-variable 'after-change-functions)
       (setq after-change-functions (cons 'suo-modified-hook
 					 after-change-functions))
@@ -297,16 +331,20 @@
     buffer))
 
 (defun suo-show-buffer (buffer)
-  (switch-to-buffer buffer))
+  (switch-to-buffer (suo-buffer-buffer buffer)))
 
 (defun suo-close-buffer (buffer)
-  (kill-buffer buffer))
+  (kill-buffer (suo-buffer-buffer buffer)))
 
 (defun suo-destroy-buffer (buffer)
-  (if (buffer-name buffer)
-      (with-current-buffer buffer
-	(setq buffer-read-only t)
-	(rename-buffer (concat (buffer-name buffer) " (destroyed)") t))))
+  (let ((emacs-buffer (suo-buffer-buffer buffer)))
+    (if (buffer-name emacs-buffer)
+	(with-current-buffer emacs-buffer
+	  (setq buffer-read-only t)
+	  (setq suo-current-buffer nil)
+	  (rename-buffer (concat (buffer-name emacs-buffer)
+				 " (destroyed)")
+			 t)))))
 
 ;;; Segments
 
@@ -340,7 +378,7 @@
 ;; newline of the final segment could be made rear-sticky to prevent
 ;; typing into never never land.)
 
-(defstruct suo-segment
+(defstruct (suo-segment (:include suo-object))
   buffer min max props overlay keymap dirtyp text-props)
 
 (defun insert-into-list (list elt pos)
@@ -361,9 +399,7 @@
     (cond ((and seg (not (suo-segment-dirtyp seg)))
 	   ;; (message "dirty")
 	   (setf (suo-segment-dirtyp seg) t)
-	   (let ((id (suo-get-id seg)))
-	     (if id
-		 (suo-event id 'dirty)))))))
+	   (suo-event seg 'dirty)))))
 
 (defun get-prop-names (plist)
   (if (null plist)
@@ -382,11 +418,12 @@
   `(lambda (old new) (suo-enter-leave-trampoline old ',func)))
 
 (defun suo-create-segment (buffer pos props)
-  (with-current-buffer buffer
-    (let* ((pos (if (< pos 0) (length suo-segments) pos))
-	   (next-seg (if (= pos (length suo-segments))
+  (with-current-buffer (suo-buffer-buffer buffer)
+    (let* ((segments (suo-buffer-segments buffer))
+	   (pos (if (< pos 0) (length segments) pos))
+	   (next-seg (if (= pos (length segments))
 			 nil
-		       (elt suo-segments pos)))
+		       (elt segments pos)))
 	   (min-marker (make-marker))
 	   (max-marker (make-marker))
 	   (keymap (make-sparse-keymap))
@@ -440,7 +477,8 @@
 	(overlay-put overlay 'keymap keymap)
 	(overlay-put overlay 'face (plist-get props 'face)))
 
-      (setq suo-segments (insert-into-list suo-segments seg pos))
+      (setf (suo-buffer-segments buffer)
+	    (insert-into-list (suo-buffer-segments buffer) seg pos))
 
       seg)))
 
@@ -469,7 +507,7 @@
   (define-key (suo-segment-keymap seg) (read-kbd-macro key)
     `(lambda ()
        (interactive)
-       (suo-event ',(suo-get-id seg) ',key))))
+       (suo-event ',seg ',key))))
 
 (defun suo-destroy-segment (seg)
   (set-marker (suo-segment-min seg) nil)
@@ -483,21 +521,23 @@
   (overlay-put (suo-segment-overlay seg) 'invisible nil))
 
 (defun suo-goto-segment (seg)
-  (with-current-buffer (suo-segment-buffer seg)
+  (with-current-buffer (suo-buffer-buffer (suo-segment-buffer seg))
     (goto-char (suo-segment-min seg))))
 
 (defun suo-remove-segment (seg)
-  (with-current-buffer (suo-segment-buffer seg)
-    (save-excursion
-      (let ((next-seg (next-elt suo-segments seg)))
-	(let ((inhibit-read-only t)
-	      (inhibit-modification-hooks t))
-	  (delete-region (suo-segment-min seg)
-			 (if next-seg
-			     (suo-segment-min next-seg)
-			   (point-max))))
-	(suo-segment-destroy seg)
-	(setq suo-segments (delq seg suo-segments))))))
+  (let ((buffer (suo-segment-buffer seg)))
+    (with-current-buffer (suo-buffer-buffer buffer)
+      (save-excursion
+	(let ((next-seg (next-elt (suo-buffer-segments buffer) seg)))
+	  (let ((inhibit-read-only t)
+		(inhibit-modification-hooks t))
+	    (delete-region (suo-segment-min seg)
+			   (if next-seg
+			       (suo-segment-min next-seg)
+			     (point-max))))
+	  (suo-destroy-segment seg)
+	  (setf (suo-buffer-segments buffer)
+		(delq seg (suo-buffer-segments buffer))))))))
 
 (defun suo-insert-structured-text (text)
   (cond ((stringp text)
@@ -515,7 +555,7 @@
     (add-text-properties min max (suo-segment-text-props seg))))
 
 (defun suo-set-text (seg text)
-  (with-current-buffer (suo-segment-buffer seg)
+  (with-current-buffer (suo-buffer-buffer (suo-segment-buffer seg))
     (save-excursion
       (let ((inhibit-read-only t)
 	    (inhibit-modification-hooks t))
@@ -525,7 +565,7 @@
   	(suo-update-text-props seg)))))
 
 (defun suo-append-text (seg text)
-  (with-current-buffer (suo-segment-buffer seg)
+  (with-current-buffer (suo-buffer-buffer (suo-segment-buffer seg))
     (save-excursion
       (let ((inhibit-read-only t)
 	    (inhibit-modification-hooks t))
@@ -534,7 +574,7 @@
 	(suo-update-text-props seg)))))
 
 (defun suo-get-text (seg)
-  (with-current-buffer (suo-segment-buffer seg)
+  (with-current-buffer (suo-buffer-buffer (suo-segment-buffer seg))
     (buffer-substring-no-properties (suo-segment-min seg)
 				    (suo-segment-max seg))))
 
@@ -573,66 +613,66 @@
 
 ;;; The protocol
   
-(def-suo-req ping (&rest args)
-  (suo-respond (cons 'pong args)))
+(def-suo-req ping (client &rest args)
+  (suo-respond client (cons 'pong args)))
 
-(def-suo-req destroy (id)
+(def-suo-req destroy (client id)
   (let ((obj (suo-get id)))
-    (cond ((bufferp obj)
+    (cond ((suo-buffer-p obj)
 	   (suo-destroy-buffer obj))
 	  ((suo-segment-p obj)
 	   (suo-destroy-segment obj))
 	  (t
 	   (error "undestructible: %s" obj)))
     (suo-remove-id id)
-    (suo-ok)))
+    (suo-ok client)))
 
-(def-suo-req create-buffer (name)
+(def-suo-req create-buffer (client name)
   (let ((id (suo-make-id)))
-    (suo-put id (suo-create-buffer name))
-    (suo-respond id)))
+    (suo-put id client (suo-create-buffer name))
+    (suo-respond client id)))
 
-(def-suo-req show-buffer (buffer)
+(def-suo-req show-buffer (client buffer)
   (suo-show-buffer (suo-get buffer))
-  (suo-ok))
+  (suo-ok client))
 
-(def-suo-req create-segment (buffer pos props)
+(def-suo-req create-segment (client buffer pos props)
   (let ((id (suo-make-id)))
     (let ((seg (suo-create-segment (suo-get buffer) pos props)))
-      (suo-put id seg)
-      (suo-respond id))))
+      (suo-put id client seg)
+      (suo-respond client id))))
 
-(def-suo-req hide-segment (seg)
+(def-suo-req hide-segment (client seg)
   (suo-hide-segment (suo-get seg))
-  (suo-ok))
+  (suo-ok client))
 
-(def-suo-req show-segment (seg)
+(def-suo-req show-segment (client seg)
   (suo-show-segment (suo-get seg))
-  (suo-ok))
+  (suo-ok client))
 
-(def-suo-req goto-segment (seg)
+(def-suo-req goto-segment (client seg)
   (suo-goto-segment (suo-get seg))
-  (suo-ok))
+  (suo-ok client))
 
-(def-suo-req remove-segment (id)
+(def-suo-req remove-segment (client id)
   (suo-remove-segment (suo-get id))
-  (suo-ok))
+  (suo-ok client))
 
-(def-suo-req set-text (seg text)
+(def-suo-req set-text (client seg text)
   (suo-set-text (suo-get seg) text)
-  (suo-ok))
+  (suo-ok client))
 
-(def-suo-req append-text (seg text)
+(def-suo-req append-text (client seg text)
   (suo-append-text (suo-get seg) text)
-  (suo-ok))
+  (suo-ok client))
 
-(def-suo-req get-text (seg)
-  (suo-respond (suo-get-text (suo-get seg))))
+(def-suo-req get-text (client seg)
+  (suo-respond client (suo-get-text (suo-get seg))))
 
-(def-suo-req clear-dirty (seg)
+(def-suo-req clear-dirty (client seg)
   (suo-clear-dirty (suo-get seg))
-  (suo-ok))
+  (suo-ok client))
 
-(def-suo-req define-key (seg key)
+(def-suo-req define-key (client seg key)
   (suo-define-key (suo-get seg) key)
-  (suo-ok))
+  (suo-ok client))

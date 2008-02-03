@@ -10,6 +10,10 @@
 #include <string.h>
 #include <signal.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netdb.h>
+#include <errno.h>
 
 #define DEBUG 0
 
@@ -579,7 +583,7 @@ unswizzle_objects (val *mem, size_t off, word n)
        (define (foo a b c . rest) ...)
 
    has a call signature of 2*3 + 1 = 7 and expects parameters A, B, C,
-   and REST in registers 1, 2, 4, and 4, respectively.  When using
+   and REST in registers 1, 2, 3, and 4, respectively.  When using
    apply to call it like so
 
        (apply foo 1 2 '(3 4)),
@@ -2522,10 +2526,75 @@ do_syscall (word n_args, word return_register)
        */
       return;
     }
+  else if(arg[0] == MAKE_FIXNUM(16))
+    {
+      /* connect (host, port) */
+
+      char *hostname;
+      int port = FIXNUM_VAL (arg[2]);
+
+      int fd;
+      struct sockaddr_in name;
+      struct hostent *hostinfo;
+      
+      fd = socket (PF_INET, SOCK_STREAM, 0);
+      if (fd < 0)
+	goto syscall_err;
+      
+      hostname = strndup (BYTEVEC_BYTES (arg[1]),
+			  BYTEVEC_LENGTH (arg[1]));
+      hostinfo = gethostbyname (hostname);
+      free (hostname);
+
+      if (hostinfo == NULL)
+	{
+	  close (fd);
+	  errno = ENOENT;
+	  goto syscall_err;
+	}
+
+      name.sin_family = AF_INET;
+      name.sin_port = htons (port);
+      name.sin_addr = *(struct in_addr *) hostinfo->h_addr;
+
+      if (connect (fd, (struct sockaddr *) &name, sizeof (name)) < 0)
+	{
+	  int err = errno;
+	  close (fd);
+	  errno = err;
+	  goto syscall_err;
+	}
+	
+      res = MAKE_FIXNUM (fd);
+    }
+  else if(arg[0] == MAKE_FIXNUM(17))
+    {
+      /* close (fd) */
+      if (close (FIXNUM_VAL (arg[1])) < 0)
+	goto syscall_err;
+      res = BOOL_T;
+    }
+#if 0
+  else if(arg[0] == MAKE_FIXNUM(18))
+    {
+      /* listen (port) */
+
+    }
+  else if(arg[0] == MAKE_FIXNUM(19))
+    {
+      /* accept (port) */
+
+    }
+#endif
   else
     res = BOOL_T;
 
   regs[return_register] = res;
+  return;
+
+ syscall_err:
+  regs[return_register] = MAKE_FIXNUM (-errno);
+  return;
 }
 
 void
@@ -2720,6 +2789,7 @@ main (int argc, char **argv)
 
   find_markers (space, n/4);
 
+  signal (SIGPIPE, SIG_IGN);
   signal (SIGINT, (void (*) (int))sighandler);
 
   boot (((val)space) + head.start - head.origin,

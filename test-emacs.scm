@@ -1,7 +1,17 @@
+(define emacs-socket #f)
+
+(define (open-socket)
+  (let ((sock (socket AF_INET SOCK_STREAM 0)))
+    (connect sock AF_INET (car (hostent:addr-list 
+				(gethostbyname "localhost")))
+	     7000)
+    (setvbuf sock _IOFBF)
+    (set! emacs-socket sock)))
+
 (define pending-events '())
 
 (define (read-one)
-  (let ((form (read)))
+  (let ((form (read emacs-socket)))
     (if (eof-object? form)
 	(exit 0))
     (cond ((and (pair? form) (eq? (car form) 'event))
@@ -15,8 +25,9 @@
       (read-response)))
 	
 (define (do-request req)
-  (write req)
-  (newline)
+  (write req emacs-socket)
+  (newline emacs-socket)
+  (force-output emacs-socket)
   (let ((res (read-response)))
     (if (and (pair? res) (eq? (car res) 'error))
 	(begin 
@@ -91,19 +102,21 @@
 (define (emacs-repl)
   (let* ((buffer     (create-buffer "*suo-repl*"))
 	 (transcript (create-segment buffer 0 '(read-only t
-						face (:background "grey90"))))
-	 (ts-empty   #t)
-	 (cmdline    (create-segment buffer 1 '(face (:background "grey80"))))
+						face (:background "grey90")
+						mode plain)))
+	 (cmdline    (create-segment buffer 1 '(face (:background "grey80")
+						mode code)))
 	 (alertbox   (create-segment buffer 2 '(read-only t
                                                 face (:foreground "red"
 						      :inherit italic))))
+	 (ts-empty #t)
 	 (submitted #f))
 
     (define (create-code-segment pos)
       (let ((seg (create-segment buffer pos '(face nil
-					    active-face (:background
-							 "grey95")
-					    mode code))))
+					      active-face (:background
+							   "grey95")
+					      mode code))))
 	(define-key seg "C-c C-c"
 	  (lambda ()
 	    (eval-and-print (get-text seg))))))
@@ -121,7 +134,6 @@
     (define (output text)
       (cond (ts-empty
 	     (append-text transcript text)
-	     (show-segment transcript)
 	     (set! ts-empty #f))
 	    (else
 	     (append-text transcript `(seq "\n" ,text)))))
@@ -174,9 +186,10 @@
     (create-code-segment 4)
     (create-code-segment 5)
 
-    (hide-segment transcript)
+    (output "Hello, Suo!")
     (goto-segment cmdline)
     (show-buffer buffer)
     (repl)))
 
+(open-socket)
 (emacs-repl)

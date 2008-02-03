@@ -608,11 +608,11 @@
     (let ((old (lookup* sym #f #t)))
       (cond ((not old)
 	     (let ((func (suo:record closure@type #f #f #f #f)))
-	       ;;(pk 'image-function sym)
+	       ;; (pk 'image-function sym)
 	       (enter sym func)
 	       func))
 	    ((suo:record-with-type? old closure@type)
-	     ;;(pk 'image-function-late sym)
+	     ;; (pk 'image-function-late sym)
 	     old)
 	    (else
 	     (error "already declared, but not as function: " sym))))))

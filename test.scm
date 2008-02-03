@@ -59,6 +59,7 @@
   (image-load-book "assembler.book")
   (image-load-book "compiler.book")
   (image-load-book "books.book")
+  (image-load-book "emacs.book")
   (image-load-book "boot.book")
   (image-import-boot-record-types)
   (image-import-books)
