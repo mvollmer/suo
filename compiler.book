@@ -1,4 +1,5 @@
-@*     The compiler                                                   [@12 --]
+@
+*     The compiler                                                   [@12 --]
 
 ;; The compiler performs the following passes
 ;;
@@ -9,7 +10,8 @@
 (directory /compiler)
 (open /assembler /utils /base)
 
-@**    CPS data structures                                            [@13 --]
+@
+**    CPS data structures                                            [@13 --]
 
 ;; The CPS data structure consists of 'values' and 'instructions'.  A
 ;; 'value' represents a storage location with a constant contents.  An
@@ -81,7 +83,8 @@
 (define-record cps-primop type results args conts)
 
 
-@**    Printing a CPS structure                                       [@14 --]
+@
+**    Printing a CPS structure                                       [@14 --]
 -
 
 (define (cps-render obj)
@@ -242,7 +245,8 @@
   (apply pk (map cps-render args))
   (car (last-pair args)))
 
-@**    Genvar                                                         [@15 --]
+@
+**    Genvar                                                         [@15 --]
 -
 
 (define genvar-counter 0)
@@ -252,7 +256,8 @@
   (cps-var (symbol-append 'v (number->string genvar-counter)) 
 	   genvar-counter))
 
-@**    Code generation hooks for the compiler                         [@16 --]
+@
+**    Code generation hooks for the compiler                         [@16 --]
 -
 
 (define-record box
@@ -306,7 +311,8 @@
 	      (list variable (cps-quote 0) value)
 	      (list cont)))
 
-@**    Parameters                                                     [@17 --]
+@
+**    Parameters                                                     [@17 --]
 -
 
 (define-macro (define-param name)
@@ -317,7 +323,8 @@
 	 (value-exp (cadr param-val)))
     `(call-p ,param-exp ,value-exp (lambda () ,@body))))
 
-@**    Conversion into CPS                                            [@10 --]
+@
+**    Conversion into CPS                                            [@10 --]
 
 ;; Mini-Scheme is a subset of Scheme that is straightforward to
 ;; translate into CPS.  Translation from Scheme into Mini-Scheme is
@@ -644,7 +651,8 @@
 		(lambda (z)
 		  (cps-primop 'bottom '() (list z) '())))))
 
-@**    Used, bound, free, and modified variables                      [@18 --]
+@
+**    Used, bound, free, and modified variables                      [@18 --]
 -
 
 (define (union* sets)
@@ -797,7 +805,8 @@
 	(apply + (map cps-count-nodes args))
 	(apply + (map cps-count-nodes conts))))))
 
-@**    Dynamic attributes                                             [@19 --]
+@
+**    Dynamic attributes                                             [@19 --]
 -
 
 (define-macro (define-dynamic-attr name)
@@ -834,7 +843,8 @@
 
 (define-dynamic-attr cps-replacement)
 
-@**    Boxification                                                   [@20 --]
+@
+**    Boxification                                                   [@20 --]
 
 ;; Variables that are 'set' will be converted to boxes so that cps
 ;; variables are guaranteed to be constants.
@@ -912,7 +922,8 @@
 		 (map cps-boxify conts)))))
 
 
-@**    Closure conversion and calling convention implementation of FUNs  [@21 --]
+@
+**    Closure conversion and calling convention implementation of FUNs  [@21 --]
 
 ;; Calling convention: all arguments are passed in registers, rest
 ;; arguments are handled during code generation.
@@ -1058,7 +1069,8 @@
 		 (map cps-closure-convert args)
 		 (map cps-closure-convert conts)))))
 
-@**    Register allocation                                            [@22 --]
+@
+**    Register allocation                                            [@22 --]
 -
 
 (define-param cps-next-register)
@@ -1113,7 +1125,8 @@
 				  (map cps-register-allocate args)
 				  (map cps-register-allocate conts)))))))
 
-@**    Code generation                                                [@23 --]
+@
+**    Code generation                                                [@23 --]
 
 ;; Primops are directly turned into instructions, apps are compiled
 ;; into shuffle and go instructions and funs are done by recursing.
@@ -1203,7 +1216,8 @@
 		   (cps-code-generate cont))
 		 (cdr conts) extra-cont-labels)))))
 
-@**    Putting it together                                            [@24 --]
+@
+**    Putting it together                                            [@24 --]
 -
 
 (define /compiler/cps-verbose #f)

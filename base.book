@@ -1,4 +1,5 @@
-@*     The Base system                                                 [@1 *-]
+@
+*     The Base system                                                 [@1 *-]
 
 This book contains the most basic things that everybody uses, like
 numbers, strings, vectors, etc.
@@ -6,13 +7,15 @@ numbers, strings, vectors, etc.
 =
 (directory /base)
 
-@**    Bootstrapping
+@
+**    Bootstrapping
 -
 
 (define (bootstrap-phase)
   'running)
 
-@**    Surface syntax                                                  [@2 --]
+@
+**    Surface syntax                                                  [@2 --]
 
 These macros translate the surface language into the low level forms
 that the compiler understands.
@@ -252,7 +255,8 @@ that the compiler understands.
 (define-macro (primop op . args)
   `(:primitive ,op (res) ,args (res)))
 
-@**    Error handling                                                  [@3 *-]
+@
+**    Error handling                                                  [@3 *-]
 -
 
 (define (error:not-a-closure thing)
@@ -304,7 +308,8 @@ that the compiler understands.
 (define (with-error-handler handler thunk)
   (call-p error-handlers (cons handler (error-handlers)) thunk))
 
-@**    Catch, Throw, and Protect
+@
+**    Catch, Throw, and Protect
 -
 
 (define catcher (make-parameter #f))
@@ -347,7 +352,8 @@ that the compiler understands.
 		    (lambda () ,@cleanup)
 		    #f)))
 
-@**    Testing and booleans                                            [@5 *-]
+@
+**    Testing and booleans                                            [@5 *-]
 -
 
 (define (eq? a b)
@@ -359,7 +365,8 @@ that the compiler understands.
 (define (not x)
   (if x #f #t))
 
-@**    Pairs                                                           [@6 *-]
+@
+**    Pairs                                                           [@6 *-]
 -
 
 (define (cons a b)
@@ -409,7 +416,8 @@ that the compiler understands.
 (define (cadddr a)
   (car (cdddr a)))
 
-@**    Lists                                                           [@7 --]
+@
+**    Lists                                                           [@7 --]
 -
 
 (define (list . elts)
@@ -582,7 +590,8 @@ that the compiler understands.
 	 (cons (car lst) (filter pred (cdr lst))))
 	(else
 	 (filter pred (cdr lst)))))
-@**    Association lists                                               [@8 --]
+@
+**    Association lists                                               [@8 --]
 -
 
 (define (acons key val alist)
@@ -619,7 +628,8 @@ that the compiler understands.
 (define (assoc-ref alist key)
   (and=> (assoc key alist) cdr))
 
-@**    Lists as sets                                                   [@9 --]
+@
+**    Lists as sets                                                   [@9 --]
 -
 
 (define (set-difference l1 l2)
@@ -650,7 +660,8 @@ Only elements that occur in both lists occur in the result list."
 	      ((memv (car l1) l2) (loop (cdr l1) (cons (car l1) result)))
 	      (else (loop (cdr l1) result))))))
 
-@**    Byte vectors                                                   [@11 --]
+@
+**    Byte vectors                                                   [@11 --]
 -
 
 (define (bytevec? val)
@@ -732,7 +743,8 @@ Only elements that occur in both lists occur in the result list."
 (define (bytevec-subvector-u32 v start end)
   (bytevec-subvector v (* 4 start) (* 4 end)))
 
-@**    Characters                                                     [@25 --]
+@
+**    Characters                                                     [@25 --]
 -
 
 (define (char? val)
@@ -751,7 +763,8 @@ Only elements that occur in both lists occur in the result list."
 (define (char=? a b)
   (eq? a b))
 
-@**    Setters                                                        [@26 --]
+@
+**    Setters                                                        [@26 --]
 -
 
 (define (setter clos)
@@ -766,7 +779,8 @@ Only elements that occur in both lists occur in the result list."
 
 (init-setter-setter setter)   
 
-@**    Symbol preview                                                [@27 *!]
+@
+**    Symbol preview                                                [@27 *!]
 -
 
 (define (symbol-basename sym)
@@ -791,7 +805,8 @@ Only elements that occur in both lists occur in the result list."
   (symbol 0 (list (string-append " G"
 				 (number->string -gensym-counter-)))))
 
-@**    Records                                                        [@27 *!]
+@
+**    Records                                                        [@27 *!]
 -
 
 ;; (define-record name :keys creator slots)
@@ -1046,7 +1061,8 @@ Only elements that occur in both lists occur in the result list."
 (define (record-type-accessor type name)
   (slot-accessor (record-type-slot type name)))
 
-@**    Closures                                                       [@28 *!]
+@
+**    Closures                                                       [@28 *!]
 -
 
 (define-record closure
@@ -1088,7 +1104,8 @@ Only elements that occur in both lists occur in the result list."
 	     (else (error "unsupported record instance" ,tmp))))))
 
 
-@**    Updating record types                                          [@29 *-]
+@
+**    Updating record types                                          [@29 *-]
 -
 
 (define-function no-such-slot-accessor
@@ -1169,7 +1186,8 @@ Only elements that occur in both lists occur in the result list."
     (set! old-constructors #f)
     (transmogrify-objects (vector old-type) (vector new-type))))
 
-@**    Strings                                                        [@30 *-]
+@
+**    Strings                                                        [@30 *-]
 -
 
 (define-record string
@@ -1300,7 +1318,8 @@ Only elements that occur in both lists occur in the result list."
 	((= i end) res)
       (string-set! res (- i start) (string-ref str i)))))
     
-@**    Apply                                                          [@31 *-]
+@
+**    Apply                                                          [@31 *-]
 -
 
 (define (flatten-for-apply arg1 args+rest)
@@ -1311,7 +1330,8 @@ Only elements that occur in both lists occur in the result list."
 (define (apply func arg1 . args+rest)
   (:apply func (flatten-for-apply arg1 args+rest)))
 
-@**    Dynamic environment, continuations and multiple values         [@32 *-]
+@
+**    Dynamic environment, continuations and multiple values         [@32 *-]
 -
 
 (define -dynamic-env- '())
@@ -1344,7 +1364,8 @@ Only elements that occur in both lists occur in the result list."
 (define (dynamic-environment)
   -dynamic-env-)
 
-@**    Parameters                                                     [@33 *-]
+@
+**    Parameters                                                     [@33 *-]
 -
 
 (define (make-parameter init)
@@ -1362,7 +1383,8 @@ Only elements that occur in both lists occur in the result list."
 (define (call-p parameter value func)
   (call-de (acons parameter value (dynamic-environment)) func))
 
-@**    Numbers                                                        [@34 *-]
+@
+**    Numbers                                                        [@34 *-]
 -
 
 (define-record bignum
@@ -1747,7 +1769,8 @@ Only elements that occur in both lists occur in the result list."
   ;;(fixnum? x))
   (or (fixnum? x) (bignum? x)))
 
-@**    Syscalls                                                       [@35 *-]
+@
+**    Syscalls                                                       [@35 *-]
 -
 
 (define (sys:panic)
@@ -1796,7 +1819,8 @@ Only elements that occur in both lists occur in the result list."
       (primop syscall 17 fd)
       (error:wrong-type fd)))
 
-@**    Ports                                                          [@36 *-]
+@
+**    Ports                                                          [@36 *-]
 -
 
 (define-record the-eof-object-type)
@@ -1931,7 +1955,8 @@ Only elements that occur in both lists occur in the result list."
 (define current-output-port (make-parameter (make-sys-port 1)))
 (define current-debug-port (make-parameter (make-sys-port 2)))
 
-@**    Debugging                                                       [@4 *-]
+@
+**    Debugging                                                       [@4 *-]
 -
 
 (define (pk . args)
@@ -1946,7 +1971,8 @@ Only elements that occur in both lists occur in the result list."
   `(or ,form
        (error "assertion failed: " ',form)))
 
-@**    Input/Output                                                   [@37 *-]
+@
+**    Input/Output                                                   [@37 *-]
 -
 
 (define max-print-depth (make-parameter 10))
@@ -2359,7 +2385,8 @@ Only elements that occur in both lists occur in the result list."
 	     (putback-char (current-input-port) ch)
 	     (loop (cons (read) res) in-comment escaped))))))
 
-@**    Vectors                                                        [@38 *-]
+@
+**    Vectors                                                        [@38 *-]
 -
 
 (define (vector? val)
@@ -2412,7 +2439,8 @@ Only elements that occur in both lists occur in the result list."
 (define (vector-copy v)
   (subvector v 0 (vector-length v)))
 
-@**    Code                                                           [@39 *-]
+@
+**    Code                                                           [@39 *-]
 -
 
 (define (code? val)
@@ -2488,7 +2516,8 @@ Only elements that occur in both lists occur in the result list."
 (define (code-debug-info code)
   (code-lit-ref code 0))
 
-@**    equal?                                                         [@40 *-]
+@
+**    equal?                                                         [@40 *-]
 -
 
 (define (equal? a b)
@@ -2534,13 +2563,15 @@ Only elements that occur in both lists occur in the result list."
   (and (equal? (car a) (car b))
        (equal? (cdr a) (cdr b))))
 
-@** Bootinfo
+@
+** Bootinfo
 -
 
 (define-macro (bootinfo)
   `(:bootinfo))
 
-@**    Hash tables                                                    [@41 *-]
+@
+**    Hash tables                                                    [@41 *-]
 -
 
 (define (mix-hash n . vals)
@@ -2649,7 +2680,8 @@ Only elements that occur in both lists occur in the result list."
 			(loop (cdr lst) (proc (car lst) res))))))
       (alist->hashq! alst vec))))
 
-@**    Symbols                                                        [@42 *-]
+@
+**    Symbols                                                        [@42 *-]
 
 Symbols are much like pathnames: they are a list of strings and can be
 absolute or relative.  The components of a symbol are strings and when
@@ -2777,7 +2809,8 @@ symbol.
 
 (init-symbols)
 
-@**    Keywords                                                       [@43 *-]
+@
+**    Keywords                                                       [@43 *-]
 -
 
 (define-record keyword
@@ -2806,7 +2839,8 @@ symbol.
 	      key)))
       (error:wrong-type)))
 
-@**    Extended argument lists (DRAFT)                                [@44 *-]
+@
+**    Extended argument lists (DRAFT)                                [@44 *-]
 
 ;; The fundamental function to handle keyword arguments etc is
 ;; PARSE-EXTENDED-ARGUMENTS.  Given a argument specification and a
@@ -2960,7 +2994,8 @@ symbol.
 	(spec (cdr head)))
     `(define-function ,name (lambda* ,spec ,@body))))
 
-@**    Reverse scanning                                               [@46 *-]
+@
+**    Reverse scanning                                               [@46 *-]
 -
 
 (define (find-referrers obj)
@@ -2995,7 +3030,8 @@ symbol.
       (primop syscall 14 from to)
       (error "need two parallel vectors: " from to)))
 
-@**    Variables and macros                                           [@47 *-]
+@
+**    Variables and macros                                           [@47 *-]
 -
 
 (define-record variable
@@ -3010,7 +3046,8 @@ symbol.
 (define-record macro
   transformer)
 
-@**    Symbol lookup                                              [@48 *-]
+@
+**    Symbol lookup                                              [@48 *-]
 
 Symbols are used as identifiers in programs and elsewhere.
 
@@ -3162,7 +3199,8 @@ it with '#f'.
 (define (rm name)
   (enter name #f))
 
-@**    Eval                                                           [@49 *-]
+@
+**    Eval                                                           [@49 *-]
 -
 
 (define (eval form)
@@ -3226,7 +3264,8 @@ it with '#f'.
      (else
       form))))
 
-@**    Sheval                                                         [@50 *-]
+@
+**    Sheval                                                         [@50 *-]
 
 ;; SHEVAL is a variant of eval, intended for use in the repl to give
 ;; it a more shell-like character.  It differs from eval in that
@@ -3291,7 +3330,8 @@ it with '#f'.
 (define (return-from-interrupt state)
   (primop syscall 15 state))
 
-@**    Repl                                                           [@51 *-]
+@
+**    Repl                                                           [@51 *-]
 
 ;; The 'repl commands' are low-level, hard-coded commands that bypass
 ;; the normal directory lookups etc.  They are intended to get you out
@@ -3426,7 +3466,8 @@ it with '#f'.
   (suspend)
   (repl))
 
-@**    The inspector                                                  [@52 *-]
+@
+**    The inspector                                                  [@52 *-]
 
 ;; The inspector lets you interactively explore a object, and follow
 ;; links, both forwards and backwards.
@@ -3436,7 +3477,7 @@ it with '#f'.
 
   (define (prompt p)
     (display p)
-    (force-output p)
+    (force-output (current-output-port))
     (let loop ((r (read-line)))
       (cond ((null? r)
 	     (loop (read-line)))
@@ -3567,7 +3608,8 @@ it with '#f'.
 		'elements (object-choices obj) 0
 		'()))
 
-@**    And we out                                                     [@53 *-]
+@
+**    And we out                                                     [@53 *-]
 -
 		
 (pk 'base)

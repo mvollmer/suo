@@ -1,4 +1,5 @@
-@*   Using Emacs as a display server
+@
+*   Using Emacs as a display server
 
 As an intermediate step towards connecting to a X server and doing all
 user interaction using the X protocol, we connect to Emacs and speak a
@@ -49,8 +50,10 @@ specialized high-level UI protocol.
 (define (do-request req)
   (call-p current-output-port emacs-port
 	  (lambda ()
-	    (write req)
-	    (newline)))
+	    (call-p max-print-depth 200
+		    (lambda ()
+		      (write req)
+		      (newline)))))
   (let ((res (read-response)))
     (if (and (pair? res) (eq? (car res) 'error))
 	(error res)

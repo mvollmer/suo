@@ -1,9 +1,11 @@
-@* Assembler
+@
+* Assembler
 =
 (directory /assembler)
 (open /base)
 
-@** Machine independent parts of the low-level code generator
+@
+** Machine independent parts of the low-level code generator
 -
 
 (define-record cps-quote value)
@@ -301,7 +303,8 @@
 		(handle-reg src '()))
 	      from)))
 
-@** Code generation and assembling
+@
+** Code generation and assembling
 -
 
 (declare-variables /compiler/cps-verbose)

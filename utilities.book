@@ -1,9 +1,11 @@
-@*     Utilities                                                       [@1 --]
+@
+*     Utilities                                                       [@1 --]
 =
 (directory /utils)
 (open /base)
 
-@**    Pattern matching                                                [@2 --]
+@
+**    Pattern matching                                                [@2 --]
 
 A pattern is a cons tree with embedded pattern variables.  A pattern
 variable matches anything, everything else matches only things that
@@ -71,7 +73,8 @@ are eqv? to it.  A pattern variable is a symbol that starts with a
 	       body-vars
 	       clauses)))))
 
-@**    Miscellaneous                                                   [@5 --]
+@
+**    Miscellaneous                                                   [@5 --]
 -
 (define (pp val)
   (pretty-print val)

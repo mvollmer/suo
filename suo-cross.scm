@@ -117,10 +117,10 @@
   (if define?
       (if (memq sym strong-boot-bindings)
 	  (begin
-	    (pk 'ignore sym)
+	    ;; (pk 'ignore sym)
 	    ignored-variable)
 	  (begin
-	    (pk 'boot-define sym)
+	    ;; (pk 'boot-define sym)
 	    (module-make-local-var! boot-module sym)))
       (begin
 	(module-local-variable boot-module sym))))
@@ -788,7 +788,7 @@
 	       (enter name (boot-eval name))))
 	    (else
 	     (add-image-expression exp)))
-	  (error "useless form at toplevel: " exp))))
+	  (pk "useless form at toplevel: " exp))))
 
   (eval form))
 
@@ -864,14 +864,14 @@
   (set! current-bootstrap-phase 'compile-for-image)
   (with-input-from-file file
     (lambda ()
-      (let ((sec (boot-eval '(read-section #t))))
-	(boot-eval `(commit-section ',sec #t))
-	(set! image-books (cons sec image-books))))))
+      (let ((books (boot-eval '(read-books))))
+	(boot-eval `(for-each eval-book ',books))
+	(set! image-books (append image-books books))))))
 
 (define (image-import-books)
   (let ((variable@type (boot-eval 'variable@type))
 	(all-books-variable (boot-eval '(variable-lookup '/books/all-books))))
-    (suo:record-set! all-books-variable 0 (reverse image-books))))
+    (suo:record-set! all-books-variable 0 image-books)))
 
 ;; We copy some variable bindings from the boot environment over to
 ;; the image environment in order to ease bootstrapping further.  All
