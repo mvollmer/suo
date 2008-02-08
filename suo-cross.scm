@@ -558,8 +558,14 @@
 
 (define symbol-value
   (lambda-with-setter ((sym)
-		       ;;(pk 'image-value sym)
-		       (hashq-ref boot-bindings sym))
+		       ;; (pk 'image-value sym)
+		       (let ((comps (suo:symbol-components sym)))
+			 (if (and (= (length comps) 2)
+				  (equal? (car comps) "base")
+				  (assq-ref boot-macro-transformers
+					    (string->symbol (cadr comps))))
+			     (suo:record (boot-eval 'macro@type) 'fake)
+			     (hashq-ref boot-bindings sym))))
 		      ((sym val)
 		       ;;(pk 'image-binding sym val)
 		       (hashq-set! boot-bindings sym val))))
@@ -590,19 +596,6 @@
 			 (pk 'huh? sym)))))
 	      undeclared-variables)))
 
-;; (define (suo:variable-declare sym)
-;;   (let ((variable@type (boot-eval 'variable@type)))
-;;     (let ((old (lookup* sym #f #t)))
-;;       (cond ((not old)
-;; 	     (let ((var (suo:record variable@type (begin))))
-;; 	       ;;(pk 'image-variable sym)
-;; 	       (enter sym var)
-;; 	       var))
-;; 	    ((suo:record-with-type? old variable@type)
-;; 	     old)
-;; 	    (else
-;; 	     (error "already declared, but not as variable: " sym))))))
-
 (define (suo:function-declare sym)
   (let ((closure@type (boot-eval 'closure@type)))
     (let ((old (lookup* sym #f #t)))
@@ -616,20 +609,6 @@
 	     old)
 	    (else
 	     (error "already declared, but not as function: " sym))))))
-
-;; (define (suo:variable-lookup sym)
-;;   (let ((variable@type (boot-eval 'variable@type)))
-;;     (let ((val (lookup* sym #t #t)))
-;;       (cond ((not val)
-;; 	     ;;(pk 'image-undeclared sym)
-;; 	     (set! undeclared-variables (cons sym undeclared-variables))
-;; 	     (let ((var (suo:record variable@type (if #f #f))))
-;; 	       (enter sym var)
-;; 	       var))
-;; 	    ((suo:record-with-type? val variable@type)
-;; 	     val)
-;; 	    (else
-;; 	     (error "not a variable: " sym))))))
 
 (define (suo:function-lookup sym)
   (let ((closure@type (boot-eval 'closure@type))
@@ -649,16 +628,6 @@
 (define (suo:macro-lookup sym)
   (assq-ref boot-macro-transformers sym))
 
-(define (suo:macro-define sym val)
-  (let* ((macro@type (boot-eval 'macro@type))
-	 (mac (suo:record macro@type val)))
-    ;; (pk 'image-macro sym)
-    (boot-eval `(enter ',sym ',mac))))
-
-(define-macro (suo:declare-variables . syms)
-  ;; Nothing to do when loading into host Scheme
-  #f)
-
 (register-boot-macro
  'declare-variables
  (lambda syms
@@ -669,14 +638,9 @@
    '(begin)))
 
 (boot-import symbol-value
-	     ;; lookup* lookup
-	     ;; variable-declare variable-lookup
 	     function-declare
 	     function-lookup
-	     macro-lookup
-	     ;; macro-define
-	     ;; declare-variables
-	     )
+	     macro-lookup)
 
 ;; Some of the toplevel forms that are compiled are simple enough that
 ;; they can be carried out at compile time.  Other forms are collected
@@ -720,6 +684,7 @@
 (define (image-eval form)
 
   (define (compile form)
+    ;; (pk 'compile form)
     (boot-eval `(/base/compile ',form)))
 
   (define (variable-lookup sym)
@@ -866,12 +831,17 @@
     (lambda ()
       (let ((books (boot-eval '(read-books))))
 	(boot-eval `(for-each eval-book ',books))
-	(set! image-books (append image-books books))))))
+	(if (pair? books)
+	    (set! image-books (acons (basename file ".book") (car books)
+				     image-books)))))))
 
 (define (image-import-books)
-  (let ((variable@type (boot-eval 'variable@type))
-	(all-books-variable (boot-eval '(variable-lookup '/books/all-books))))
-    (suo:record-set! all-books-variable 0 image-books)))
+  (for-each (lambda (b)
+	      (let ((name (string->symbol (string-append "/library/"
+							 (car b))))
+		    (book (cdr b)))
+		(enter name book)))
+	    image-books))
 
 ;; We copy some variable bindings from the boot environment over to
 ;; the image environment in order to ease bootstrapping further.  All

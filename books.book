@@ -96,18 +96,10 @@ own.  Books start with a header line of "#".
 -
 
 (define-record book
-  :slots (sections)
-  :constructor (create-book sections))
+  sections)
 
 (define-record section
-  :slots (type
-	  content
-	  dirty
-	  defined-names)
-  :constructor (create-section type 
-			       content
-			       dirty
-			       defined-names))
+  book type content dirty defined-names)
 
 (define (read-text-line)
   (let ((buf (make-string 256)))
@@ -162,17 +154,20 @@ own.  Books start with a header line of "#".
 		     (sections '())
 		     (type (or (header-to-type (read-nonblank-text-line))
 			       (error "section start not found"))))
+
+    (define (collect-book)
+      (if (null? sections)
+	  books
+	  (let ((b (book (reverse sections))))
+	    (for-each (lambda (s)
+			(set! (section-book s) b))
+		      sections)
+	    (cons b books))))
+
     (cond ((eof-object? type)
-	   (reverse (if (null? sections)
-			books
-			(cons (create-book (reverse sections))
-			      books))))
+	   (reverse (collect-book)))
 	  ((eq? type 'book)
-	   (section-loop (if (null? sections)
-			     books
-			     (cons (create-book (reverse sections))
-				   books))
-			 '()))
+	   (section-loop (collect-book) '()))
 	  (else
 	   (let content-loop ((lines '()))
 	     (let* ((line (read-text-line))
@@ -180,11 +175,12 @@ own.  Books start with a header line of "#".
 	       (if next-type
 		   (section-loop
 		    books
-		    (cons (create-section type
-					  (apply string-append
-						 (reverse lines))
-					  #t
-					  '())
+		    (cons (section #f
+				   type
+				   (apply string-append
+					  (reverse lines))
+				   #t
+				   '())
 			  sections)
 		    next-type)
 		   (content-loop (cons line lines)))))))))
@@ -213,5 +209,3 @@ own.  Books start with a header line of "#".
     ((code)
      (let ((code (read-forms-from-string (section-content s))))
        (eval (cons 'begin code))))))
-
-(define all-books '())

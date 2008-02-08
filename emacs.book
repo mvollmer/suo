@@ -126,7 +126,7 @@ specialized high-level UI protocol.
 (define (make-segment-port buffer pos)
   (let ((output (create-segment buffer pos
 				'(read-only t
-					    face (:background "grey90"))))
+ 			          face (:background "grey90"))))
 	(output-newline-pending #f)
 	(input (create-segment buffer (1+ pos)
 			       '(face (:background "grey80"))))
@@ -184,26 +184,48 @@ specialized high-level UI protocol.
     (define-key input "RET" (lambda () #f))
     (make-line-buffered-port 512 reader writer)))
 
+(define (eval-print form)
+  (catch ((caught-error k args)
+	  (set! last-error-continuation k)
+	  (apply display-error args))
+    (with-error-handler
+     (lambda args
+       (:call-cc (lambda (k)
+		   (caught-error k args))))
+     (lambda ()
+       (call-v (lambda ()
+		 (set-interrupt-handler interrupt-handler)
+		 (eval form))
+	       (lambda vals
+		 (for-each (lambda (v)
+			     (write v)
+			     (newline))
+			   vals)))))))
+  
+(define (make-code-segment buffer pos port) 
+  (let ((seg (create-segment buffer pos '(mode code 
+					  active-face (:background "grey95")))))
+    (define-key seg "C-c C-c"
+      (lambda args
+	(call-p current-output-port port
+		(lambda ()
+		  (eval-print (cons 'begin
+				    (/books/read-forms-from-string
+				     (get-text seg))))))))
+
+    seg))
+
 (define (emacs-repl)
   (with-emacs-connection
    (lambda ()
      (let* ((buffer (create-buffer "*suo-repl*"))
 	    (port   (make-segment-port buffer 0)))
-       
+
+       (make-code-segment buffer -1 port)
+
        (show-buffer buffer)
        (call-p current-output-port port
 	       (lambda ()
 		 (call-p current-input-port port
 			 (lambda ()
 			   (generic-repl "")))))))))
-
-(define (make-code-segment buffer pos)
-  (let ((seg (create-segment buffer pos '(face nil
-					  active-face (:background
-						       "grey95")
-					  mode code))))
-    (define-key seg "C-c C-c"
-      (lambda ()
-	(write (/books/eval-string (get-text seg)))))
-
-    seg))

@@ -152,6 +152,7 @@
 
 (defvar suo-server nil)
 (defvar suo-clients nil)
+(defvar suo-process nil)
 
 (defun start-suo-server ()
   (interactive)

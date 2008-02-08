@@ -52,51 +52,106 @@ that the compiler understands.
 	       (list `(letrec ,(map list vars vals)
 			,@(cons first (cdr rest))))))))))
 
-;; Traditional quaisquote is wierd, mostly when being nested.  This is
-;; from Alan Bawden, "Quasiquotation in Lisp", Appendix B.
+(define (qq-expand-verbose form lookup?)
+  (pk 'qq form '-> (qq-expand form lookup?)))
 
-(define (qq-expand x depth)
+(define (qq-expand form lookup?)
+  (let ((gensyms '()))
+
+    (define (get-gensym sym)
+      (or (assq-ref gensyms sym)
+	  (let ((g (gensym)))
+	    (set! gensyms (acons sym g gensyms))
+	    g)))
+
+    (define (qq form)
+      (cond ((and (pair? form)
+		  (eq? (car form) :unquote))
+	     (cadr form))
+	    ((and (pair? form)
+		  (eq? (car form) :unquote-gensym))
+	     (or (symbol? (cadr form))
+		 (error "not a symbol: " (cadr form)))
+	     (list ':quote (get-gensym (cadr form))))
+	    ((and (pair? form)
+		  (eq? (car form) :unquote-splicing))
+	     (error ",@ outside of list"))
+	    ((pair? form)
+	     (let loop ((tail form)
+			(res '()))
+	       (cond ((null? tail)
+		      (cons '/base/list (reverse res)))
+		     ((not (pair? tail))
+		      (cons '/base/cons* (reverse (cons (qq tail) res))))
+		     ((and (pair? (car tail))
+			   (eq? (car (car tail)) :unquote-splicing))
+		      (let* ((unq (cadr (car tail)))
+			     (tail (qq (cdr tail)))
+			     (unq+tail (if (null? tail)
+					   unq
+					   (list '/base/append unq tail))))
+			(if (null? res)
+			    unq+tail
+			    (cons '/base/cons* (reverse (cons unq+tail res))))))
+		     (else
+		      (loop (cdr tail)
+			    (cons (qq (car tail)) res))))))
+	    ((symbol? form)
+	     (list ':quote (if lookup?
+			       (or (lookup-name form)
+				   (error "undefined: " form))
+			       form)))
+	    (else
+	     form)))
+
+    (qq form)))
+
+;; Traditional quasiquote is wierd, mostly when being nested.  This is
+;; from Alan Bawden, "Quasiquotation in Lisp", Appendix B.  We don't
+;; use it.
+
+(define (qq-nested-expand x depth)
   (if (pair? x)
       (case (car x)
 	((quasiquote)
 	 ;; Guile can't seem to handle a 'quasiquote' symbol in a
 	 ;; quasiquote expression; thus we use long hand here.
 	 (list 'cons ''quasiquote
-	       (qq-expand (cdr x) (+ depth 1))))
-	((unquote unquote-splicing)
+	       (qq-nested-expand (cdr x) (+ depth 1))))
+	((:unquote :unquote-splicing)
 	 (cond ((> depth 0)
 		`(cons ',(car x)
-		       ,(qq-expand (cdr x) (- depth 1))))
-	       ((and (eq? 'unquote (car x))
+		       ,(qq-nested-expand (cdr x) (- depth 1))))
+	       ((and (eq? :unquote (car x))
 		     (not (null? (cdr x)))
 		     (null? (cddr x)))
 		(cadr x))
 	       (else
 		(error "illegal"))))
 	(else
-	 `(append ,(qq-expand-list (car x) depth)
-		  ,(qq-expand (cdr x) depth))))
+	 `(append ,(qq-nested-expand-list (car x) depth)
+		  ,(qq-nested-expand (cdr x) depth))))
       `',x))
 
-(define (qq-expand-list x depth)
+(define (qq-nested-expand-list x depth)
   (if (pair? x)
       (case (car x)
 	((quasiquote)
 	 ;; Guile can't seem to handle a 'quasiquote' symbol in a
 	 ;; quasiquote expression; thus we use long hand here.
 	 (list 'list (list 'cons ''quasiquote
-			   (qq-expand (cdr x) (+ depth 1)))))
-	((unquote unquote-splicing)
+			   (qq-nested-expand (cdr x) (+ depth 1)))))
+	((:unquote :unquote-splicing)
 	 (cond ((> depth 0)
 		`(list (cons ',(car x)
-			     ,(qq-expand (cdr x) (- depth 1)))))
-	       ((eq? 'unquote (car x))
+			     ,(qq-nested-expand (cdr x) (- depth 1)))))
+	       ((eq? :unquote (car x))
 		`(list . ,(cdr x)))
 	       (else
 		`(append . ,(cdr x)))))
 	(else
-	 `(list (append ,(qq-expand-list (car x) depth)
-			,(qq-expand (cdr x) depth)))))
+	 `(list (append ,(qq-nested-expand-list (car x) depth)
+			,(qq-nested-expand (cdr x) depth)))))
       `'(,x)))
 
 (define (lambda-transformer args body)
@@ -115,7 +170,10 @@ that the compiler understands.
   (list :quote val))
 
 (define-macro (quasiquote form)
-  (qq-expand form 0))
+  (qq-expand form #f))
+
+(define-macro (quasiquote-lookup form)
+  (qq-expand form #t))
 
 (define-macro (begin . body)
   `(:begin ,@body))
@@ -2344,13 +2402,17 @@ Only elements that occur in both lists occur in the result list."
 	   (list 'quote (parse state)))
 	  ((eq? ch #\`)
 	   (list 'quasiquote (parse state)))
+	  ((eq? ch #\$)
+	   (list 'quasiquote-lookup (parse state)))
 	  ((eq? ch #\,)
 	   (let ((ch (input-char (parse-state-port state))))
-	     (if (eq? ch #\@)
-		 (list 'unquote-splicing (parse state))
-		 (begin
-		   (putback-char (parse-state-port state) ch)
-		   (list 'unquote (parse state))))))
+	     (cond ((eq? ch #\@)
+		    (list ':unquote-splicing (parse state)))
+		   ((eq? ch #\$)
+		    (list ':unquote-gensym (parse state)))
+		   (else
+		    (putback-char (parse-state-port state) ch)
+		    (list ':unquote (parse state))))))
 	  ((delimiter? ch)
 	   (error "unexpected delimiter: " ch))
 	  (else
@@ -2719,7 +2781,7 @@ These are some examples of external representations of symbols:
   foo/       => ERROR: component can't be the empty string
 
 Symbol objects are unique: if two symbols have the same offset and the
-same components, they are 'eq?'.
+same list of components, they are 'eq?'.
 
 Note that there is no concept of a 'current directory' when looking at
 symbols.  The symbols written "/base/list" and "list" are distinct.
@@ -3071,7 +3133,7 @@ it with '#f'.
 
 (define symbol-values (make-hashq-table 1023))
 
-(define symbol-value
+(define-function symbol-value
   (lambda-with-setter ((sym)
 		       (if (symbol-absolute? sym)
 			   (hashq-ref symbol-values sym)
@@ -3089,6 +3151,15 @@ it with '#f'.
 (define (try-lookup prefix sym)
   (symbol-value (symbol-concat prefix sym)))
 
+(define (lookup-name name)
+  (define (try prefix)
+    (let ((abs (symbol-concat prefix name)))
+      (if (symbol-value abs)
+	  abs
+	#f)))
+  (or (try (current-directory))
+      (or-map try (open-directories))))
+
 (define (lookup* sym in-open-dirs? allow-undefined?)
   (or (try-lookup (current-directory) sym)
       (and in-open-dirs?
@@ -3103,6 +3174,16 @@ it with '#f'.
 
 (define (enter sym val)
   (set! (symbol-value (symbol-concat (current-directory) sym)) val))
+
+(define (symbol-has-prefix? sym pfx)
+
+  (define (has-prefix? sym-comps pfx-comps)
+    (or (null? pfx-comps)
+	(and (not (null? sym-comps))
+	     (equal? (car sym-comps) (car pfx-comps))
+	     (has-prefix? (cdr sym-comps) (cdr pfx-comps)))))
+
+  (has-prefix? (symbol-components sym) (symbol-components pfx)))
 
 (define (list-entry name value)
   (let ((type (cond ((variable? value)    #\v)
@@ -3183,10 +3264,12 @@ it with '#f'.
   (values))
 
 (define (list-directory name verbose)
-  (pk 'list name)
-  (hashq-fold #f (lambda (elt res)
-		   (list-entry (car elt) (cdr elt)))
-	      symbol-values))
+  (let ((name (symbol-concat (current-directory) name)))
+    (pk 'list name)
+    (hashq-fold #f (lambda (elt res)
+		     (if (symbol-has-prefix? (car elt) name)
+			 (list-entry (car elt) (cdr elt))))
+		symbol-values)))
 
 (define* (ls :flags v :rest names)
   (if (null? names)
