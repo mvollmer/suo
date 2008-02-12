@@ -23,7 +23,7 @@ that the compiler understands.
 
 (define (macroexpand1 form)
   (if (and (pair? form) (symbol? (car form)))
-      (let ((transformer (macro-lookup (car form))))
+      (let ((transformer (macro-transformer-lookup (car form))))
 	(if transformer
 	    (apply transformer (cdr form))
 	    form))
@@ -528,6 +528,13 @@ that the compiler understands.
 	(or val
 	    (or-map func (cdr lst))))))
   
+(define (and-map func lst)
+  (if (null? lst)
+      #t
+      (let ((val (func (car lst))))
+	(and val
+	    (and-map func (cdr lst))))))
+
 (define (reverse-with-tail list tail)
   (if (null? list)
       tail
@@ -1201,7 +1208,7 @@ Only elements that occur in both lists occur in the result list."
 			 ((slot-initfunc (cdr n))
 			  => (lambda (initfunc) (lambda (obj) (initfunc))))
 			 (else
-			  (error "no way to initialize new slot: " (car n)))))
+			  (lambda (obj) (if #f #f)))))
 		 new-slots))
 	   (update (lambda (obj)
 		     (map (lambda (a) (a obj)) update-accessors))))
@@ -2014,6 +2021,60 @@ Only elements that occur in both lists occur in the result list."
 (define current-debug-port (make-parameter (make-sys-port 2)))
 
 @
+**    Archives
+-
+
+(define (sys:open-archive-for-read name)
+  (if (string? name)
+      (primop syscall 18 (string-bytes name))
+      (error:wrong-type name)))
+
+(define (sys:open-archive-for-write)
+  (primop syscall 19))
+
+(define (sys:commit-archive fd name)
+  (if (fixnum? fd)
+      (if (string? name)
+	  (primop syscall 20 fd (string-bytes name))
+	  (error:wrong-type name))
+      (error:wrong-type fd)))
+
+(define (sys:abort-archive fd)
+  (if (fixnum? fd)
+      (primop syscall 21 fd)
+      (error:wrong-type fd)))
+
+(define (call-with-open-archive name proc)
+  (let ((fd (sys:open-archive-for-read name)))
+    (if (< fd 0)
+	(error "can't open: " (- fd)))
+    (protect
+     (proc (make-sys-port fd))
+     (sys:close fd))))
+
+(define (call-with-new-archive name proc)
+  (let ((fd (sys:open-archive-for-write)))
+    (if (< fd 0)
+	(error "can't open: " (- fd)))
+    (protect
+     (let ((port (make-sys-port fd)))
+       (proc port)
+       (force-output port)
+       (sys:commit-archive fd name)
+       (set! fd #f))
+     (begin
+       (if fd
+	   (sys:abort-archive fd))))))
+
+(define (dump-to-archive name obj)
+  (call-with-new-archive name
+    (lambda (port)
+      (write obj port))))
+
+(define (read-from-archive name)
+  (call-with-open-archive name read))
+
+@
 **    Debugging                                                       [@4 *-]
 -
 
@@ -2233,11 +2294,15 @@ Only elements that occur in both lists occur in the result list."
   ;; beauty is in the eye of the beholder
   (display val))
 
-(define (display val)
-  (print val (make-print-state (current-output-port) #f)))
+(define (display val . opt-port)
+  (if (null? opt-port)
+      (display val (current-output-port))
+      (print val (make-print-state (car opt-port) #f))))
 
-(define (write val)
-  (print val (make-print-state (current-output-port) #t)))
+(define (write val . opt-port)
+  (if (null? opt-port)
+      (write val (current-output-port))
+      (print val (make-print-state (car opt-port) #t))))
 
 (define (newline)
   (display #\newline))
@@ -3230,6 +3295,7 @@ it with '#f'.
 (define-function function-lookup (make-thing-lookup "function" closure?))
 (define-function record-type-lookup (make-thing-lookup "record type"
 						       record-type?))
+(define-function macro-lookup (make-thing-lookup "macro" macro?))
 
 (define-function variable-declare
   (make-thing-declare "variable" variable?
@@ -3242,11 +3308,15 @@ it with '#f'.
 (define-function record-type-declare
   (make-thing-declare "record type" record-type? make-unspecified-record-type))
 
-(define (macro-lookup name)
+(define (make-unspecified-macro)
+  (macro (lambda () (error "undefined"))))
+
+(define-function macro-declare
+  (make-thing-declare "macro" macro? make-unspecified-macro))
+
+(define (macro-transformer-lookup name)
   (let ((val (lookup* name #t #t)))
-    (and val
-	 (macro? val)
-	 (macro-transformer val))))
+    (and (macro? val) (macro-transformer val))))
 
 (define (macro-define name val)
   (let ((old (lookup* name #f #t)))
@@ -3254,6 +3324,25 @@ it with '#f'.
 	     (not (macro? old)))
 	(error "already declared, but not as a macro: " name))
     (enter name (macro val))))
+
+(define (variable-install var val)
+  (if (eq? (variable-ref var) (begin))
+      (variable-set! var val)))
+
+(define (function-install old new)
+  (or (closure? new)
+      (error "not a function: " new))
+  (transmogrify-objects (vector old) (vector new)))
+
+(define (record-type-install old new)
+  (or (record-type? new)
+      (error "not a record type: " new))
+  (record-type-transmogrify old new))
+
+(define (macro-install mac trans)
+  (or (closure? trans)
+      (error "not a function: " trans))
+  (set! (macro-transformer mac) trans))
 
 (define (cd name)
   (current-directory (symbol-concat (current-directory) name)))

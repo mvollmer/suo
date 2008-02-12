@@ -7,7 +7,7 @@ specialized high-level UI protocol.
 
 =
 (directory /emacs)
-(open /base)
+(open /base /books)
 
 -
 (define pending-events '())
@@ -113,14 +113,20 @@ specialized high-level UI protocol.
 (define (append-text segment text)
   (do-request `(append-text ,segment ,text)))
 
-(define (clear-dirty segment)
-  (do-request `(clear-dirty ,segment)))
+(define (set-dirty segment val)
+  (do-request `(set-dirty ,segment ,(if val 't 'nil))))
 
 (define (get-text segment)
   (do-request `(get-text ,segment)))
 
-(define (define-key segment key handler)
-  (do-request `(define-key ,segment ,key))
+(define (get-text-if-dirty segment)
+  (let ((r (do-request `(get-text-if-dirty ,segment))))
+    (if (eq? r 'nil)
+	#f
+	r)))
+
+(define (bind-key segment key handler)
+  (do-request `(bind-key ,segment ,key))
   (register-handler segment key handler))
 
 (define (make-segment-port buffer pos)
@@ -181,7 +187,7 @@ specialized high-level UI protocol.
 	  (write-string (create-string buf) size
 			'(:foreground "blue")))))
 
-    (define-key input "RET" (lambda () #f))
+    (bind-key input "RET" (lambda () #f))
     (make-line-buffered-port 512 reader writer)))
 
 (define (eval-print form)
@@ -205,7 +211,7 @@ specialized high-level UI protocol.
 (define (make-code-segment buffer pos port) 
   (let ((seg (create-segment buffer pos '(mode code 
 					  active-face (:background "grey95")))))
-    (define-key seg "C-c C-c"
+    (bind-key seg "C-c C-c"
       (lambda args
 	(call-p current-output-port port
 		(lambda ()
@@ -229,3 +235,62 @@ specialized high-level UI protocol.
 		 (call-p current-input-port port
 			 (lambda ()
 			   (generic-repl "")))))))))
+
+;;; Books
+
+(define-record book-buffer
+  :prefix bb
+  :slots (book buffer sss))
+
+(define-record section-segment
+  :prefix ss
+  :slots (section segment))
+
+(define (make-section-segment sec bb pos)
+  (let ((seg (create-segment (bb-buffer bb) pos
+			     `(mode ,(case (section-type sec)
+				       ((code properties) 'code)
+				       (else              'plain))
+			       dirty-face         (:background "yellow")
+			       active-dirty-face  (:background "green")
+			       active-face        (:background "grey95")))))
+    (set-text seg (section-content sec))
+    (set-dirty seg (section-dirty sec))
+    (section-segment sec seg)))
+
+(define (fake-commit-book b)
+  (for-each (lambda (s)
+	      (if (section-dirty s)
+		  (pk 'dirty (section-content s)))
+	      (set! (section-dirty s) #f))
+	    (book-sections b)))
+
+(define (update-and-commit-book bb)
+  (pk 'commit bb)
+  (for-each (lambda (ss)
+	      (let ((text (get-text-if-dirty (ss-segment ss))))
+		(cond (text
+		       (set! (section-content (ss-section ss)) text)
+		       (set! (section-dirty (ss-section ss)) #t)))))
+	    (bb-sss bb))
+  (commit-book (bb-book bb))
+  (for-each (lambda (ss)
+	      (set-dirty (ss-segment ss)
+			 (section-dirty (ss-section ss))))
+	    (bb-sss bb)))
+
+(define (make-book-buffer book)
+  (let* ((bb (book-buffer book
+			  (create-buffer
+			   (string-append (book-archive-name book)
+					  ".arch"))
+			  '()))
+	 (sss (map (lambda (sec)
+		     (make-section-segment sec bb -1))
+		   (book-sections book))))
+    (set! (bb-sss bb) sss)
+    (bind-key (bb-buffer bb) "C-c C-c"
+	      (lambda args
+		(update-and-commit-book bb)))
+    (show-buffer (bb-buffer bb))
+    bb))

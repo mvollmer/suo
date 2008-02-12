@@ -190,29 +190,49 @@
 (define (eval-string str eval)
   (eval (cons 'begin (read-forms-from-string str))))
 
+(define (read-nonblank-text-line)
+  (let loop ()
+    (let ((line (suo:read-text-line)))
+      (cond ((eof-object? line)
+	     line)
+	    ((or (zero? (string-length line))
+		 (eq? (string-ref line 0) #\newline))
+	     (loop))
+	    (else
+	     line)))))
+
 (define (load-book filename eval)
+
+  (define (header-to-type l)
+    (cond ((eof-object? l)
+	   l)
+	  ((equal? l "@\n")
+	   'text)
+	  ((equal? l "=\n")
+	   'properties)
+	  ((equal? l "-\n")
+	   'code)
+	  (else
+	   #f)))
+
   (with-input-from-file filename
     (lambda ()
-
-      (define (read-chunk delim)
-	(let loop ((res ""))
-	  (let ((line (read-line)))
-	    (cond ((eof-object? line)
-		   (if (zero? (string-length res))
-		       line
-		       res))
-		  ((string-prefix? delim line)
-		   res)
-		  (else
-		   (loop (string-append res "\n" line)))))))
-
-      (let loop ()
-	(if (not (eof-object? (read-chunk "-")))
-	    (let ((exp (read-chunk "@")))
-	      (if (not (eof-object? exp))
-		  (begin
-		    (eval-string exp eval)
-		    (loop)))))))))
+      (let section-loop ((type (or (header-to-type (read-nonblank-text-line))
+				   (error "section start not found"))))
+	(cond ((eof-object? type)
+	       #t)
+	      (else
+	       (let content-loop ((lines '()))
+		 (let* ((line (suo:read-text-line))
+			(next-type (header-to-type line)))
+		   (if next-type
+		       (begin
+			 (if (eq? type 'code)
+			     (eval-string (apply string-append
+						 (reverse lines))
+					  eval))
+			 (section-loop next-type))
+		       (content-loop (cons line lines)))))))))))
 
 (define (boot-eval form)
   (eval form boot-module))
@@ -220,6 +240,10 @@
 (define (boot-load-book filename)
   (pk 'boot-load-book filename)
   (load-book filename boot-eval))
+
+(define (boot-load-arch name)
+  (pk 'boot-load-book name)
+  (load-book (string-append name ".arch") boot-eval))
 
 ;;; Representation of Suo values in the boot environment.
 
@@ -241,16 +265,6 @@
 ;; the name.  But symbols need to be available from the start for
 ;; bootstrapping reasons and thus we have to implement them here as
 ;; well.
-
-;; (define suo-symbol-type
-;;   (make-record-type 'symbol '(offset components)))
-
-;; (define suo:symbol? (record-predicate suo-symbol-type))
-;; (define suo:create-symbol (record-constructor suo-symbol-type))
-;; (define suo:symbol-offset (record-accessor suo-symbol-type 'offset))
-;; (define suo:symbol-components (record-accessor suo-symbol-type 'components))
-
-;; (define boot-symbols (make-hash-table 511))
 
 (define symbol-extra-info (make-hash-table 511))
 
@@ -559,12 +573,12 @@
 (define symbol-value
   (lambda-with-setter ((sym)
 		       ;; (pk 'image-value sym)
-		       (let ((comps (suo:symbol-components sym)))
-			 (if (and (= (length comps) 2)
-				  (equal? (car comps) "base")
-				  (assq-ref boot-macro-transformers
-					    (string->symbol (cadr comps))))
-			     (suo:record (boot-eval 'macro@type) 'fake)
+		       (let* ((comps (suo:symbol-components sym))
+			      (trans (assq-ref boot-macro-transformers
+					       (string->symbol
+						(car (last-pair comps))))))
+			 (if trans
+			     (suo:record (boot-eval 'macro@type) trans)
 			     (hashq-ref boot-bindings sym))))
 		      ((sym val)
 		       ;;(pk 'image-binding sym val)
@@ -639,8 +653,7 @@
 
 (boot-import symbol-value
 	     function-declare
-	     function-lookup
-	     macro-lookup)
+	     function-lookup)
 
 ;; Some of the toplevel forms that are compiled are simple enough that
 ;; they can be carried out at compile time.  Other forms are collected
@@ -824,16 +837,37 @@
 
 (boot-import eval call-cc)
 
-(define (image-load-book file)
-  (pk 'image-load file)
-  (set! current-bootstrap-phase 'compile-for-image)
+(define (image-process-book archive-name file proc)
   (with-input-from-file file
     (lambda ()
-      (let ((books (boot-eval '(read-books))))
-	(boot-eval `(for-each eval-book ',books))
-	(if (pair? books)
-	    (set! image-books (acons (basename file ".book") (car books)
-				     image-books)))))))
+      (let ((book (boot-eval '(read-book)))
+	    (name (or archive-name
+		      (basename file ".book"))))
+	(boot-eval `(set! (book-archive-name ',book) ',name))
+	(proc book)
+	(set! image-books (acons name book image-books))))))
+
+(define (image-compile-book file)
+  (pk 'image-compile file)
+  (set! current-bootstrap-phase 'compile-for-image)
+  (image-process-book #f file
+		      (lambda (book)
+			(boot-eval `(eval-book ',book)))))
+
+(define (image-compile-arch name)
+  (pk 'image-compile name)
+  (set! current-bootstrap-phase 'compile-for-image)
+  (image-process-book name (string-append name ".arch")
+		      (lambda (book)
+			(boot-eval `(eval-book ',book)))))
+
+(define (image-load-book file)
+  (pk 'image-load file)
+  (image-process-book #f file identity))
+
+(define (image-load-arch name)
+  (pk 'image-load name)
+  (image-process-book name (string-append file ".arch") identity))
 
 (define (image-import-books)
   (for-each (lambda (b)

@@ -407,7 +407,7 @@
 
   (define (lookup-macro-transformer name env)
     (and (not (lookup-env-symbol name env))
-	 (macro-lookup name)))
+	 (macro-transformer-lookup name)))
 
   (define (lookup-variable name env)
     (or (lookup-env-symbol name env)

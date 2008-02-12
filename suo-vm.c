@@ -1,3 +1,4 @@
+
 /* suo-vm -- virtual machine
  */
 
@@ -2567,25 +2568,77 @@ do_syscall (word n_args, word return_register)
 	
       res = MAKE_FIXNUM (fd);
     }
-  else if(arg[0] == MAKE_FIXNUM(17))
+  else if (arg[0] == MAKE_FIXNUM(17))
     {
       /* close (fd) */
       if (close (FIXNUM_VAL (arg[1])) < 0)
 	goto syscall_err;
       res = BOOL_T;
     }
-#if 0
-  else if(arg[0] == MAKE_FIXNUM(18))
+  else if (arg[0] == MAKE_FIXNUM(18))
     {
-      /* listen (port) */
+      /* open-archive-for-read (name) */
 
+      char *name;
+      int fd;
+
+      asprintf (&name, "%.*s.arch",
+		BYTEVEC_LENGTH (arg[1]),
+		BYTEVEC_BYTES (arg[1]));
+      fd = open (name, O_RDONLY);
+      free (name);
+
+      res = MAKE_FIXNUM (fd >= 0? fd : -errno);
     }
-  else if(arg[0] == MAKE_FIXNUM(19))
+  else if (arg[0] == MAKE_FIXNUM(19))
     {
-      /* accept (port) */
+      /* open-archive-for-write () */
+      char template[] = "tmp.XXXXXX";
+      int fd = mkstemp (template);
+      if (fd < 0)
+	res = MAKE_FIXNUM (-errno);
+      else
+	{
+	  char *name;
+	  asprintf (&name, "tmp.%d", fd);
+	  rename (template, name);
+	  free (name);
 
+	  res = MAKE_FIXNUM (fd);
+	}
     }
-#endif
+  else if (arg[0] == MAKE_FIXNUM(20))
+    {
+      /* commit-archive (fd, name) */
+      
+      int fd = FIXNUM_VAL (arg[1]);
+
+      if (close (fd) < 0)
+	res = MAKE_FIXNUM (-errno);
+      else
+	{
+	  char *name, *tmp_name;
+	  asprintf (&name, "%.*s.arch",
+		    BYTEVEC_LENGTH (arg[2]),
+		    BYTEVEC_BYTES (arg[2]));
+	  asprintf (&tmp_name, "tmp.%d", fd);
+	  
+	  rename (tmp_name, name);
+	  free (tmp_name);
+	  free (name);
+      
+	  res = BOOL_T;
+	}
+    }
+  else if (arg[0] == MAKE_FIXNUM(21))
+    {
+      /* abort-archive (fd) */
+      
+      int fd = FIXNUM_VAL (arg[1]);
+
+      close (fd);
+      res = BOOL_T;
+    }
   else
     res = BOOL_T;
 
