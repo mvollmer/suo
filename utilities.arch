@@ -1,0 +1,82 @@
+@
+*     Utilities                                                       [@1 --]
+=
+(directory /utils)
+(open /base)
+
+@
+**    Pattern matching                                                [@2 --]
+
+A pattern is a cons tree with embedded pattern variables.  A pattern
+variable matches anything, everything else matches only things that
+are eqv? to it.  A pattern variable is a symbol that starts with a
+'?'.
+
+-
+
+(define (pattern-variable? var)
+  (and (symbol? var) (char=? (string-ref (symbol-basename var) 0) #\?)))
+
+;; Return a list of the pattern variables contained in PAT.
+
+(define (pattern-variables pat)
+  (cond
+   ((pattern-variable? pat)
+    (list pat))
+   ((pair? pat)
+    (append (pattern-variables (car pat)) (pattern-variables (cdr pat))))
+   (else
+    '())))
+
+;; Determine whether VAL matches PAT and when it does, return a list
+;; of the values of the pattern variables, in the same order as
+;; returned by pattern-variables.  When VAL doesn't match, return #f.
+
+(define (pattern-match pat val)
+  (cond
+   ((pattern-variable? pat)
+    (list val))
+   ((pair? pat)
+    (and (pair? val)
+	 (let ((car-match (pattern-match (car pat) (car val)))
+	       (cdr-match (pattern-match (cdr pat) (cdr val))))
+	   (and car-match cdr-match (append car-match cdr-match)))))
+   (else
+    (and (eqv? pat val) '()))))
+
+(define-macro (pattern-case exp . clauses)
+  ;; CLAUSE -> (else BODY)
+  ;; CLAUSE -> (PAT BODY)
+
+  (define clause-pat car)
+  (define clause-body cdr)
+  (define (else-clause? c) (eq? (clause-pat c) 'else))
+  (define (clause-args c) 
+    (if (else-clause? c)
+	'() 
+	(pattern-variables (clause-pat c))))
+    
+  (let ((exp-var (gensym))
+	(body-vars (map (lambda (c) (gensym)) clauses)))
+    `(let ((,exp-var ,exp)
+	   ,@(map (lambda (v c)
+		    `(,v (lambda ,(clause-args c) ,@(clause-body c))))
+		  body-vars
+		  clauses))
+       (cond
+	,@(map (lambda (v c)
+		 (if (else-clause? c)
+		     `(else
+		       (,v))
+		     `((pattern-match ',(clause-pat c) ,exp-var)
+		       => (lambda (r) (apply ,v r)))))
+	       body-vars
+	       clauses)))))
+
+@
+**    Miscellaneous                                                   [@5 --]
+-
+(define (pp val)
+  (pretty-print val)
+  val)
+
