@@ -304,7 +304,7 @@
 ;;; Buffers
 
 (defstruct (suo-buffer (:include suo-object))
-  buffer segments)
+  buffer segments keymap)
 
 (defun suo-buffer-killed ()
   (if suo-current-buffer
@@ -315,9 +315,11 @@
   (delete-process (suo-client-proc (suo-object-client suo-current-buffer))))
 
 (defun suo-create-buffer (name)
-  (let* ((emacs-buffer (generate-new-buffer name))
-	 (buffer (make-suo-buffer :buffer emacs-buffer)))
+  (let* ((keymap (make-sparse-keymap))
+	 (emacs-buffer (generate-new-buffer name))
+	 (buffer (make-suo-buffer :buffer emacs-buffer :keymap keymap)))
     (with-current-buffer emacs-buffer
+      (use-local-map keymap)
       (make-local-variable 'suo-current-buffer)
       (setq suo-current-buffer buffer)
       (add-hook 'kill-buffer-hook 'suo-buffer-killed nil t)
@@ -399,7 +401,7 @@
   (let ((seg (get-char-property beg 'suo-segment)))
     (cond ((and seg (not (suo-segment-dirtyp seg)))
 	   ;; (message "dirty")
-	   (setf (suo-segment-dirtyp seg) t)
+	   (suo-set-dirty seg t)
 	   (suo-event seg 'dirty)))))
 
 (defun get-prop-names (plist)
@@ -504,11 +506,14 @@
 							    attrs))
 	(setq pos next-pos)))))
 
-(defun suo-define-key (seg key)
-  (define-key (suo-segment-keymap seg) (read-kbd-macro key)
-    `(lambda ()
-       (interactive)
-       (suo-event ',seg ',key))))
+(defun suo-bind-key (buf-or-seg key)
+  (let ((keymap (if (suo-segment-p buf-or-seg)
+		    (suo-segment-keymap buf-or-seg)
+		  (suo-buffer-keymap buf-or-seg))))
+    (define-key keymap (read-kbd-macro key)
+      `(lambda ()
+	 (interactive)
+	 (suo-event ',buf-or-seg ',key)))))
 
 (defun suo-destroy-segment (seg)
   (set-marker (suo-segment-min seg) nil)
@@ -579,8 +584,15 @@
     (buffer-substring-no-properties (suo-segment-min seg)
 				    (suo-segment-max seg))))
 
-(defun suo-clear-dirty (seg)
-  (setf (suo-segment-dirtyp seg) nil))
+(defun suo-get-text-if-dirty (seg)
+  (if (suo-segment-dirtyp seg)
+      (suo-get-text seg)
+    nil))
+
+(defun suo-set-dirty (seg val)
+  (when (not (eq (suo-segment-dirtyp seg) val))
+    (setf (suo-segment-dirtyp seg) val)
+    (suo-mode-refresh seg)))
 
 ;;; Segment modes
 
@@ -590,7 +602,10 @@
 (defun suo-generic-mode (seg name)
   (setq suo-mode-name name)
   (force-mode-line-update)
-  (let ((active-face (plist-get (suo-segment-props seg) 'active-face)))
+  (let ((active-face (or (and (suo-segment-dirtyp seg)
+			      (plist-get (suo-segment-props seg)
+					 'active-dirty-face))
+			 (plist-get (suo-segment-props seg) 'active-face))))
     (if active-face
 	(overlay-put (suo-segment-overlay seg) 'face active-face))))
   
@@ -609,8 +624,20 @@
 (put 'plain 'suo-leave-func 'suo-mode-leave)
 
 (defun suo-mode-leave (seg)
-  (overlay-put (suo-segment-overlay seg) 
-	       'face (plist-get (suo-segment-props seg) 'face)))
+  (overlay-put (suo-segment-overlay seg)
+	       'face (or (and (suo-segment-dirtyp seg)
+			      (plist-get (suo-segment-props seg) 'dirty-face))
+			 (plist-get (suo-segment-props seg) 'face))))
+
+(defun suo-mode-refresh (seg)
+  (with-current-buffer (suo-buffer-buffer (suo-segment-buffer seg))
+    (let* ((current-seg (get-char-property (point) 'suo-segment))
+	   (mode (plist-get (suo-segment-props seg) 'mode))
+	   (func (get mode (if (eq current-seg seg)
+			       'suo-enter-func 
+			     'suo-leave-func))))
+      (if func
+	  (funcall func seg)))))
 
 ;;; The protocol
   
@@ -670,10 +697,13 @@
 (def-suo-req get-text (client seg)
   (suo-respond client (suo-get-text (suo-get seg))))
 
-(def-suo-req clear-dirty (client seg)
-  (suo-clear-dirty (suo-get seg))
+(def-suo-req get-text-if-dirty (client seg)
+  (suo-respond client (suo-get-text-if-dirty (suo-get seg))))
+
+(def-suo-req set-dirty (client seg val)
+  (suo-set-dirty (suo-get seg) val)
   (suo-ok client))
 
-(def-suo-req define-key (client seg key)
-  (suo-define-key (suo-get seg) key)
+(def-suo-req bind-key (client seg key)
+  (suo-bind-key (suo-get seg) key)
   (suo-ok client))
