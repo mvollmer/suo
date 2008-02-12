@@ -267,7 +267,6 @@ own.  Books start with a header line of "#".
 	    (compile-form (section-toplevel-form s)))))
 
 (define (install-section s)
-  (pk 'install)
   (if (and (section-dirty s)
 	   (eq? (section-type s) 'code))
       ((section-installer s)))
