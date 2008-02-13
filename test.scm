@@ -22,10 +22,10 @@
 
 (load "suo-cross.scm")
 
-(boot-load-book "base.book")
-(boot-load-book "utilities.book")
-(boot-load-book "assembler.book")
-(boot-load-book "compiler.book")
+(boot-load-arch "base")
+(boot-load-arch "utilities")
+(boot-load-arch "assembler")
+(boot-load-arch "compiler")
 (boot-load-arch "books")
 
 (define (write-image mem file)
@@ -54,12 +54,12 @@
   (make-bootstrap-image (image-expression) "base"))
 
 (define (compile-compiler)
-  (image-compile-book "base.book")
-  (image-compile-book "utilities.book")
-  (image-compile-book "assembler.book")
-  (image-compile-book "compiler.book")
+  (image-compile-arch "base")
+  (image-compile-arch "utilities")
+  (image-compile-arch "assembler")
+  (image-compile-arch "compiler")
   (image-compile-arch "books")
-  (image-compile-book "boot.book")
+  (image-compile-arch "boot")
   (image-load-arch "emacs")
   (image-import-boot-record-types)
   (image-import-books)
