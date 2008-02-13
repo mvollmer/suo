@@ -401,7 +401,7 @@
 (define boot-record-types '())
 
 (define (suo:make-record-type name parent-type slots)
-  (pk 'boot-record-type name slots)
+  ;; (pk 'boot-record-type name slots)
   (if parent-type
       (error "inheritance not supported"))
   (let* ((ancestry (vector #f))
@@ -645,7 +645,7 @@
 (register-boot-macro
  'declare-variables
  (lambda syms
-   (apply pk 'image-declare syms)
+   ;; (apply pk 'image-declare syms)
    (for-each (lambda (sym)
 	       (boot-eval `(variable-declare ',sym)))
 	     syms)
@@ -762,7 +762,7 @@
 	     (if #f #f))
 	    ((:import-boot-record-type)
 	     (let ((name (cadr exp)))
-	       (pk 'imported-boot-record-type name)
+	       ;; (pk 'imported-boot-record-type name)
 	       (enter name (boot-eval name))))
 	    (else
 	     (add-image-expression exp)))
@@ -867,7 +867,7 @@
 
 (define (image-load-arch name)
   (pk 'image-load name)
-  (image-process-book name (string-append file ".arch") identity))
+  (image-process-book name (string-append name ".arch") identity))
 
 (define (image-import-books)
   (for-each (lambda (b)
