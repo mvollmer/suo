@@ -652,7 +652,7 @@
 	   (suo-destroy-segment obj))
 	  (t
 	   (error "undestructible: %s" obj)))
-    (suo-remove-id id)
+    (suo-remove-obj obj)
     (suo-ok client)))
 
 (def-suo-req create-buffer (client name)

@@ -94,13 +94,13 @@ own.  Books start with a header line of "#".
 (open /base)
 
 -
-
 (define-record book
   archive-name sections)
 
 (define-record section
   book type content dirty errors installer)
 
+-
 (define (read-text-line)
   (let ((buf (make-string 256)))
     (let loop ((i 0))
@@ -134,6 +134,7 @@ own.  Books start with a header line of "#".
 	    (reverse forms)
 	    (loop (cons f forms)))))))
 
+-
 (define (read-book)
 
   (define (header-to-type l)
@@ -148,12 +149,25 @@ own.  Books start with a header line of "#".
 	  (else
 	   #f)))
 
+  (define (lines->content lines)
+    ;; the section content does not include a final newline
+       (let ((content (apply string-append lines)))
+	 (if (and (> (string-length content) 0)
+		  (eq? (string-ref content (1- (string-length content)))
+		       #\newline))
+	     (substring content 0 (1- (string-length content)))
+	   content)))
+
   (let section-loop ((sections '())
 		     (type (or (header-to-type (read-nonblank-text-line))
 			       (error "section start not found"))))
 
     (cond ((eof-object? type)
-	   (book #f (reverse sections)))
+	   (let ((b (book #f (reverse sections))))
+	     (for-each (lambda (s)
+			 (set! (section-book s) b))
+		       sections)
+	     b))
 	  (else
 	   (let content-loop ((lines '()))
 	     (let* ((line (read-text-line))
@@ -162,8 +176,7 @@ own.  Books start with a header line of "#".
 		   (section-loop
 		    (cons (section #f
 				   type
-				   (apply string-append
-					  (reverse lines))
+				   (lines->content (reverse lines))
 				   #t
 				   #f
 				   #f)
@@ -171,6 +184,7 @@ own.  Books start with a header line of "#".
 		    next-type)
 		   (content-loop (cons line lines)))))))))
 
+-
 (define (write-book book)
   (for-each write-section (book-sections book)))
 
@@ -181,8 +195,10 @@ own.  Books start with a header line of "#".
 		  ((code)       "-\n")
 		  (else         "?\n"))))
     (display header)
-    (display (section-content sec))))
+    (display (section-content sec))
+    (newline)))
 
+-
 (define (retrieve-book name)
   (let ((book (call-with-open-archive name
 	        (lambda (port)
@@ -197,6 +213,41 @@ own.  Books start with a header line of "#".
         (lambda ()
 	  (write-book book))))))
 
+-
+(define (insert-after lst old new)
+  (cond ((null? lst)
+	 (list new))
+	((eq? (car lst) old)
+	 (cons* old new (cdr lst)))
+	(else
+	 (cons (car lst)
+	       (insert-after (cdr lst) old new)))))
+
+(define (new-section prev-sec type)
+  (let ((new (section (section-book prev-sec)
+		      type
+		      ""
+		      #f
+		      #f
+		      #f)))
+    (set! (book-sections (section-book prev-sec))
+	  (insert-after (book-sections (section-book prev-sec))
+			prev-sec
+			new))
+    new))
+
+-
+(define (merge-sections first-sec)
+  (let* ((book (section-book first-sec))
+	 (sections (book-sections book))
+	 (second-sec (list-ref sections (1+ (list-index sections first-sec)))))
+    (set! (section-content first-sec)
+	  (string-append (section-content first-sec)
+			 "\n"
+			 (section-content second-sec)))
+    (set! (book-sections book) (delq1 second-sec sections))))
+
+-
 (define (process-section sec proc)
   (catch ((caught-error msg args)
 	  (apply display-error msg args)
@@ -226,9 +277,11 @@ own.  Books start with a header line of "#".
     (if dir (current-directory (car dir)))
     (if open-dirs (open-directories open-dirs))))
 
+-
 (define (section-toplevel-form sec)
   (cons ':begin (read-forms-from-string (section-content sec))))
 
+-
 ;; XXX - this is only for bootstrapping and hopefully only used
 ;;       temporarily.
 
@@ -240,6 +293,7 @@ own.  Books start with a header line of "#".
       (eval (section-toplevel-form s)))
   (set! (section-dirty s) #f))
 
+-
 ;; Comitting a book
 
 (define (commit-book b)
@@ -255,6 +309,7 @@ own.  Books start with a header line of "#".
        (process-sections p compile-section)
        (process-sections p install-section)))
 
+-
 (define (declare-section s)
   (if (and (section-dirty s)
 	   (eq? (section-type s) 'code))
@@ -272,6 +327,7 @@ own.  Books start with a header line of "#".
       ((section-installer s)))
   (set! (section-dirty s) #f))
 
+-
 (define (declare-form form)
   (let ((form (macroexpand form)))
     (if (pair? form)
@@ -287,6 +343,7 @@ own.  Books start with a header line of "#".
  	  ((:define-macro)
 	   (macro-declare (cadr form)))))))
 
+-
 (define (compile-form form)
   (let ((top-expressions '()))
 

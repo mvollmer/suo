@@ -888,5 +888,3 @@
       ((= i (code-insn-length code)))
     (disinsn code i)
     (newline)))
-				   
-(pk 'assembler)

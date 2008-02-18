@@ -33,6 +33,7 @@ specialized high-level UI protocol.
    (lambda (msg rest)
      (apply error msg rest))))
 
+-
 (define (read-one)
   (let ((form (read emacs-port)))
     (if (eof-object? form)
@@ -47,6 +48,7 @@ specialized high-level UI protocol.
   (or (read-one)
       (read-response)))
 
+-
 (define (do-request req)
   (call-p current-output-port emacs-port
 	  (lambda ()
@@ -59,6 +61,7 @@ specialized high-level UI protocol.
 	(error res)
 	res)))
 
+-
 (define (get-event)
   (if (null? pending-events)
       (let ((res (read-one)))
@@ -77,15 +80,27 @@ specialized high-level UI protocol.
 (define (register-handler id tag handler)
   (hash-set! event-handlers (list id tag) handler))
 
+(define (call-with-error-handling proc . args)
+  (catch ((caught-error k args)
+	  (set! last-error-continuation k)
+	  (apply display-error args))
+    (with-error-handler
+     (lambda args
+       (:call-cc (lambda (k)
+		   (caught-error k args))))
+     (lambda ()
+       (apply proc args)))))
+
 (define (handle-event ev)
   (pk ev)
   (let ((handler (hash-ref event-handlers ev)))
     (if handler
-	(handler)
+	(call-with-error-handling handler)
 	(let ((handler (hash-ref event-handlers (car ev))))
 	  (if handler
-	      (handler (cadr ev)))))))
+	      (call-with-error-handling handler (cadr ev)))))))
 
+-
 (define (destroy id)
   (do-request `(destroy ,id)))
 
@@ -97,6 +112,9 @@ specialized high-level UI protocol.
 
 (define (create-segment buffer pos props)
   (do-request `(create-segment ,buffer ,pos ,props)))
+
+(define (remove-segment seg)
+  (do-request `(remove-segment ,seg)))
 
 (define (hide-segment seg)
   (do-request `(hide-segment ,seg)))
@@ -129,6 +147,7 @@ specialized high-level UI protocol.
   (do-request `(bind-key ,segment ,key))
   (register-handler segment key handler))
 
+-
 (define (make-segment-port buffer pos)
   (let ((output (create-segment buffer pos
 				'(read-only t
@@ -190,24 +209,20 @@ specialized high-level UI protocol.
     (bind-key input "RET" (lambda () #f))
     (make-line-buffered-port 512 reader writer)))
 
+-
 (define (eval-print form)
-  (catch ((caught-error k args)
-	  (set! last-error-continuation k)
-	  (apply display-error args))
-    (with-error-handler
-     (lambda args
-       (:call-cc (lambda (k)
-		   (caught-error k args))))
-     (lambda ()
-       (call-v (lambda ()
-		 (set-interrupt-handler interrupt-handler)
-		 (eval form))
-	       (lambda vals
-		 (for-each (lambda (v)
-			     (write v)
-			     (newline))
-			   vals)))))))
-  
+  (call-with-error-handling
+   (lambda ()
+     (call-v (lambda ()
+	       (set-interrupt-handler interrupt-handler)
+	       (eval form))
+	     (lambda vals
+	       (for-each (lambda (v)
+			   (write v)
+			   (newline))
+			 vals))))))
+
+-
 (define (make-code-segment buffer pos port) 
   (let ((seg (create-segment buffer pos '(mode code 
 					  active-face (:background "grey95")))))
@@ -221,6 +236,7 @@ specialized high-level UI protocol.
 
     seg))
 
+-
 (define (emacs-repl)
   (with-emacs-connection
    (lambda ()
@@ -236,16 +252,19 @@ specialized high-level UI protocol.
 			 (lambda ()
 			   (generic-repl "")))))))))
 
-;;; Books
+@
+Books
 
+-
 (define-record book-buffer
   :prefix bb
   :slots (book buffer sss))
 
 (define-record section-segment
   :prefix ss
-  :slots (section segment))
+  :slots (section segment (content-cache #f)))
 
+-
 (define (make-section-segment sec bb pos)
   (let ((seg (create-segment (bb-buffer bb) pos
 			     `(mode ,(case (section-type sec)
@@ -256,41 +275,166 @@ specialized high-level UI protocol.
 			       active-face        (:background "grey95")))))
     (set-text seg (section-content sec))
     (set-dirty seg (section-dirty sec))
-    (section-segment sec seg)))
 
-(define (fake-commit-book b)
-  (for-each (lambda (s)
-	      (if (section-dirty s)
-		  (pk 'dirty (section-content s)))
-	      (set! (section-dirty s) #f))
-	    (book-sections b)))
+    (let ((ss (section-segment sec seg (section-content sec))))
+      (bind-key seg "C-c C-o"
+		(lambda ()
+		  (open-new-section-segment bb ss)))
+      (bind-key seg "C-c C-m"
+		(lambda ()
+		  (merge-section-segments bb ss)))
+      ss)))
 
-(define (update-and-commit-book bb)
-  (pk 'commit bb)
+-
+(define (insert-at-pos lst pos elt)
+  (cond ((or (zero? pos)
+	     (null? lst))
+	 (cons elt lst))
+	(else
+	 (cons (car lst)
+	       (insert-at-pos (cdr lst) (1- pos) elt)))))
+
+-
+(define (open-new-section-segment bb old-ss)
+  (sync-book bb)
+  (new-section (ss-section old-ss) 'code)
+  (redisplay-book-buffer bb))
+
+-
+(define (merge-section-segments bb first-ss)
+  (sync-book bb)
+  (merge-sections (ss-section first-ss))
+  (redisplay-book-buffer bb))
+
+-
+(define (sync-book bb)
   (for-each (lambda (ss)
 	      (let ((text (get-text-if-dirty (ss-segment ss))))
 		(cond (text
 		       (set! (section-content (ss-section ss)) text)
 		       (set! (section-dirty (ss-section ss)) #t)))))
-	    (bb-sss bb))
-  (commit-book (bb-book bb))
+	    (bb-sss bb)))
+  
+-
+(define (sync-buffer bb)
   (for-each (lambda (ss)
 	      (set-dirty (ss-segment ss)
 			 (section-dirty (ss-section ss))))
 	    (bb-sss bb)))
+  
+-
+(define (recreate-buffer-segments bb)
+  (for-each (lambda (ss)
+	      (remove-segment (ss-segment ss)))
+	    (bb-sss bb))
+  (set! (bb-sss bb)
+	(map (lambda (sec)
+	       (make-section-segment sec bb -1))
+	     (book-sections (bb-book bb)))))
+	
+-
+(define (update-and-commit-book bb)
+  (pk 'commit (book-archive-name (bb-book bb)))
+  (sync-book bb)
+  (commit-book (bb-book bb))
+  (sync-buffer bb))
 
+-
 (define (make-book-buffer book)
   (let* ((bb (book-buffer book
 			  (create-buffer
 			   (string-append (book-archive-name book)
 					  ".arch"))
-			  '()))
-	 (sss (map (lambda (sec)
-		     (make-section-segment sec bb -1))
-		   (book-sections book))))
-    (set! (bb-sss bb) sss)
+			  '())))
+    (recreate-buffer-segments bb)
     (bind-key (bb-buffer bb) "C-c C-c"
 	      (lambda args
 		(update-and-commit-book bb)))
+    (bind-key (bb-buffer bb) "C-c C-l"
+	      (lambda args
+		(resync-book-buffer bb)))
     (show-buffer (bb-buffer bb))
     bb))
+
+-
+(define (resync-book-buffer bb)
+  (pk 'resync (book-archive-name (bb-book bb)))
+  (sync-book bb)
+  (recreate-buffer-segments bb))
+
+-
+(define (search-deltas l1 l2 match?)
+  (let loop-1 ((l1 l1)
+	       (delta-1 0))
+       (if (null? l1)
+	   (values delta-1 (length l2))
+	 (let loop-2 ((l2 l2)
+		      (delta-2 0))
+	      (cond ((null? l2)
+		     (loop-1 (cdr l1) (1+ delta-1)))
+		    ((match? (car l1) (car l2))
+		     (values delta-1 delta-2))
+		    (else
+		     (loop-2 (cdr l2) (1+ delta-2))))))))
+		
+-
+(define (redisplay-list l1 l2 match? update create remove)
+  (let loop ((pos 0)
+	     (l1 l1)
+	     (l2 l2)
+	     (new-l1 '()))
+       (cond ((and (null? l1) (null? l2))
+	      (reverse new-l1))
+	     (else
+	      (let-values1 (delta-l1 delta-l2 (search-deltas l1 l2 match?))
+                (cond ((and (zero? delta-l1) (zero? delta-l2))
+		       (update (car l1) (car l2))
+		       (loop (1+ pos)
+			     (cdr l1)
+			     (cdr l2)
+			     (cons (car l1) new-l1)))
+		      (else
+		       (for-each remove (list-head l1 delta-l1))
+		       (loop (+ pos delta-l2)
+			     (list-tail l1 delta-l1)
+			     (list-tail l2 delta-l2)
+			     (append (reverse
+				      (map (lambda (e2 i)
+					     (create e2 (+ pos i)))
+					   (list-head l2 delta-l2)
+					   (iota delta-l2)))
+				     new-l1)))))))))
+
+-
+(define (redisplay-section-segment ss)
+  (let ((sec (ss-section ss))
+	(seg (ss-segment ss)))
+    (if (not (eq? (ss-content-cache ss) (section-content sec)))
+	(begin
+	 (set-text seg (section-content sec))
+	 (set! (ss-content-cache ss) (section-content sec))))
+    (set-dirty seg (section-dirty sec))))
+
+-
+(define (redisplay-book-buffer bb)
+  (set! (bb-sss bb)
+	(redisplay-list (bb-sss bb) (book-sections (bb-book bb))
+			(lambda (ss sec) ; match?
+			  (eq? (ss-section ss) sec))
+			(lambda (ss sec) ; update
+			  (redisplay-section-segment ss))
+			(lambda (sec pos) ; create
+			  (make-section-segment sec bb pos))
+			(lambda (ss)      ; remove
+			  (remove-segment (ss-segment ss))))))
+
+-
+(define (redisplay-simulate l1 l2)
+  (redisplay-list l1 l2 eq?
+		  (lambda (e1 e2)
+		    (pk '= e1 e2))
+		  (lambda (e2 pos)
+		    (pk '+ e2 pos)
+		    e2)
+		  (lambda (e1)
+		    (pk '- e1))))

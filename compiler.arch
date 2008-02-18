@@ -7,9 +7,9 @@
 ;; - closure and argument conversion
 ;; - code generation
 =
+
 (directory /compiler)
 (open /assembler /utils /base)
-
 @
 **    CPS data structures                                            [@13 --]
 
@@ -81,7 +81,6 @@
 (define-record cps-set var value cont)
 
 (define-record cps-primop type results args conts)
-
 
 @
 **    Printing a CPS structure                                       [@14 --]
@@ -194,6 +193,8 @@
      (cps-print-val name)
      (display " ")
      (print-val-list args restp)
+     (nl)
+     (write source)
      (cps-print-stat body (+ indent 6)))
 
     ((cps-fun func cont)
@@ -202,6 +203,8 @@
      (cps-print-val (cps-func-name func))
      (display " ")
      (print-val-list (cps-func-args func) (cps-func-restp func))
+     (nl)
+     (write (cps-func-source func))
      (cps-print-stat (cps-func-body func) (+ indent 6))
      (display ")")
      (cps-print-stat cont (+ indent 2))
@@ -244,7 +247,6 @@
 (define (pk-cps . args)
   (apply pk (map cps-render args))
   (car (last-pair args)))
-
 @
 **    Genvar                                                         [@15 --]
 -
@@ -255,7 +257,6 @@
   (set! genvar-counter (1+ genvar-counter))
   (cps-var (symbol-append 'v (number->string genvar-counter)) 
 	   genvar-counter))
-
 @
 **    Code generation hooks for the compiler                         [@16 --]
 -
@@ -310,7 +311,6 @@
 	      (list (genvar))
 	      (list variable (cps-quote 0) value)
 	      (list cont)))
-
 @
 **    Parameters                                                     [@17 --]
 -
@@ -322,7 +322,6 @@
   (let* ((param-exp (car param-val))
 	 (value-exp (cadr param-val)))
     `(call-p ,param-exp ,value-exp (lambda () ,@body))))
-
 @
 **    Conversion into CPS                                            [@10 --]
 
@@ -553,10 +552,18 @@
 
   ;; Apply C to a cps-value representing the result of evaluating EXP.
   ;; C should return a cps-instruction that consumes the cps-value.
-  ;;
+  
   (define (conv exp env c)
+    (conv1 #f exp env c))
 
-    (with-param (cps-source exp)
+  (define (conv-for-macro exp env c)
+    (conv1 #t exp env c))
+
+  (define (conv1 for-macro? exp env c)
+
+    (with-param (cps-source (if for-macro?
+				(cons exp (cps-source))
+			      (list exp)))
 
       (pattern-case exp
 
@@ -567,6 +574,12 @@
 	   (error "wrong 'define' placement: " exp))
 	  
 	  ((:define-function ?var ?val)
+	   (error "wrong 'define' placement: " exp))
+
+	  ((:define-record-type ?var ?val)
+	   (error "wrong 'define' placement: " exp))
+
+	  ((:define-macro ?var ?val)
 	   (error "wrong 'define' placement: " exp))
 
 	  ((:quote ?val)
@@ -611,7 +624,7 @@
 	   (let ((transformer (and (symbol? ?func)
 				   (lookup-macro-transformer ?func env))))
 	     (if transformer
-		 (conv (apply transformer ?args) env c)
+		 (conv-for-macro (apply transformer ?args) env c)
 		 (conv-apply ?func ?args #f env c))))
 
 	  (else
@@ -653,10 +666,9 @@
 	cps
 	(error "Can only compile lambdas")))
 
-  (topfun (conv exp (make-env)
-		(lambda (z)
-		  (cps-primop 'bottom '() (list z) '())))))
-
+  (topfun (conv-for-macro exp (make-env)
+			  (lambda (z)
+			    (cps-primop 'bottom '() (list z) '())))))
 @
 **    Used, bound, free, and modified variables                      [@18 --]
 -
@@ -810,7 +822,6 @@
 	(length results)
 	(apply + (map cps-count-nodes args))
 	(apply + (map cps-count-nodes conts))))))
-
 @
 **    Dynamic attributes                                             [@19 --]
 -
@@ -848,7 +859,6 @@
 	     (lambda () ,@body))))
 
 (define-dynamic-attr cps-replacement)
-
 @
 **    Boxification                                                   [@20 --]
 
@@ -926,7 +936,6 @@
 		 results
 		 (map cps-boxify args)
 		 (map cps-boxify conts)))))
-
 
 @
 **    Closure conversion and calling convention implementation of FUNs  [@21 --]
@@ -1074,7 +1083,6 @@
 		 (map cps-closure-convert results)
 		 (map cps-closure-convert args)
 		 (map cps-closure-convert conts)))))
-
 @
 **    Register allocation                                            [@22 --]
 -
@@ -1130,7 +1138,6 @@
 				  (map cps-register-allocate results)
 				  (map cps-register-allocate args)
 				  (map cps-register-allocate conts)))))))
-
 @
 **    Code generation                                                [@23 --]
 
@@ -1221,7 +1228,6 @@
 					    #f))
 		   (cps-code-generate cont))
 		 (cdr conts) extra-cont-labels)))))
-
 @
 **    Putting it together                                            [@24 --]
 -
@@ -1231,8 +1237,10 @@
 (define (cps-dbg tag cps)
   (cond (/compiler/cps-verbose
 	 (pk tag)
-	 (cps-print-stat cps 0)
-	 (newline))))
+	 (call-p current-output-port (current-debug-port)
+		 (lambda ()
+		   (cps-print-stat cps 0)
+		   (newline))))))
 
 (define (cps-compile cps)
   (cps-dbg 'cps cps)
@@ -1254,9 +1262,8 @@
 
 (define (/base/compile exp)
   (set! genvar-counter 0)
+  (cps-source (list exp))
   (let ((exp (macroexpand exp)))
     (if (and (pair? exp) (eq? (car exp) :lambda))
 	`(:quote ,(cps-compile (cps-convert exp)))
 	exp)))
-
-(pk 'compiler)
