@@ -62,6 +62,8 @@ specialized high-level UI protocol.
 	res)))
 
 -
+
+-
 (define (get-event)
   (if (null? pending-events)
       (let ((res (read-one)))
@@ -270,8 +272,8 @@ Books
 			     `(mode ,(case (section-type sec)
 				       ((code properties) 'code)
 				       (else              'plain))
-			       dirty-face         (:background "yellow")
-			       active-dirty-face  (:background "green")
+			       dirty-face         (:background "#fbffb6")
+			       active-dirty-face  (:background "#e6eaa7")
 			       active-face        (:background "grey95")))))
     (set-text seg (section-content sec))
     (set-dirty seg (section-dirty sec))
