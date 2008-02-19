@@ -399,10 +399,13 @@
 
 (defun suo-modified-hook (beg end pre)
   (let ((seg (get-char-property beg 'suo-segment)))
-    (cond ((and seg (not (suo-segment-dirtyp seg)))
-	   ;; (message "dirty")
-	   (suo-set-dirty seg t)
-	   (suo-event seg 'dirty)))))
+    (cond (seg
+	   (cond ((not (suo-segment-dirtyp seg))
+		  (suo-set-dirty seg t)
+		  (suo-event seg 'dirty)))
+	   (let ((inhibit-read-only t)
+		 (inhibit-modification-hooks t))
+	     (suo-update-text-props seg))))))
 
 (defun get-prop-names (plist)
   (if (null plist)
@@ -462,7 +465,11 @@
 	(goto-char min-marker)
 	(insert "\n")
 	(if next-seg
-	    (set-marker (suo-segment-min next-seg) max-marker))
+	    (progn
+	      (set-marker (suo-segment-min next-seg) max-marker)
+	      (move-overlay (suo-segment-overlay next-seg)
+			    (suo-segment-min next-seg)
+			    (+ (suo-segment-max next-seg) 1))))
 	(let ((inhibit-read-only t))
 	  (put-text-property min-marker max-marker 'rear-nonsticky t)
 	  (put-text-property min-marker max-marker
@@ -560,6 +567,18 @@
 	(max (+ (suo-segment-max seg) 1)))
     (add-text-properties min max (suo-segment-text-props seg))))
 
+(defun suo-refresh-segment ()
+  (interactive)
+  (let ((seg (get-char-property (point) 'suo-segment)))
+    (if seg
+	(with-current-buffer (suo-buffer-buffer (suo-segment-buffer seg))
+	  (let ((inhibit-read-only t)
+		(inhibit-modification-hooks t))
+	    (suo-update-text-props seg)
+	    (move-overlay (suo-segment-overlay seg)
+			  (suo-segment-min seg)
+			  (+ (suo-segment-max seg) 1)))))))
+ 
 (defun suo-set-text (seg text)
   (with-current-buffer (suo-buffer-buffer (suo-segment-buffer seg))
     (save-excursion
