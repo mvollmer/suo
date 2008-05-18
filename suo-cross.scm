@@ -99,9 +99,18 @@
 
 ;; We need a few basic bindings to get going.
 
+(define-macro (suo:labels bindings . body)
+  `(letrec ,(map (lambda (b)
+		   `(,(caar b) (lambda ,(cdar b) ,@(cdr b))))
+		 bindings)
+    ,@body))
+
+(define-macro (suo:letvar bindings . body)
+  `(let ,bindings ,@body))
+
 (boot-import define lambda if begin
 	     set! quote quasiquote
-	     let let* letrec
+	     let let* letrec labels letvar
 	     apply)
 
 ;; Things would be fairly simple for toplevel variable definitions

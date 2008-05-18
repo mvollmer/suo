@@ -48,8 +48,8 @@ are eqv? to it.  A pattern variable is a symbol that starts with a
   ;; CLAUSE -> (else BODY)
   ;; CLAUSE -> (PAT BODY)
 
-  (define clause-pat car)
-  (define clause-body cdr)
+  (define (clause-pat cl) (car cl))
+  (define (clause-body cl) (cdr cl))
   (define (else-clause? c) (eq? (clause-pat c) 'else))
   (define (clause-args c) 
     (if (else-clause? c)

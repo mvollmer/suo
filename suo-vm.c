@@ -2,6 +2,8 @@
 /* suo-vm -- virtual machine
  */
 
+#define _GNU_SOURCE
+
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -22,6 +24,7 @@ int trace_gc       = 0;
 int trace_syscalls = 0;
 int trace_insns    = 0;
 int trace_go       = 0;
+int trace_source   = 0;
 
 void
 breakpoint ()
@@ -529,6 +532,61 @@ unswizzle_objects (val *mem, size_t off, word n)
    
      XXX
 
+   ** Trapping
+
+   A TRAP instruction is an alternate way to invoke a procedure.  (The
+   usual way is to use a GO instruction.)  Trapping is considerably
+   more expensive than going, and you need to prepare the procedures
+   that a trap can invoke in a special.  On the plus side, a trap can
+   be inserted into the middle of a instruction stream: you don't need
+   to construct a continuation and all the register values are intact
+   when the trap returns.  Thus, traps are useful when the procedure
+   is normally not called, such as when signalling errors or when a
+   fixnum overflows into a bignum.
+
+   You can think of traps as 256 special instructions that are
+   implemented as Suo procedures.
+
+   The arguments for the invoked procedure are taken from the current
+   registers or literals.  The result (only one) is placed in a
+   register.
+
+   - TRAP R A T
+
+   Invoke trap number T.  The result is placed in register R.  A
+   describes the arguments.  It is of the form
+
+      N*16 + RL3*8 + RL2*4 + RL1*2 + RL0
+
+   where 0 <= N <= 4 is the number of arguments, and RLi is 0 when
+   that argument is in a register, and 1 when it is a literal.  The
+   trap instruction is always followed by a second word that contains
+   the four argument indices, one per byte.
+
+   Some traps have special significance:
+
+   Trap number 0 is a syscall and implemented by the runtime.  It
+   performs functions such as I/0 and things related to the GC.
+   Setting a handler for trap 0 has no effect.
+
+   Trap number 1 is used for interrupts.  It is invoked automatically
+   by the runtime when an interrupt is received.
+
+   Trap number 2 is the 'wrong number of arguments' trap.  It is
+   invoked by the CHECK_CALLSIG instruction.
+
+   The handler for trap T is found by looking at index T of the 'trap
+   vector'.  Special register -9 points to this vector.  The handler
+   should be a closure record.  The corresponding procedure receives
+   the 'trap context' as its first argument, followed by the arguments
+   indicated in the trap instruction.  The trap context object should
+   be used with the TRAPRET instruction.  The handler is invoked with
+   an unusable continuation.  I.e., it must not return.
+
+   - TRAPRET S V
+
+   Return from a trap.  S is the state passed to the handler, and V is
+   the value that should be placed into the return register.
 
    ** Complex instructions
 
@@ -537,7 +595,7 @@ unswizzle_objects (val *mem, size_t off, word n)
    implemented somewhere in ROM, using an instruction set from above
    plus whatever is needed in addition.
 
-   - SYSCALL N V            == TRAP V N TRAPOP_SYSCALL
+   - SYSCALL N V            == TRAP2 V N TRAPOP_SYSCALL
 
    Trap into the operation system to perform a syscall.  The next N
    words of the instruction stream are used as parameters for the
@@ -550,13 +608,13 @@ unswizzle_objects (val *mem, size_t off, word n)
 
    The result is delivered in register V.
 
-   - CHECK_ALLOC S            == TRAP 0 S TRAPOP_CHECK_ALLOC
+   - CHECK_ALLOC S            == TRAP2 0 S TRAPOP_CHECK_ALLOC
    - CHECK_ALLOCI S
 
    If FREE + S >= END, run the garbage collector.  If there still
    isn't enough free space afterwards, halt the machine.
 
-   - CHECK_CALLSIG C S        == TRAP C S TRAPOP_CHECK_CALLSIG
+   - CHECK_CALLSIG C S        == TRAP2 C S TRAPOP_CHECK_CALLSIG
 
    reg[C] is the signature of the parameters in the general registers
    and S is the signature that is expected.  If reg[C] and S are not
@@ -604,8 +662,8 @@ unswizzle_objects (val *mem, size_t off, word n)
 
  */
 
-val specials_and_regs[8+256];
-val *regs = specials_and_regs + 8;
+val specials_and_regs[9+256];
+val *regs = specials_and_regs + 9;
 
 val reg_code;
 
@@ -631,7 +689,7 @@ word *reg_end;
 #define SETL          24
 #define SETI          28
 #define CMP           32
-#define TRAP          36
+#define TRAP2          36
 #define REFU8         40
 #define SETU8         44
 #define REFU16        48
@@ -646,6 +704,7 @@ word *reg_end;
 #define MUL16         84
 #define DIV16         88
 #define ADD16I        92
+#define TRAPRET       96
 
 #define MOVEI        128
 #define ALLOCI       129
@@ -653,6 +712,10 @@ word *reg_end;
 #define FILLI        131
 #define CHECK_ALLOCI 132
 #define INIT_VECI    133
+#define TRAP         134
+#define TRAPR        135
+#define ABORT        136
+#define ABORTR       137
 
 #define BRANCH       255
 
@@ -687,6 +750,8 @@ word *reg_end;
 #define CMPOP_EQ             0
 #define CMPOP_FIXNUMS        1
 
+/* XXX - These are for TRAP2, not TRAP.  Confusing.
+ */
 #define TRAPOP_SYSCALL       0
 #define TRAPOP_CHECK_CALLSIG 1
 #define TRAPOP_CHECK_ALLOC   2
@@ -703,14 +768,17 @@ word *reg_end;
 
 #define rlop(op) op+RR: case op+RL: case op+LR: case op+LL
 
+void dissource (FILE *f, val code);
 void discode (FILE *f, val code);
 
 void
 do_GO_with_offset (val code, int offset)
 {
+  if (trace_source)
+    dissource (stderr, code);
+
   if (trace_go)
     {
-      fprintf (stderr, "GO\n");
       discode (stderr, code);
       fprintf (stderr, "\n");
     }
@@ -731,6 +799,9 @@ void check_callsig (word expected_sig, int caller_sig_reg);
 void gc (word size);
 
 val *disinsn (FILE *f, val code, val *pc, int reg_hints);
+
+void trap (int trap_number, int return_reg, int arg_head, word arg_desc);
+void return_from_trap (val state, val return_value);
 
 void
 run_cpu ()
@@ -976,7 +1047,7 @@ run_cpu ()
 	    }
 	  break;
 
-	case rlop(TRAP):
+	case rlop(TRAP2):
 	  switch (z)
 	    {
 	    case TRAPOP_SYSCALL:
@@ -1008,6 +1079,38 @@ run_cpu ()
 	      fprintf (stderr, "\n");
 	      abort ();
 	    }
+	  break;
+	  
+	case rlop(TRAPRET):
+	  return_from_trap (yp[y], zp[z]);
+	  break;
+
+	case TRAP:
+	  {
+	    word a = *reg_pc++;
+	    trap (z, x, y, a);
+	  }
+	  break;
+	  
+	case TRAPR:
+	  {
+	    word a = *reg_pc++;
+	    trap (FIXNUM_VAL (regs[z]), x, y, a);
+	  }
+	  break;
+
+	case ABORT:
+	  {
+	    word a = *reg_pc++;
+	    trap (z, -2, y, a);
+	  }
+	  break;
+	  
+	case ABORTR:
+	  {
+	    word a = *reg_pc++;
+	    trap (FIXNUM_VAL (regs[z]), -2, y, a);
+	  }
 	  break;
 
 	case REFU8:
@@ -1244,6 +1347,161 @@ dumpf (FILE *f, val v)
     fprintf (f, "%c", type_code (FIELD_REF(v,0)));
 }
 
+int
+disstring (FILE *f, val v, int written)
+{
+  /* String: #S(bytes) */
+  if (RECORD_P (v)
+      && RECORD_LENGTH (v) == 1
+      && BYTEVEC_P (RECORD_REF (v, 0)))
+    {
+      val bytes = RECORD_REF (v, 0);
+      fprintf (f, (written ? "\"%.*s\"" : "%.*s"),
+	       BYTEVEC_LENGTH (bytes), BYTEVEC_BYTES (bytes));
+      return 1;
+    }
+
+  return 0;
+}
+
+int
+maybesym (val v)
+{
+  return (RECORD_P (v)
+	  && RECORD_LENGTH (v) == 2
+	  && (BOOL_T == RECORD_REF (v, 0)
+	      || FIXNUM_P (RECORD_REF (v, 0)))
+	  && PAIR_P (RECORD_REF (v, 1)));
+}
+
+int
+dissym (FILE *f, val v)
+{
+  /* Symbols == #S(offset (comps...))
+     Offset == fixnum or #t
+     Comps == list of strings
+   */
+  if (maybesym (v))
+    {
+      val offset = RECORD_REF (v, 0);
+      val comps = RECORD_REF (v, 1);
+      
+      if (offset == BOOL_T)
+	fprintf (f, "/");
+      else
+	{
+	  int o = FIXNUM_VAL (offset);
+	  while (o-- > 0)
+	    fprintf (f, "../");
+	}
+      
+      while (PAIR_P (comps))
+	{
+	  if (!disstring (f, CAR (comps), 0))
+	    fprintf (f, "?");
+	  comps = CDR (comps);
+	}
+      
+      return 1;
+    }
+      
+  return 0;
+}
+
+int
+diskey (FILE *f, val v)
+{
+  if (RECORD_P (v)
+      && RECORD_LENGTH (v) == 1
+      && maybesym (RECORD_REF (v, 0)))
+    {
+      fprintf (f, ":");
+      dissym (f, RECORD_REF (v, 0));
+      return 1;
+    }
+
+  return 0;
+}
+
+void
+disval (FILE *f, val v, int level)
+{
+  if (level > 20)
+    {
+      fprintf (f, "#");
+      return;
+    }
+
+  if (FIXNUM_P(v))
+    fprintf (f, "%d", FIXNUM_VAL (v));
+  else if (CHAR_P(v))
+    fprintf (f, "#\\%c", CHAR_VAL (v));
+  else if (v == NIL)
+    fprintf (f, "nil");
+  else if (v == BOOL_T)
+    fprintf (f, "#t");
+  else if (v == BOOL_F)
+    fprintf (f, "#f");
+  else if (v == UNSPEC)
+    fprintf (f, "unspec");
+  else if (BYTEVEC_P(v))
+    fprintf (f, "/%.*s/", BYTEVEC_LENGTH(v), BYTEVEC_BYTES(v));
+  else if (PAIR_P(v))
+    {
+      fprintf (f, "(");
+      disval (f, CAR(v), level+1);
+      v = CDR(v);
+      while (PAIR_P(v))
+	{
+	  fprintf (f, " ");
+	  disval (f, CAR(v), level+1);
+	  v = CDR(v);
+	}
+      if (v != NIL)
+	{
+	  fprintf (f, " . ");
+	  disval (f, v, level+1);
+	}
+      fprintf (f, ")");
+    }
+  else if (VECTOR_P(v))
+    {
+      int i, n = VECTOR_LENGTH(v);
+      fprintf (f, "#(");
+      for (i = 0; i < n; i++)
+	{
+	  disval (f, VECTOR_REF(v,i), level+1);
+	  if (i < n-1)
+	    fprintf (f, " ");
+	}
+      fprintf (f, ")");
+    }
+  else if (diskey (f, v))
+    ;
+  else if (dissym (f, v))
+    ;
+  else if (disstring (f, v, 1))
+    ;
+  else if (RECORD_P(v))
+    {
+      val name = RECORD_REF(RECORD_DESC(v),1);
+      int i, n = RECORD_LENGTH(v);
+      fprintf (f, "#S(");
+      if (!dissym (f, name))
+	fprintf (f, "?");
+      fprintf (f, " ");
+      for (i = 0; i < n; i++)
+	{
+	  disval (f, RECORD_REF(v,i), level+1);
+	  if (i < n-1)
+	    fprintf (f, " ");
+	}
+      fprintf (f, ")");
+    }
+  else
+    fprintf (f, "?");
+}
+
 void
 disfmt (FILE *f, const char *fmt, word insn, val *lit, int reg_hints)
 {
@@ -1342,40 +1600,45 @@ disfmt (FILE *f, const char *fmt, word insn, val *lit, int reg_hints)
 }
 
 const char *reglitop_fmt[128] = {
-  [HALT]   = "HALT %x %y %z",
-  [MISC]   = NULL,
-  [MOVE]   = "MOVE %X %Y",
-  [REF]    = "REF %X %Y %Z", 
-  [REFI]   = "REFI %X %Y %z",
-  [SET]    = "SET %X %Y %Z", 
-  [SETL]   = "SETL %L %Y %Z",
-  [SETI]   = "SETI %X %Y %z",
-  [CMP]    = "CMP %x %Y %Z", 
-  [TRAP]   = NULL,
-  [REFU8]  = "REFU8 %X %Y %Z",
-  [SETU8]  = "SETU8 %X %Y %Z",
-  [REFU16] = "REFU16 %X %Y %Z",
-  [SETU16] = "SETU16 %X %Y %Z",
-  [ADD]    = "ADD %X %Y %Z",
-  [SUB]    = "SUB %X %Y %Z",
-  [MUL]    = "MUL %X %Y %Z",
-  [DIV]    = "DIV %X %Y %Z",
-  [REM]    = "REM %X %Y %Z",
-  [ADD16]  = "ADD16 %X %Y %Z %c",
-  [SUB16]  = "SUB16 %X %Y %Z %c",
-  [MUL16]  = "MUL16 %X %Y %Z %c",
-  [DIV16]  = "DIV16 %X %Y %Z %c",
-  [ADD16I] = "ADD16I %X %Y %z %c"
+  [HALT]    = "HALT %x %y %z",
+  [MISC]    = NULL,
+  [MOVE]    = "MOVE %X %Y",
+  [REF]     = "REF %X %Y %Z", 
+  [REFI]    = "REFI %X %Y %z",
+  [SET]     = "SET %X %Y %Z", 
+  [SETL]    = "SETL %L %Y %Z",
+  [SETI]    = "SETI %X %Y %z",
+  [CMP]     = "CMP %x %Y %Z", 
+  [TRAP2]   = NULL,
+  [REFU8]   = "REFU8 %X %Y %Z",
+  [SETU8]   = "SETU8 %X %Y %Z",
+  [REFU16]  = "REFU16 %X %Y %Z",
+  [SETU16]  = "SETU16 %X %Y %Z",
+  [ADD]     = "ADD %X %Y %Z",
+  [SUB]     = "SUB %X %Y %Z",
+  [MUL]     = "MUL %X %Y %Z",
+  [DIV]     = "DIV %X %Y %Z",
+  [REM]     = "REM %X %Y %Z",
+  [ADD16]   = "ADD16 %X %Y %Z %c",
+  [SUB16]   = "SUB16 %X %Y %Z %c",
+  [MUL16]   = "MUL16 %X %Y %Z %c",
+  [DIV16]   = "DIV16 %X %Y %Z %c",
+  [ADD16I]  = "ADD16I %X %Y %z %c",
+  [TRAPRET] = "TRAPRET %Y %Z",
 };
 
 const char *op_fmt[256] = {
-  [MOVEI] = "MOVEI %X %v",        
-  [ALLOCI] = "ALLOCI %X %v",       
-  [INITI] = "INITI %w %d",        
-  [FILLI] = "FILLI %w %d %c",        
+  [MOVEI]        = "MOVEI %X %v",        
+  [ALLOCI]       = "ALLOCI %X %v",       
+  [INITI]        = "INITI %w %d",        
+  [FILLI]        = "FILLI %w %d %c",        
   [CHECK_ALLOCI] = "CHECK_ALLOCI %w",
-  [INIT_VECI] = "INIT_VECI %w %d",
-  [BRANCH] = "BRANCH %x %v %c",
+  [INIT_VECI]    = "INIT_VECI %w %d",
+  [TRAP]         = NULL,
+  [TRAPR]        = NULL,
+  [ABORT]        = NULL,
+  [ABORTR]       = NULL,
+  [BRANCH]       = "BRANCH %x %v %c",
 };
 
 const char *miscop_fmt[256] = {
@@ -1430,7 +1693,7 @@ disinsn (FILE *f, val code, val *pc, int reg_hints)
  
   if ((op&~3) == MISC)
     disfmt (f, miscop_fmt[z], insn, lit, reg_hints);
-  else if ((op&~3) == TRAP)
+  else if ((op&~3) == TRAP2)
     {
       if (z == TRAPOP_SYSCALL)
 	{
@@ -1440,7 +1703,7 @@ disinsn (FILE *f, val code, val *pc, int reg_hints)
 	  while (n > 0)
 	    {
 	      word a = *pc++;
-	      fprintf (stderr, " ");
+	      fprintf (f, " ");
 	      if (a & 0x80000000)
 		dumpf (f, lit[a & 0xFF]);
 	      else
@@ -1451,6 +1714,31 @@ disinsn (FILE *f, val code, val *pc, int reg_hints)
       else
 	disfmt (f, trapop_fmt[z], insn, lit, reg_hints);
     }
+  else if (op == TRAP || op == ABORT)
+    {
+      int i;
+      int arg_head = y;
+      word arg_desc = *pc++;
+
+      int n_args = arg_head >> 4;
+
+      if (op == TRAP)
+	disfmt (f, "TRAP %z %X", insn, lit, reg_hints);
+      else
+	disfmt (f, "ABORT %z %X", insn, lit, reg_hints);
+
+      for (i = 0; i < n_args; i++)
+	{
+	  int idx = arg_desc & 0xff;
+	  fprintf (f, " ");
+	  if ((arg_head & 1) == 0)
+	    fprintf (f, "r%d", idx);
+	  else
+	    dumpf (f, lit[idx]);
+	  arg_head >>= 1;
+	  arg_desc >>= 8;
+	}
+    }
   else if (op < 128)
     disfmt (f, reglitop_fmt[op & ~3], insn, lit, reg_hints);
   else
@@ -1459,6 +1747,28 @@ disinsn (FILE *f, val code, val *pc, int reg_hints)
   return pc;
 }
 
+void
+dissource (FILE *f, val code)
+{
+  int count = CODE_INSN_LENGTH (code);
+  val *pc = ((val *)code) + 1;
+  val source = pc[count];
+
+  if (PAIR_P (source))
+    {
+      while (PAIR_P (source))
+	{
+	  disval (f, CAR (source), 0);
+	  fprintf (f, "\n");
+	  source = CDR (source);
+	}
+    }
+  else
+    {
+      disval (f, source, 0);
+      fprintf (f, "\n");
+    }
+}
 
 void
 discode (FILE *f, val code)
@@ -1473,6 +1783,7 @@ discode (FILE *f, val code)
       count--;
     }
 }
+
 
 /* The subroutines for the complex instructions.
  */
@@ -1533,15 +1844,21 @@ check_callsig (word expected_sig, int caller_sig_reg)
   return;
 
  wrong_num_args:
-  // fprintf (stderr, "wrong number of arguments\n");
-  if (HEAP_P (regs[-6]))
-    {
-      regs[0] = MAKE_FIXNUM (2*2+0);
-      regs[1] = regs[-6];
-      do_GO (RECORD_REF (regs[-6], 0));
-    }
+  if (HEAP_P (regs[-9]))
+    trap (2, -2, 0, 0);
   else
-    abort ();
+    {
+      int n_expected = expected_sig >> 1, rest_expected = expected_sig & 1;
+      int n_caller = caller_sig >> 1, rest_caller = caller_sig & 1;
+      
+      fprintf (stderr, "ABORT: wrong number of arguments.\n");
+      fprintf (stderr, "Expected %d+%d, got %d+%d\n",
+	       n_expected, rest_expected, n_caller, rest_caller);
+      dissource (stderr, reg_code);
+      discode (stderr, reg_code);
+      fprintf (stderr, "\n");
+      abort ();
+    }
 }
 
 /* The GC.
@@ -1763,6 +2080,7 @@ gc (word size)
   scan_words (&regs[-6], 1);
   scan_words (&regs[-7], 1);
   scan_words (&regs[-8], 1);
+  scan_words (&regs[-9], 1);
   scan_words (&reg_code, 1);
   for (ptr = to_space, count = 0; ptr < to_ptr; count++)
     ptr = scan (ptr);
@@ -2390,12 +2708,12 @@ dump_regs ()
 
 #define MAX_ARGS 16
 
-void return_from_interrupt (val state);
+void syscall_trap (int n_args, val *args, int return_register);
 
 void
 do_syscall (word n_args, word return_register)
 {
-  val arg[MAX_ARGS], res;
+  val arg[MAX_ARGS];
   int i;
 
   for (i = 0; i < n_args; i++)
@@ -2406,6 +2724,15 @@ do_syscall (word n_args, word return_register)
       else
 	arg[i] = regs[a&0xFF];
     }
+
+  syscall_trap (n_args, arg, return_register);
+}
+
+void
+syscall_trap (int n_args, val *arg, int return_register)
+{
+  val res;
+  int i;
 
   if (trace_syscalls)
     {
@@ -2522,10 +2849,7 @@ do_syscall (word n_args, word return_register)
     }
   else if (arg[0] == MAKE_FIXNUM(15))
     {
-      return_from_interrupt (arg[1]);
-      /* Do not touch the return_register
-       */
-      return;
+      res = regs[-7] = arg[1];
     }
   else if(arg[0] == MAKE_FIXNUM(16))
     {
@@ -2658,6 +2982,7 @@ boot (val closure, val *free, val *end)
   for (i = 0; i < 256; i++)
     regs[i] = UNSPEC;
 
+  regs[-9] = BOOL_F; // trap vector
   regs[-8] = BOOL_F; // interrupt val
   regs[-7] = BOOL_F; // interrupt flag
   regs[-6] = BOOL_F; // error:wrong-num-args code
@@ -2666,9 +2991,11 @@ boot (val closure, val *free, val *end)
   regs[-3] = NIL;    // hashq vectors
   regs[-2] = BOOL_F; // gc_glue
   regs[-1] = BOOL_F; // sys
-  regs[0] = MAKE_FIXNUM(4);
-  regs[1] = closure;
-  regs[2] = BOOL_F;  // cont of boot procedure
+
+  regs[0] = MAKE_FIXNUM(2*3+0);
+  regs[1] = BOOL_F;  // closure vector of continuation
+  regs[2] = closure; // closure vector of boot procedure
+  regs[3] = BOOL_F;  // continuation of boot procedure
   
   reg_src = reg_dst = NULL;
   reg_count = 0;
@@ -2684,23 +3011,60 @@ boot (val closure, val *free, val *end)
 void
 invoke_interrupt_handler ()
 {
+  /* Interrupt is trap 1 with no arguments and no return value.
+   */
+  if (regs[-7] != BOOL_F)
+    {
+      regs[-7] = BOOL_F;
+      trap (1, -1, 0, 0);
+    }
+}
+
+void
+trap (int trap_number, int return_reg, int arg_head, word arg_desc)
+{
   /* We create an object that stores the current state.  This object
-     can be used with the return-from-interrupt instruction.  The
-     object contains the living registers and the current code
-     objects.
+     can be used with the return-from-trap instruction.  The object
+     contains the living registers and the current code object.
   */
   
+  int n_args = arg_head >> 4;
+  val args[4];
+
   int n_regs = 256;
-  int n_elts = 2 + n_regs;
+  int n_elts = 3 + n_regs;
   int i;
   val state;
-  val handler = regs[-8];
+  val trap_vector;
+  val handler;
 
-  if (!HEAP_P (handler))
-    return;
+  for (i = 0; i < n_args; i++)
+    {
+      if ((arg_head & 1) == 0)
+	args[i] = regs[arg_desc & 0xff];
+      else
+	args[i] = reg_lit[arg_desc & 0xff];
+      arg_head >>= 1;
+      arg_desc >>= 8;
+    }
 
-  regs[-8] = BOOL_F;
+  if (trap_number == 0)
+    {
+      syscall_trap (n_args, args, return_reg);
+      return;
+    }
 
+  trap_vector = regs[-9];
+  if (!VECTOR_P (trap_vector)
+      || VECTOR_LENGTH (trap_vector) <= trap_number
+      || !HEAP_P (handler = VECTOR_REF (trap_vector, trap_number)))
+    {
+      fprintf (stderr, "HALT: Unhandled trap %d\n", trap_number);
+      if (return_reg >= 0)
+	regs[return_reg] = UNSPEC;
+      return;
+    }
+  
   /* Allocate vector
    */
   if (reg_free + n_elts + 1 > reg_end)
@@ -2714,27 +3078,43 @@ invoke_interrupt_handler ()
    */
   VECTOR_SET (state, 0, reg_code);
   VECTOR_SET (state, 1, MAKE_FIXNUM (reg_pc - (val *)reg_code));
+  VECTOR_SET (state, 2, MAKE_FIXNUM (return_reg));
   for (i = 0; i < n_regs; i++)
-    VECTOR_SET (state, 2+i, regs[i]);
+    VECTOR_SET (state, 3+i, regs[i]);
 
   /* Setup arguments for handler
    */
-  regs[0] = MAKE_FIXNUM (2*3+0);
-  regs[1] = handler;
-  regs[2] = BOOL_F;
-  regs[3] = state;
-  
+  {
+    regs[0] = MAKE_FIXNUM (2*(n_args + 4) + 0);
+    regs[1] = BOOL_F;   // closure vector of continuation
+    regs[2] = handler;  // closure record of procedure
+    regs[3] = BOOL_F;   // continuation
+    regs[4] = state;    // first argument, the state
+    for (i = 0; i < n_args; i++)
+      regs[5+i] = args[i];
+  }
+
   do_GO (RECORD_REF (handler, 0));
 }
 
 void
-return_from_interrupt (val state)
+return_from_trap (val state, val return_value)
 {
-  int i, n_regs;
+  int i, n_regs, return_reg;
   
   n_regs = 256;
   for (i = 0; i < n_regs; i++)
-    regs[i] = VECTOR_REF (state, 2+i);
+    regs[i] = VECTOR_REF (state, 3+i);
+
+  return_reg = FIXNUM_VAL(VECTOR_REF (state, 2));
+  if (return_reg >= 0)
+    regs[return_reg] = return_value;
+  
+  if (return_reg == -2)
+    {
+      fprintf (stderr, "ABORT\n");
+      exit (1);
+    }
 
   do_GO_with_offset (VECTOR_REF (state, 0),
 		     FIXNUM_VAL (VECTOR_REF (state, 1)));
@@ -2743,7 +3123,6 @@ return_from_interrupt (val state)
 void
 sighandler (int sig, struct sigcontext *ctxt)
 {
-  printf ("INT\n");
   reg_end = 0;
   signal (sig, (void (*) (int))sighandler);
 }
@@ -2789,8 +3168,16 @@ main (int argc, char **argv)
       argc--;
     }
 
+  if (argc > 1 && !strcmp (argv[1], "-ts"))
+    {
+      trace_source = 1;
+      argv++;
+      argc--;
+    }
+
   if (argc > 1 && !strcmp (argv[1], "-tg"))
     {
+      trace_source = 1;
       trace_go = 1;
       argv++;
       argc--;

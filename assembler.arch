@@ -44,7 +44,9 @@
 			  (error "wrong number of continuations: "
 				 ,n-extra-conts (length extra-cont-labels)))
 		      (if (not (= (length results) ,n-results))
-			  (error "wrong number of results"))
+			  (begin
+			    (pk ',name (length results) ,n-results)
+			    (error "wrong number of results")))
 		      (if (not (,args-cmp (length args) ,n-args))
 			  (error "wrong number of args"))
 		      (let ((func (lambda ,all-args ,@(cdr (assq 'asm body)))))
@@ -83,10 +85,10 @@
     (apply (dispatcher 'alloc-size) args)))
 
 (define (cps-asm-make-context debug-info)
-  (let ((wydes (make-bytevec (* 4 10240)))
-	(idx 0)
-	(fixups '())
-	(literals (list debug-info)))
+  (letvar ((wydes (make-bytevec (* 4 10240)))
+	   (idx 0)
+	   (fixups '())
+	   (literals (list debug-info)))
 
     (lambda (op . args)
 
@@ -200,7 +202,7 @@
   (ctxt 'emit-u32-with-laboff hi lo))
 
 (define (cps-asm-u32 ctxt word)
-  (cps-asm-u16 ctxt (quotient word #x10000) (remainder word #x10000)))
+  (cps-asm-u32-2 ctxt (quotient word #x10000) (remainder word #x10000)))
 
 (define cps-asm-word cps-asm-u32)
 
@@ -255,7 +257,7 @@
 
 (define (cps-asm-shuffle-with-move ctxt from to move)
 
-  (let ((dst-done '()))
+  (letvar ((dst-done '()))
 
     ;; handle-reg stores REG into its destinations and makes sure that
     ;; these destinations are used as sources (if needed) before being
@@ -351,7 +353,7 @@
 (define SETL          24)
 (define SETI          28)
 (define CMP           32)
-(define TRAP          36)
+(define TRAP2         36)
 (define REFU8         40)
 (define SETU8         44)
 (define REFU16        48)
@@ -366,6 +368,7 @@
 (define MUL16         84)
 (define DIV16         88)
 (define ADD16I        92)
+(define TRAPRET       96)
 
 (define MOVEI        128)
 (define ALLOCI       129)
@@ -373,6 +376,10 @@
 (define FILLI        131)
 (define CHECK_ALLOCI 132)
 (define INIT_VECI    133)
+(define TRAP         134)
+(define TRAPR        135)
+(define ABORT        136)
+(define ABORTR       137)
 
 (define BRANCH       255)
 
@@ -461,7 +468,7 @@
   (cps-asm-reglit-insn ctxt MISC 0 to MISCOP_GO))
 
 (define (cps-asm-prologue ctxt sig alloc-size)
-  (cps-asm-reglit-insn ctxt TRAP sig 0 TRAPOP_CHECK_CALLSIG)
+  (cps-asm-reglit-insn ctxt TRAP2 sig 0 TRAPOP_CHECK_CALLSIG)
   (cps-asm-alloc-check ctxt alloc-size #t))
 
 (define (cps-asm-alloc-check ctxt size always?)
@@ -470,7 +477,7 @@
 
 (define-primop (syscall (res) args)
   (asm
-   (cps-asm-reglit-insn ctxt TRAP
+   (cps-asm-reglit-insn ctxt TRAP2
 			(cps-reg-idx res) (length args) TRAPOP_SYSCALL)
    (for-each (lambda (a)
 	       (cond ((cps-reg? a)
@@ -482,35 +489,91 @@
 						     (cps-quote-value a))))))
 	     args)))
 
+(define (cps-asm-trap-insn ctxt op opr res number args)
+   (or (<= (length args) 4)
+       (error "too many arguments for trap"))
+   (let loop ((a (reverse args))
+	      (flags 0)
+	      (desc 0))
+     (cond ((null? a)
+	    (cps-asm-insn-3 ctxt
+		    	    (if (cps-quote? number) op opr)
+			    (if res (cps-reg-idx res) 0)
+			    (+ flags
+			       (* 16 (length args)))
+			    (if (cps-quote? number)
+				(cps-quote-value number)
+				(cps-reg-idx number)))
+	    (cps-asm-u32 ctxt desc))
+	   (else
+	    (if (cps-reg? (car a))
+		(loop (cdr a)
+		      (* 2 flags)
+		      (+ (* desc 256)
+			 (cps-reg-idx (car a))))
+		(loop (cdr a)
+		      (+ (* 2 flags) 1)
+		      (+ (* desc 256)
+			 (cps-asm-litidx ctxt
+					 (cps-quote-value (car a))))))))))
+
+(define-primop (trap (res) (number . args))
+  (asm
+   (cps-asm-trap-insn ctxt TRAP TRAPR res number args)))
+
+(define-primop (abort () (number . args))
+  (asm
+   (cps-asm-trap-insn ctxt ABORT ABORTR #f number args)))
+
+(define-primop (return-from-trap (res) (state value))
+  (asm
+   (cps-asm-reglit-insn ctxt TRAPRET 0 state value)))
+
 (define (cps-asm-panic ctxt)
   (cps-asm-insn-1 ctxt HALT 0))
+
+(define (cps-asm-record ctxt res desc values)
+  (cps-asm-insn-2 ctxt ALLOCI (cps-reg-idx res) (1+ (length values)))
+  (cps-asm-reglit-insn ctxt MISC 0 desc MISCOP_INIT_REC)
+  (for-each (lambda (v)
+	      (cps-asm-reglit-insn ctxt MISC 0 v MISCOP_INIT))
+	    values))
 
 (define-primop (record (res) (desc . values))
   (alloc-size
    (1+ (length values)))
   (asm
-   (cps-asm-insn-2 ctxt ALLOCI (cps-reg-idx res) (1+ (length values)))
-   (cps-asm-reglit-insn ctxt MISC 0 desc MISCOP_INIT_REC)
-   (for-each (lambda (v)
-	       (cps-asm-reglit-insn ctxt MISC 0 v MISCOP_INIT))
-	     values)))
+   (cps-asm-record ctxt res desc values)))
+
+(define-primop (function (res) (code vec))
+  (alloc-size
+   3)
+  (asm
+   (cps-asm-record ctxt res (cps-quote closure@type) (list code vec))))
 
 (define-primop (make-record (res) (desc n-fields init))
   (alloc-size
    #t)
   (asm
-   (cps-asm-reglit-insn ctxt TRAP 0 n-fields TRAPOP_CHECK_ALLOC)
+   (cps-asm-reglit-insn ctxt TRAP2 0 n-fields TRAPOP_CHECK_ALLOC)
    (cps-asm-reglit-insn ctxt MISC res n-fields MISCOP_ALLOC)
    (cps-asm-reglit-insn ctxt MISC 0 desc MISCOP_INIT_REC)
    (cps-asm-reglit-insn ctxt MISC 0 init MISCOP_FILL)))
 
+(define (cps-asm-if-record? ctxt obj desc else-label)
+  (cps-asm-reglit-insn ctxt MISC 0 obj MISCOP_TEST_REC)
+  (if (not (and (cps-quote? desc)
+		(eq? (cps-quote-value desc) #t)))
+      (cps-asm-reglit-insn ctxt MISC 0 desc MISCOP_TEST_DESC))
+  (cps-asm-branch ctxt IF_FALSE else-label))
+
 (define-primif (if-record? (obj desc) (else-label))
   (asm
-   (cps-asm-reglit-insn ctxt MISC 0 obj MISCOP_TEST_REC)
-   (if (not (and (cps-quote? desc)
-		 (eq? (cps-quote-value desc) #t)))
-       (cps-asm-reglit-insn ctxt MISC 0 desc MISCOP_TEST_DESC))
-   (cps-asm-branch ctxt IF_FALSE else-label)))
+   (cps-asm-if-record? ctxt obj desc else-label)))
+
+(define-primif (if-function? (obj) (else-label))
+  (asm
+   (cps-asm-if-record? ctxt obj (cps-quote closure@type) else-label)))
 
 (define-primop (record-desc (res) (rec))
   (asm
@@ -552,7 +615,7 @@
   (alloc-size
    #t)
   (asm
-   (cps-asm-reglit-insn ctxt TRAP 0 n TRAPOP_CHECK_ALLOC)
+   (cps-asm-reglit-insn ctxt TRAP2 0 n TRAPOP_CHECK_ALLOC)
    (cps-asm-reglit-insn ctxt MISC res n MISCOP_ALLOC)
    (cps-asm-reglit-insn ctxt MISC TAG_VECTOR n MISCOP_INIT_VEC)
    (cps-asm-reglit-insn ctxt MISC 0 init MISCOP_FILL)))
@@ -702,7 +765,7 @@
   (alloc-size
    #t)
   (asm
-   (cps-asm-reglit-insn ctxt TRAP res n TRAPOP_CHECK_ALLOC_BYTES)
+   (cps-asm-reglit-insn ctxt TRAP2 res n TRAPOP_CHECK_ALLOC_BYTES)
    (cps-asm-reglit-insn ctxt MISC res n MISCOP_ALLOC_BYTES)
    (cps-asm-reglit-insn ctxt MISC TAG_BYTEVEC n MISCOP_INIT_VEC)))
 
@@ -750,7 +813,7 @@
    #t)
   (asm
    (cps-asm-reglit-insn ctxt MISC 0 insn-length MISCOP_SET_COUNT)
-   (cps-asm-reglit-insn ctxt TRAP 0 lit-length TRAPOP_CHECK_ALLOC_CODE)
+   (cps-asm-reglit-insn ctxt TRAP2 0 lit-length TRAPOP_CHECK_ALLOC_CODE)
    (cps-asm-reglit-insn ctxt MISC 0 insn-length MISCOP_SET_COUNT)
    (cps-asm-reglit-insn ctxt MISC res lit-length MISCOP_ALLOC_CODE)
    (cps-asm-reglit-insn ctxt MISC 0 insn-length MISCOP_SET_COUNT)
@@ -802,28 +865,29 @@
 		 (loop (1+ i))))))))
 
 (define reglit-fmts
-  `((,HALT   . "HALT %x %y %z")
-    (,MOVE   . "MOVE %X %Y")
-    (,REF    . "REF %X %Y %Z")
-    (,REFI   . "REFI %X %Y %z")
-    (,SET    . "SET %X %Y %Z")
-    (,SETL   . "SETL %L %Y %Z")
-    (,SETI   . "SETI %X %Y %z")
-    (,CMP    . "CMP %x %Y %Z")
-    (,REFU8  . "REFU8 %X %Y %Z")
-    (,SETU8  . "SETU8 %X %Y %Z")
-    (,REFU16 . "REFU16 %X %Y %Z")
-    (,SETU16 . "SETU16 %X %Y %Z")
-    (,ADD    . "ADD %X %Y %Z")
-    (,SUB    . "SUB %X %Y %Z")
-    (,MUL    . "MUL %X %Y %Z")
-    (,DIV    . "DIV %X %Y %Z")
-    (,REM    . "REM %X %Y %Z")
-    (,ADD16  . "ADD16 %X %Y %Z %c")
-    (,SUB16  . "SUB16 %X %Y %Z %c")
-    (,MUL16  . "MUL16 %X %Y %Z %c")
-    (,DIV16  . "DIV16 %X %Y %Z %c")
-    (,ADD16I . "ADD16I %X %Y %z %c")))
+  `((,HALT    . "HALT %x %y %z")
+    (,MOVE    . "MOVE %X %Y")
+    (,REF     . "REF %X %Y %Z")
+    (,REFI    . "REFI %X %Y %z")
+    (,SET     . "SET %X %Y %Z")
+    (,SETL    . "SETL %L %Y %Z")
+    (,SETI    . "SETI %X %Y %z")
+    (,CMP     . "CMP %x %Y %Z")
+    (,REFU8   . "REFU8 %X %Y %Z")
+    (,SETU8   . "SETU8 %X %Y %Z")
+    (,REFU16  . "REFU16 %X %Y %Z")
+    (,SETU16  . "SETU16 %X %Y %Z")
+    (,ADD     . "ADD %X %Y %Z")
+    (,SUB     . "SUB %X %Y %Z")
+    (,MUL     . "MUL %X %Y %Z")
+    (,DIV     . "DIV %X %Y %Z")
+    (,REM     . "REM %X %Y %Z")
+    (,ADD16   . "ADD16 %X %Y %Z %c")
+    (,SUB16   . "SUB16 %X %Y %Z %c")
+    (,MUL16   . "MUL16 %X %Y %Z %c")
+    (,DIV16   . "DIV16 %X %Y %Z %c")
+    (,ADD16I  . "ADD16I %X %Y %z %c")
+    (,TRAPRET . "TRAPRET %Y %Z")))
 
 (define miscop-fmts
   `((,MISCOP_GO               . "GO %Y")
@@ -876,7 +940,7 @@
 	 (z (code-insn-ref-u8 code (+ pos 0))))
     (cond ((= op2 MISC)
 	   (disfmt (assq-ref miscop-fmts z) op x y z code))
-	  ((= op2 TRAP)
+	  ((= op2 TRAP2)
 	   (disfmt (assq-ref trapop-fmts z) op x y z code))
 	  ((< op 128)
 	   (disfmt (assq-ref reglit-fmts op2) op x y z code))

@@ -249,8 +249,8 @@ own.  Books start with a header line of "#".
 
 -
 (define (process-section sec proc)
-  (catch ((caught-error msg args)
-	  (apply display-error msg args)
+  (catch ((caught-error msg rest)
+	  (display-error msg rest)
 	  (set! (section-errors sec) msg)
 	  #f)
     (with-error-handler caught-error
@@ -345,7 +345,7 @@ own.  Books start with a header line of "#".
 
 -
 (define (compile-form form)
-  (let ((top-expressions '()))
+  (letvar ((top-expressions '()))
 
     (define (top exp)
       (set! top-expressions (cons exp top-expressions)))

@@ -34,24 +34,30 @@ that the compiler understands.
   (let loop ((defs '())
 	     (rest body))
     (let ((first (macroexpand (car rest))))
-      (cond ((and (pair? first) (or (eq? (car first) :define)
-				    (eq? (car first) :define-function)))
+      (cond ((and (pair? first) (eq? (car first) :define-function))
 	     (loop (cons first defs) (cdr rest)))
 	    ((and (pair? first) (eq? (car first) :begin))
 	     (loop defs (append (cdr first) (cdr rest))))
 	    ((null? defs)
 	     (cons first (cdr rest)))
 	    (else
-	     (let ((vars (map cadr defs))
-		   (vals (map caddr defs)))
-	       (list `(letrec ,(map list vars vals)
-			,@(cons first (cdr rest))))))))))
+	     (let ((funcs (map (lambda (def)
+				 (let ((name (cadr def))
+				       (val (macroexpand (caddr def))))
+				   (or (and (pair? val)
+					    (eq? (car val) :lambda))
+				       (error
+					"internal defines must be lambdas"))
+				   (cons* (cons name (cadr val)) (cddr val))))
+			       (reverse defs))))
+	       (list `(:labels ,funcs
+			       ,@(cons first (cdr rest))))))))))
 
 (define (qq-expand-verbose form lookup?)
   (pk 'qq form '-> (qq-expand form lookup?)))
 
 (define (qq-expand form lookup?)
-  (let ((gensyms '()))
+  (letvar ((gensyms '()))
 
     (define (get-gensym sym)
       (or (assq-ref gensyms sym)
@@ -149,11 +155,8 @@ that the compiler understands.
 			,(qq-nested-expand (cdr x) depth)))))
       `'(,x)))
 
-(define (lambda-transformer args body)
-  (cons* :lambda args (expand-body body)))
-  
 (define-macro (lambda args . body)
-  (lambda-transformer args body))
+  (cons* :lambda args (expand-body body)))
 
 (define-macro (lambda-with-setter l s)
   `(let ((l (lambda ,@l))
@@ -180,7 +183,7 @@ that the compiler understands.
 
 (define-macro (define head . body)
   (if (pair? head)
-;;    `(define-function ,(car head) (lambda ,(cdr head) ,@body))
+      ;;`(define-function ,(car head) (lambda ,(cdr head) ,@body))
       `(define-function ,(car head) (lambda ,(cdr head)
 				      (primop syscall 0
 					      ,(string-bytes
@@ -205,9 +208,10 @@ that the compiler understands.
       (let ((name first)
 	    (bindings (car rest))
 	    (body (cdr rest)))
-	`(letrec ((,name (lambda ,(map car bindings) ,@body)))
+	`(labels (((,name ,@(map car bindings)) ,@body))
 	   (,name ,@(map cadr bindings))))
-      `((lambda ,(map car first) ,@rest) ,@(map cadr first))))
+;     `((lambda ,(map car first) ,@rest) ,@(map cadr first))))
+      (cons* :let first (expand-body rest))))
 
 (define-macro (let* bindings . body)
   (if (null? bindings)
@@ -216,6 +220,23 @@ that the compiler understands.
       `(let (,(car bindings))
 	 (let* ,(cdr bindings)
 	   ,@body))))
+
+(define-macro (letvar bindings . body)
+  (cons* :letvar bindings (expand-body body)))
+
+(define-macro (letvar* bindings . body)
+  (if (null? bindings)
+      `(letvar ()
+	 ,@body)
+      `(letvar (,(car bindings))
+	 (letvar* ,(cdr bindings)
+	   ,@body))))
+
+(define-macro (labels bindings . body)
+  (cons* :labels (map (lambda (b)
+			(cons* (car b) (expand-body (cdr b))))
+		      bindings)
+	 (expand-body body)))
 
 (define (identity obj) obj)
 
@@ -255,16 +276,6 @@ that the compiler understands.
       `((setter ,(car place)) ,val ,@(cdr place))
       `(:set ,place ,val)))
 
-(define-macro (letrec bindings . body)
-  (let ((vars (map car bindings))
-	(inits (map cadr bindings))
-	(unspec (if #f #f)))
-    `(let ,(map (lambda (v) `(,v ',unspec)) vars)
-       ,@(map (lambda (v i)
-		`(set! ,v ,i))
-	      vars inits)
-       (let () ,@body))))
-
 (define-macro (do specs term . body)
   (let* ((vars (map car specs))
 	 (inits (map cadr specs))
@@ -273,12 +284,12 @@ that the compiler understands.
 	 (test (car term))
 	 (term-body (cdr term))
 	 (loop (gensym)))
-    `(letrec ((,loop (lambda ,vars
-		       (if ,test
-			   (begin ,@term-body)
-			   (begin ,@body
-				  (,loop ,@steps))))))
-       (,loop ,@inits))))
+    `(labels (((,loop ,@vars)
+	       (if ,test
+		   (begin ,@term-body)
+		   (begin ,@body
+			  (,loop ,@steps)))))
+	     (,loop ,@inits))))
 
 (define-macro (and . args)
   (cond ((null? args)
@@ -307,57 +318,6 @@ that the compiler understands.
 
 (define-macro (primop op . args)
   `(:primitive ,op (res) ,args (res)))
-@
-**    Error handling                                                  [@3 *-]
--
-(define (error:not-a-closure thing)
-  (error "not a closure: " thing))
-
-(define (error:wrong-num-args)
-  (error "wrong number of arguments"))
-
-(define (set-wrong-num-args-hook)
-  (primop syscall 9 -6 error:wrong-num-args))
-
-(define (error:wrong-type val)
-  (error "wrong type: " val))
-
-(define (error:out-of-range val)
-  (error "out of range: " val))
-
-(define (error:overflow)
-  (error "overflow"))
-
-(define (display-error msg rest)
-  (display "ERROR: ")
-  (display msg)
-  (for-each (lambda (r)
-	      (display r)
-	      (display " "))
-	    rest)
-  (newline))
-  
-(define handling-error #f)
-
-(define (last-straw-error-handler msg rest)
-  (if handling-error
-      (sys:panic)
-      (begin
-	(set! handling-error #t)
-	(display-error msg rest)
-	(sys:panic))))
-
-(define error-handlers (make-parameter '()))
-
-(define (error msg . rest)
-  (if (null? (error-handlers))
-      (last-straw-error-handler msg rest)
-      (let ((handler (car (error-handlers))))
-	(error-handlers (cdr (error-handlers)))
-	(handler msg rest))))
-
-(define (with-error-handler handler thunk)
-  (call-p error-handlers (cons handler (error-handlers)) thunk))
 @
 **    Catch, Throw, and Protect
 -
@@ -413,6 +373,7 @@ that the compiler understands.
 
 (define (not x)
   (if x #f #t))
+
 @
 **    Pairs                                                           [@6 *-]
 -
@@ -427,6 +388,11 @@ that the compiler understands.
   (if (pair? a)
       (primop car a)
       (error:wrong-type a)))
+
+(define (car* a)
+  (primif (if-pair? a)
+	  (primop car a)
+	  (primab abort 3 a)))
 
 (define (cdr a)
   (if (pair? a)
@@ -1166,19 +1132,21 @@ Only elements that occur in both lists occur in the result list."
   ;; at the end.  This increases robustness and makes it possible to
   ;; change the type of records that are used in this function itself.
 
-  (let* ((old-slots (record-type-slots old-type))
-	 (new-slots (record-type-slots new-type))
-
-	 (old-instances (find-instances old-type))
-	 (new-instances (make-vector (vector-length old-instances) #f))
-
-	 (old-accessors (list->vector (map slot-accessor (map cdr old-slots))))
-	 (new-accessors (make-vector (vector-length old-accessors) #f))
-
-	 (old-constructors (list->vector (map cdr 
-					      (record-type-constructors
-					       old-type))))
-	 (new-constructors (make-vector (vector-length old-constructors) #f)))
+  (letvar* ((old-slots (record-type-slots old-type))
+	    (new-slots (record-type-slots new-type))
+	    
+	    (old-instances (find-instances old-type))
+	    (new-instances (make-vector (vector-length old-instances) #f))
+	    
+	    (old-accessors (list->vector (map slot-accessor
+					      (map cdr old-slots))))
+	    (new-accessors (make-vector (vector-length old-accessors) #f))
+	    
+	    (old-constructors (list->vector (map cdr 
+						 (record-type-constructors
+						  old-type))))
+	    (new-constructors (make-vector (vector-length old-constructors)
+					   #f)))
 
     ;; Create new instances
 
@@ -1413,15 +1381,15 @@ Only elements that occur in both lists occur in the result list."
 
 (define (make-parameter init)
   (let ((global-cell (cons #f init)))
-    (letrec ((parameter (lambda new-val
-			  (let ((cell (or (assq parameter
-						(dynamic-environment))
-					  global-cell)))
-			    (cond ((null? new-val)
-				   (cdr cell))
-				  (else
-				   (set-cdr! cell (car new-val))))))))
-      parameter)))
+    (labels (((parameter . new-val)
+	      (let ((cell (or (assq parameter
+				    (dynamic-environment))
+			      global-cell)))
+		(cond ((null? new-val)
+		       (cdr cell))
+		      (else
+		       (set-cdr! cell (car new-val)))))))
+	    parameter)))
 
 (define (call-p parameter value func)
   (call-de (acons parameter value (dynamic-environment)) func))
@@ -1859,6 +1827,113 @@ Only elements that occur in both lists occur in the result list."
   (if (fixnum? fd)
       (primop syscall 17 fd)
       (error:wrong-type fd)))
+
+@
+**    Traps
+-
+(define trap-handlers (make-vector 256 #f))
+
+(define (init-trap-handlers)
+  (primop syscall 9 -9 trap-handlers))
+
+(define last-trap-state #f)
+
+(define (set-trap-handler number handler)
+  (vector-set! trap-handlers number
+	       (lambda (state . args)
+		 (set! last-trap-state state)
+		 (primop return-from-trap
+			 state
+			 (apply handler args)))))
+
+(define (trap number . args)
+  (let ((n (length args)))
+    (cond ((= n 0)
+	   (primop trap number))
+	  ((= n 1)
+	   (primop trap number (car args)))
+	  ((= n 2)
+	   (primop trap number (car args) (cadr args)))
+	  ((= n 3)
+	   (primop trap number (car args) (cadr args) (caddr args)))
+	  ((= n 4)
+	   (primop trap number (car args) (cadr args) (caddr args)
+		   (cadddr args)))
+	  (else
+	   (error "too many arguments to trap")))))
+
+(define-macro (primab op . args)
+  `(:primitive ,op () ,args ()))
+
+(define (abort number . args)
+  (let ((n (length args)))
+    (cond ((= n 0)
+	   (primab abort number))
+	  ((= n 1)
+	   (primab abort number (car args)))
+	  ((= n 2)
+	   (primab abort number (car args) (cadr args)))
+	  ((= n 3)
+	   (primab abort number (car args) (cadr args) (caddr args)))
+	  ((= n 4)
+	   (primab abort number (car args) (cadr args) (caddr args)
+		   (cadddr args)))
+	  (else
+	   (error "too many arguments to abort")))))
+
+@
+**    Error handling                                                  [@3 *-]
+-
+(set-trap-handler 2 (lambda () (error "wrong number of arguments")))
+(define (error:wrong-num-args)
+  (abort 2))
+
+(set-trap-handler 3 (lambda (val) (error "wrong type: " val)))
+(define (error:wrong-type val)
+  (abort 3 val))
+
+(set-trap-handler 4 (lambda (val) (error "not a closure: " val)))
+(define (error:not-a-closure val)
+  (abort 4 val))
+
+(set-trap-handler 5 (lambda (val) (error "out of range" val)))
+(define (error:out-of-range val)
+  (abort 5 val))
+
+(define (error:overflow)
+  (error "overflow"))
+
+(define (display-error msg rest)
+  (display "ERROR: ")
+  (display msg)
+  (for-each (lambda (r)
+	      (display r)
+	      (display " "))
+	    rest)
+  (newline))
+  
+(define handling-error #f)
+
+(define (last-straw-error-handler msg rest)
+  (if handling-error
+      (sys:panic)
+      (begin
+	(set! handling-error #t)
+	(display-error msg rest)
+	(sys:panic))))
+
+(define error-handlers (make-parameter '()))
+
+(define (error msg . rest)
+  (if (null? (error-handlers))
+      (last-straw-error-handler msg rest)
+      (let ((handler (car (error-handlers))))
+	(error-handlers (cdr (error-handlers)))
+	(handler msg rest))))
+
+(define (with-error-handler handler thunk)
+  (call-p error-handlers (cons handler (error-handlers)) thunk))
+
 @
 **    Ports                                                          [@36 *-]
 -
@@ -1902,12 +1977,12 @@ Only elements that occur in both lists occur in the result list."
     ch))
 
 (define (make-line-buffered-port size reader writer)
-  (let ((read-buf (if reader (make-bytevec size) #f))
-	(read-size 0)
-	(read-pos 0)
-	(putback-char #f)
-	(write-buf (if writer (make-bytevec size) #f))
-	(write-pos 0))
+  (letvar ((read-buf (if reader (make-bytevec size) #f))
+	   (read-size 0)
+	   (read-pos 0)
+	   (putback-char #f)
+	   (write-buf (if writer (make-bytevec size) #f))
+	   (write-pos 0))
     (lambda (op arg)
       (cond ((= op 0)
 	     (bytevec-set-u8! write-buf write-pos (char->integer arg))
@@ -1958,8 +2033,8 @@ Only elements that occur in both lists occur in the result list."
 				     (loop (+ pos n) (- size n))))))))
 
 (define (make-string-output-port)
-  (let ((buf (make-string 1024))
-	(pos 0))
+  (letvar ((buf (make-string 1024))
+	   (pos 0))
     (lambda (op arg)
       (cond ((eq? op 'str)
 	     (substring buf 0 pos))
@@ -1975,7 +2050,7 @@ Only elements that occur in both lists occur in the result list."
   (p 'str #f))
 
 (define (make-string-input-port str)
-  (let ((pos 0))
+  (letvar ((pos 0))
     (lambda (op arg)
       (cond ((= op 1)
 	     (if (>= pos (string-length str))
@@ -2027,7 +2102,7 @@ Only elements that occur in both lists occur in the result list."
      (sys:close fd))))
 
 (define (call-with-new-archive name proc)
-  (let ((fd (sys:open-archive-for-write)))
+  (letvar ((fd (sys:open-archive-for-write)))
     (if (< fd 0)
 	(error "can't open: " (- fd)))
     (protect
@@ -2314,7 +2389,7 @@ Only elements that occur in both lists occur in the result list."
 
 (define (parse-comment state)
   (let ((ch (input-char (parse-state-port state))))
-    (if (not (eq? ch #\newline))
+    (if (not (or (eof-object? ch) (eq? ch #\newline)))
 	(parse-comment state))))
 
 (define (parse-token state)
@@ -3449,16 +3524,6 @@ it with '#f'.
    (else
     form)))
 
-;;; Interrupts
-
-(define (set-interrupt-handler handler)
-  (primop syscall 9 -8 handler))
-
-(define (get-interrupt-handler)
-  (primop syscall 8 -8))
-
-(define (return-from-interrupt state)
-  (primop syscall 15 state))
 @
 **    Repl                                                           [@51 *-]
 
@@ -3546,8 +3611,14 @@ it with '#f'.
 
 (define p values)
 
-(define (interrupt-handler state)
+(define (interrupt-handler)
+  (allow-interrupts)
   (error "interrupted"))
+
+(set-trap-handler 1 interrupt-handler)
+
+(define (allow-interrupts)
+  (trap 0 15 #t))
 
 (define last-error-continuation #f)
 
@@ -3564,10 +3635,10 @@ it with '#f'.
 		      (caught-error k args))))
 	(lambda ()
 	  (call-v (lambda ()
+		    (allow-interrupts)
 		    (cond (prompt
 			   (display prompt)
 			   (force-output (current-output-port))))
-		    (set-interrupt-handler interrupt-handler)
 		    (let ((form (read-line)))
 		      (cond ((eof-object? form)
 			     (exit))
@@ -3586,7 +3657,7 @@ it with '#f'.
 	       (primop syscall 10 (lambda () (k #t)))
 	       (error "can't suspend")))
     (set-hashq-vectors hashq-vectors)
-    (set-wrong-num-args-hook)
+    (init-trap-handlers)
     #t))
 
 (define (repl)

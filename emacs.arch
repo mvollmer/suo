@@ -154,62 +154,63 @@ specialized high-level UI protocol.
   (let ((output (create-segment buffer pos
 				'(read-only t
  			          face (:background "grey90"))))
-	(output-newline-pending #f)
 	(input (create-segment buffer (1+ pos)
-			       '(face (:background "grey80"))))
-	(pending-input #f)
-	(pending-pos 0)
-	(pending-len 0))
+			       '(face (:background "grey80")))))
 
-    (define (reader buf size)
-      (with-error-handler emacs-protocol-error-handler
-        (lambda ()
-	  (if pending-input
-	      (cond ((<= pending-len size)
-		     (bytevec-set-subvector! buf 0 pending-len
-					     pending-input pending-pos)
-		     (set! pending-input #f)
-		     pending-len)
-		    (else
-		     (bytevec-set-subvector! buf 0 size
-					     pending-input pending-pos)
-		     (set! pending-pos (+ pending-pos size))
-		     (set! pending-len (- pending-len size))
-		     size))
-	      (let ((ev (get-event)))
-		(if (equal? ev `(,input "RET"))
-		    (let ((text (string-append (get-text input) "\n")))
-		      (set-text input "")
-		      (write-string text (string-length text) 
-				    '(:inherit bold))
-		      (set! pending-input (string-bytes text))
-		      (set! pending-pos 0)
-		      (set! pending-len (bytevec-length-8 pending-input)))
-		    (handle-event ev))
-		(reader buf size))))))
+    (letvar ((output-newline-pending #f)
+	     (pending-input #f)
+	     (pending-pos 0)
+	     (pending-len 0))
 
-    (define (write-string str len props)
-      (cond ((> len 0)
-	     (if output-newline-pending
-		 (append-text output "\n"))
-	     (set! output-newline-pending
-		   (eq? (string-ref str (1- len)) #\newline))
-	     (append-text output
-			  `(text ,(substring str 
-					     0
-					     (if output-newline-pending
-						 (1- len)
-						 len))
-				 ,@props)))))
+      (define (reader buf size)
+	(with-error-handler emacs-protocol-error-handler
+	  (lambda ()
+	    (if pending-input
+		(cond ((<= pending-len size)
+		       (bytevec-set-subvector! buf 0 pending-len
+					       pending-input pending-pos)
+		       (set! pending-input #f)
+		       pending-len)
+		      (else
+		       (bytevec-set-subvector! buf 0 size
+					       pending-input pending-pos)
+		       (set! pending-pos (+ pending-pos size))
+		       (set! pending-len (- pending-len size))
+		       size))
+		(let ((ev (get-event)))
+		  (if (equal? ev `(,input "RET"))
+		      (let ((text (string-append (get-text input) "\n")))
+			(set-text input "")
+			(write-string text (string-length text) 
+				      '(:inherit bold))
+			(set! pending-input (string-bytes text))
+			(set! pending-pos 0)
+			(set! pending-len (bytevec-length-8 pending-input)))
+		      (handle-event ev))
+		  (reader buf size))))))
 
-    (define (writer buf size)
-      (with-error-handler emacs-protocol-error-handler
-        (lambda ()
-	  (write-string (create-string buf) size
-			'(:foreground "blue")))))
+      (define (write-string str len props)
+	(cond ((> len 0)
+	       (if output-newline-pending
+		   (append-text output "\n"))
+	       (set! output-newline-pending
+		     (eq? (string-ref str (1- len)) #\newline))
+	       (append-text output
+			    `(text ,(substring str 
+					       0
+					       (if output-newline-pending
+						   (1- len)
+						   len))
+				   ,@props)))))
+      
+      (define (writer buf size)
+	(with-error-handler emacs-protocol-error-handler
+          (lambda ()
+	    (write-string (create-string buf) size
+			  '(:foreground "blue")))))
 
-    (bind-key input "RET" (lambda () #f))
-    (make-line-buffered-port 512 reader writer)))
+      (bind-key input "RET" (lambda () #f))
+      (make-line-buffered-port 512 reader writer))))
 
 -
 (define (eval-print form)

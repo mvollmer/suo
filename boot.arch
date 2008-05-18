@@ -27,5 +27,5 @@
 	(values))
       (error "FAIL" val1 val2)))
 
-(set-wrong-num-args-hook)
+(init-trap-handlers)
 (repl)

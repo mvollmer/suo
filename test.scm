@@ -45,10 +45,10 @@
 		 file)))
 
 (define (compile-base)
-  (image-compile-book "base.book")
-  (image-compile-book "null-compiler.book")
-  (image-compile-book "books.book")
-  (image-compile-book "boot.book")
+  (image-compile-arch "base")
+  (image-compile-arch "null-compiler")
+  (image-compile-arch "books")
+  (image-compile-arch "boot")
   (image-import-boot-record-types)
   (image-import-books)
   (make-bootstrap-image (image-expression) "base"))
@@ -56,6 +56,7 @@
 (define (compile-compiler)
   (image-compile-arch "base")
   (image-compile-arch "utilities")
+  ;; (boot-eval '(set! /compiler/cps-verbose #t))
   (image-compile-arch "assembler")
   (image-compile-arch "compiler")
   (image-compile-arch "books")
@@ -66,13 +67,19 @@
   (make-bootstrap-image (image-expression) "compiler"))
 
 (define (compile-minimal)
-  (boot-eval '(set! cps-verbose #t))
-  (image-compile-book "minimal.book")
+  (boot-eval '(set! /compiler/cps-verbose #t))
+  (image-compile-arch "minimal")
   (make-bootstrap-image (image-expression) "minimal"))
 
-;;(compile-base)
-(compile-compiler)
-;;(compile-minimal)
+(define (compile-test)
+  ;;(boot-eval '(set! /compiler/cps-verbose #t))
+  (image-eval '(define (foo x) (+ x) (+ x (+ x)))))
 
-(boot-eval '(dump-sigs-n-calls))
+;;(boot-eval '(set! /compiler/cps-verbose #t))
+
+;;(compile-base)
+;;(compile-compiler)
+;;(compile-minimal)
+(compile-test)
+
 (check-undefined-variables)
