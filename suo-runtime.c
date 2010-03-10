@@ -269,10 +269,10 @@ head_payload (word h, int shift)
 /* Booleans and special values
  */
 
-const val bool_f = val_make (0, 6, 0x37);
-const val bool_t = val_make (1, 6, 0x37);
-const val nil    = val_make (2, 6, 0x37);
-const val unspec = val_make (3, 6, 0x37);
+#define bool_f val_make (0, 6, 0x37)
+#define bool_t val_make (1, 6, 0x37)
+#define nil    val_make (2, 6, 0x37)
+#define unspec val_make (3, 6, 0x37)
 
 /* Characters
 */
@@ -283,11 +283,7 @@ chr_p (val p)
   return val_tag (p, 6) == 0x27;
 }
 
-val
-chr_make (int code)
-{
-  return val_make (code, 6, 0x27);
-}
+#define chr_make(code) val_make (code, 6, 0x27)
 
 int
 chr_code (val v)
@@ -310,11 +306,7 @@ fixnum_p (val v)
   return val_tag (v, 2) == 0;
 }
 
-val
-fixnum_make (sword n)
-{
-  return val_make (n, 2, 0);
-}
+#define fixnum_make(n) val_make (n, 2, 0)
 
 sword
 fixnum_num (val v)
@@ -1111,11 +1103,25 @@ string_make (char *str)
   return rec_make (G(boot_string_type), b);
 }
 
+int
+string_eq (val a, char *b)
+{
+  val bytes = rec_ref (a, 0);
+  return (bytev_len (bytes) == strlen (b)
+	  && memcmp (bytev_ptr (bytes, char *), b, bytev_len (bytes)) == 0);
+}
+
 val
 intern (char *str)
 {
   val s = string_make (str);
   return rec_make (G(boot_symbol_type), s);
+}
+
+val
+symbol_name (val sym)
+{
+  return rec_ref (sym, 0);
 }
 
 /* Bootstrap initialisation
@@ -1195,7 +1201,7 @@ boot_write_start (val stack, val x)
       printf ("#x%x", c);
     }
   else if (x == nil)
-    printf ("#nil");
+    printf ("()");
   else if (x == bool_t)
     printf ("#t");
   else if (x == bool_f)
@@ -1499,8 +1505,7 @@ boot_read_string ()
   return res;
 }
 
-/*
-   All possible constructs are listed in a static table.  That table
+/* All possible constructs are listed in a static table.  That table
    contains the opening character, the closing character (if any), and
    a function to call when the construct has been read completely.
  */
@@ -1551,6 +1556,35 @@ boot_read_finish_abbrev (val x, int n, char *tag)
   return z;
 }
 
+val
+boot_read_finish_sharp_list (val x, int n, char *unused)
+{
+  GC_BEGIN;
+  GC_PROTECT(x);
+
+  G(x) = cons (G(x), nil);
+  G(x) = cons (nil, G(x));
+  val z = intern ("fn");
+  G(x) = cons (z, G(x));
+
+  GC_END;
+  return G(x);
+}
+
+val
+boot_read_finish_sharp_vector (val x, int n, char *unused)
+{
+  GC_BEGIN;
+  GC_PROTECT(x);
+
+  G(x) = cons (G(x), nil);
+  val z = intern ("fn");
+  G(x) = cons (z, G(x));
+
+  GC_END;
+  return G(x);
+}
+
 struct boot_read_construct {
   int opener, closer;
   val (*finisher) (val elements, int n, char *data);
@@ -1560,27 +1594,39 @@ struct boot_read_construct {
   { '(', ')', boot_read_finish_list },
   { '[', ']', boot_read_finish_vector },
   { '\'', 0,  boot_read_finish_abbrev, "quote" },
+  { 1, ')', boot_read_finish_sharp_list },
+  { 2, ']', boot_read_finish_sharp_vector },
   { 0 }
 };
 
 val
-boot_read_start (char opener)
+boot_read_start (val stack, char opener)
 {
   for (int i = 0; boot_read_constructs[i].opener; i++)
     if (boot_read_constructs[i].opener == opener)
-      return cons (fixnum_make (i), nil);
+      {
+	GC_BEGIN;
+	GC_PROTECT(stack);
+	val y = cons (fixnum_make (i), nil);
+	G(stack) = cons (y, G(stack));
+	GC_END;
+	return G(stack);
+      }
+  
   return unspec;
 }
 
 int
-boot_read_delimiter (val f)
+boot_read_delimiter (val stack)
 {
-  return boot_read_constructs[fixnum_num(car(f))].closer;
+  return boot_read_constructs[fixnum_num(car(car(stack)))].closer;
 }
 
 void
-boot_read_add (val f, val x)
+boot_read_add (val stack, val x)
 {
+  val f = car (stack);
+
   GC_BEGIN;
   GC_PROTECT (f);
   val y = cons (x, cdr (G(f)));
@@ -1589,8 +1635,9 @@ boot_read_add (val f, val x)
 }
 
 val
-boot_read_finish (val f)
+boot_read_finish (val stack)
 {
+  val f = car (stack);
   val y = cdr (f), x = nil;
   int n = 0;
   while (y != nil)
@@ -1607,6 +1654,66 @@ boot_read_finish (val f)
   return boot_read_constructs[i].finisher(x, n, data);
 }
 
+struct {
+  char *sym;
+  val v;
+} boot_read_sharps[] = {
+  { "t", bool_t },
+  { "f", bool_f },
+
+  { "@sum", fixnum_make (12) },
+
+  NULL
+};
+
+val
+boot_read_sharp_symbol (val sym)
+{
+  val name = symbol_name (sym);
+  for (int i = 0; boot_read_sharps[i].sym; i++)
+    {
+      if (string_eq (name, boot_read_sharps[i].sym))
+	return boot_read_sharps[i].v;
+    }
+
+  printf ("unrecognized # construct: #");
+  boot_write (sym);
+  printf ("\n");
+  return unspec;
+}
+
+struct {
+  char *sym;
+  val v;
+} boot_read_chars[] = {
+  { "space", chr_make (' ') },
+  { "nl",    chr_make ('\n') },
+
+  NULL
+};
+
+val
+boot_read_char_symbol (val sym)
+{
+  val name = symbol_name (sym);
+  val bytes = rec_ref (name, 0);
+  if (bytev_len (bytes) == 1)
+    return chr_make (bytev_ptr (bytes, char)[0]);
+  else
+    {
+      for (int i = 0; boot_read_sharps[i].sym; i++)
+	{
+	  if (string_eq (name, boot_read_chars[i].sym))
+	    return boot_read_chars[i].v;
+	}
+    }
+
+  printf ("unrecognized #\\ construct: #\\");
+  boot_write (sym);
+  printf ("\n");
+  return unspec;
+}
+
 val
 boot_read ()
 {
@@ -1616,8 +1723,7 @@ boot_read ()
   GC_PROTECT (stack);
   GC_PROTECT (x);
 
-  y = boot_read_start (' ');
-  G(stack) = cons (y, G(stack));
+  G(stack) = boot_read_start (G(stack), ' ');
 
   while (G(stack) != nil)
     {
@@ -1633,26 +1739,49 @@ boot_read ()
 	{
 	  G(x) = boot_read_string ();
 	}
+      else if (c == '#')
+	{
+	  int c = boot_read_skip_whitespace ();
+	  if (c == EOF)
+	    {
+	      printf ("unexpected end of input\n");
+	      return unspec;
+	    }
+	  else if (c == '\\')
+	    {
+	      int c = boot_read_skip_whitespace ();
+	      G(x) = boot_read_char_symbol (boot_read_token (c));
+	    }
+	  else if (c == '(')
+	    {
+	      G(stack) = boot_read_start (G(stack), 1);
+	      continue;
+	    }
+	  else if (c == '[')
+	    {
+	      G(stack) = boot_read_start (G(stack), 2);
+	      continue;
+	    }
+	  else
+	    G(x) = boot_read_sharp_symbol (boot_read_token (c));
+	}
       else if (strchr (boot_read_delimiters, c))
 	{
-	  if (c == boot_read_delimiter (car (G(stack))))
+	  if (c == boot_read_delimiter (G(stack)))
 	    {
-	      G(x) = boot_read_finish (car (G(stack)));
+	      G(x) = boot_read_finish (G(stack));
 	      G(stack) = cdr (G(stack));
 	    }
 	  else
 	    {
-	      val y = boot_read_start (c);
-	      if (y == unspec)
+	      G(stack) = boot_read_start (G(stack), c);
+	      if (G(stack) == unspec)
 		{
 		  printf ("unexpected delimiter '%c'\n", c);
 		  G(x) = unspec;
 		}
 	      else
-		{
-		  G(stack) = cons (y, G(stack));
-		  continue;
-		}
+		continue;
 	    }
 	}
       else
@@ -1666,10 +1795,10 @@ boot_read ()
 
       while (G(stack) != nil)
 	{
-	  boot_read_add (car (G(stack)), G(x));
-	  if (boot_read_delimiter (car(G(stack))) == 0)
+	  boot_read_add (G(stack), G(x));
+	  if (boot_read_delimiter (G(stack)) == 0)
 	    {
-	      G(x) = boot_read_finish (car (G(stack)));
+	      G(x) = boot_read_finish (G(stack));
 	      G(stack) = cdr (G(stack));
 	    }
 	  else
@@ -1699,7 +1828,7 @@ debug_write (val x)
       printf ("#x%x", c);
     }
   else if (x == nil)
-    printf ("#nil");
+    printf ("()");
   else if (x == bool_t)
     printf ("#t");
   else if (x == bool_f)
