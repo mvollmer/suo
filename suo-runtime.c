@@ -1250,7 +1250,8 @@ boot_write_start (val stack, val x)
 	    {
 	      unsigned char c = bytev_ref_u8 (b, i);
 	      if (strchr (boot_read_whitespace, c)
-		  || strchr (boot_read_delimiters, c))
+		  || strchr (boot_read_delimiters, c)
+		  || (c == '.' && n == 1))
 		printf ("\\%c", c);
 	      else
 		printf ("%c", c);
