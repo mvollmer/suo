@@ -976,6 +976,8 @@ GC_DECLARE_GLOBAL (boot_string_type);
 GC_DECLARE_GLOBAL (boot_symbol_type);
 GC_DECLARE_GLOBAL (boot_symbols);
 
+GC_DECLARE_GLOBAL (boot_dot_token);
+
 val
 car (val v)
 {
@@ -1134,6 +1136,7 @@ boot_init ()
   GC_PROTECT_GLOBAL (boot_string_type);
   GC_PROTECT_GLOBAL (boot_symbol_type);
   GC_PROTECT_GLOBAL (boot_symbols);
+  GC_PROTECT_GLOBAL (boot_dot_token);
 
   G(boot_record_type_type) = rec_alloc (2);
   rec_set_desc (G(boot_record_type_type), G(boot_record_type_type));
@@ -1149,6 +1152,8 @@ boot_init ()
 				  nil);
   
   G(boot_symbols) = vec_make (511, nil);
+
+  G(boot_dot_token) = string_make ("{dot token}");
 
   val x;
 
@@ -1417,14 +1422,13 @@ val
 boot_read_token (int first)
 {
   val tok = bytev_alloc (200);
-  bytev_set_u8 (tok, 0, first);
-  int n = 1, escaped = 0;
-  
+  int n = 0, escaped = 0, any_escaped = 0;
+  int c = first;
+
   GC_BEGIN;
   GC_PROTECT (tok);
   while (true)
     {
-      int c = getchar();
       if (c == EOF
 	  || (!escaped
 	      && (strchr (boot_read_delimiters, c)
@@ -1435,7 +1439,10 @@ boot_read_token (int first)
 	}
 
       if (c == '\\')
-	escaped = 1;
+	{
+	  escaped = 1;
+	  any_escaped = 1;
+	}
       else
 	{
 	  if (bytev_len (G(tok)) < n+1)
@@ -1450,15 +1457,23 @@ boot_read_token (int first)
 	  n += 1;
 	  escaped = 0;
 	}
+      c = getchar();
     }
 
   val res = boot_read_to_fixnum (G(tok), n);
   if (res == bool_f)
     {
-      res = bytev_alloc (n);
-      memcpy (bytev_ptr (res, void), bytev_ptr (G(tok), void), n);
-      res = rec_make (G(boot_string_type), res);
-      res = rec_make (G(boot_symbol_type), res);
+      if (!any_escaped
+	  && n == 1
+	  && bytev_ref_u8 (G(tok), 0) == '.')
+	res = G(boot_dot_token);
+      else
+	{
+	  res = bytev_alloc (n);
+	  memcpy (bytev_ptr (res, void), bytev_ptr (G(tok), void), n);
+	  res = rec_make (G(boot_string_type), res);
+	  res = rec_make (G(boot_symbol_type), res);
+	}
     }
 
   GC_END;
@@ -1640,6 +1655,13 @@ boot_read_finish (val stack)
   val f = car (stack);
   val y = cdr (f), x = nil;
   int n = 0;
+
+  if (y != nil && cdr (y) != nil && car (cdr (y)) == G(boot_dot_token))
+    {
+      x = car (y);
+      y = cdr (cdr (y));
+    }
+
   while (y != nil)
     {
       val z = cdr (y);
