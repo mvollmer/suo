@@ -974,6 +974,8 @@ mem_check ()
 GC_DECLARE_GLOBAL (boot_record_type_type);
 GC_DECLARE_GLOBAL (boot_string_type);
 GC_DECLARE_GLOBAL (boot_symbol_type);
+GC_DECLARE_GLOBAL (boot_function_type);
+
 GC_DECLARE_GLOBAL (boot_symbols);
 
 GC_DECLARE_GLOBAL (boot_dot_token);
@@ -1135,6 +1137,7 @@ boot_init ()
   GC_PROTECT_GLOBAL (boot_record_type_type);
   GC_PROTECT_GLOBAL (boot_string_type);
   GC_PROTECT_GLOBAL (boot_symbol_type);
+  GC_PROTECT_GLOBAL (boot_function_type);
   GC_PROTECT_GLOBAL (boot_symbols);
   GC_PROTECT_GLOBAL (boot_dot_token);
 
@@ -1151,6 +1154,10 @@ boot_init ()
 				  fixnum_make (1),
 				  nil);
   
+  G(boot_function_type) = rec_make (G(boot_record_type_type),
+				    fixnum_make (2),
+				    nil);
+
   G(boot_symbols) = vec_make (511, nil);
 
   G(boot_dot_token) = string_make ("{dot token}");
@@ -1163,6 +1170,8 @@ boot_init ()
   rec_set (G(boot_string_type), 1, x);
   x = intern ("symbol");
   rec_set (G(boot_symbol_type), 1, x);
+  x = intern ("function");
+  rec_set (G(boot_function_type), 1, x);
 }
 
 /* Bootstrap writer
@@ -1680,6 +1689,7 @@ boot_read_finish (val stack)
 enum {
   boot_op_if,
   boot_op_lambda,
+  boot_op_call,
   boot_op_apply,
 
   boot_op_quote,
@@ -1698,6 +1708,7 @@ struct {
 
   { "@if",     fixnum_make (boot_op_if) },
   { "@lambda", fixnum_make (boot_op_lambda) },
+  { "@call",   fixnum_make (boot_op_call) },
   { "@apply",  fixnum_make (boot_op_apply) },
   { "@quote",  fixnum_make (boot_op_quote) },
 
@@ -1914,42 +1925,67 @@ boot_eval (val form)
   top_pos = 1;
   top_op = boot_op_sum;
 
+#define PUSH(FORM,OP)						\
+  do {								\
+    pk ("push", G(top_form));					\
+    val f = vec_alloc (3);					\
+    vec_set (f, 0, G(top_form));				\
+    vec_set (f, 1, G(top_result));				\
+    vec_set (f, 2, fixnum_make (top_pos));			\
+    G(stack) = cons (f, G(stack));				\
+    G(top_form) = FORM;						\
+    G(top_result) = vec_make (vec_len (FORM), unspec);		\
+    top_op = OP;						\
+    top_pos = 1;						\
+  } while (0)
+
+#define POP						    \
+  do {							    \
+    val f = car (G(stack));				    \
+    G(top_form) = vec_ref (f, 0);			    \
+    G(top_result) = vec_ref (f, 1);			    \
+    top_pos = fixnum_num (vec_ref (f, 2));		    \
+    top_op = fixnum_num (vec_ref (G(top_form), 0));	    \
+    G(stack) = cdr (G(stack));				    \
+    pk ("pop", G(top_form));				    \
+  } while (0)
+
  eval_form:
+  pk ("on", G(form));
   if (pair_p (G(form)))
     {
       int up = fixnum_num (car (G(form)));
       int n = fixnum_num (cdr (G(form)));
-      val f = env;
+      val f = G(env);
       while (up > 0)
 	{
 	  f = cdr (f);
 	  up = up - 1;
 	}
-      G(value) = vec_ref (car (f), n);
+      G(value) = vec_ref (car (f), n+2);
       goto use_value;
     }
   else if (vec_p (G(form)))
     {
       int op = fixnum_num (vec_ref (G(form), 0));
 
-      if (op == boot_op_quote)
+      switch (op)
 	{
+	case boot_op_quote:
 	  G(value) = vec_ref (G(form), 1);
 	  goto use_value;
-	}
-      else
-	{
-	  val f = vec_alloc (3);
-	  vec_set (f, 0, G(top_form));
-	  vec_set (f, 1, G(top_result));
-	  vec_set (f, 2, fixnum_make (top_pos));
-	  G(stack) = cons (f, G(stack));
+	  
+	case boot_op_lambda:
+	  G(value) = rec_make (G(boot_function_type),
+			       vec_ref (G(form), 1),
+			       G(env));
+	  goto use_value;
 
-	  G(top_form) = G(form);
-	  G(top_result) = vec_make (vec_len (G(form)), unspec);
-	  top_op = op;
-	  top_pos = 1;
-	  goto do_op_step;
+	default:
+	  {
+	    PUSH (G(form), op);
+	    goto do_op_step;
+	  }
 	}
     }
   else
@@ -1971,29 +2007,45 @@ boot_eval (val form)
 	      G(form) = vec_ref (G(top_form), 2);
 	    else
 	      G(form) = vec_ref (G(top_form), 3);
-	    
-	    val f = car (G(stack));
-	    G(top_form) = vec_ref (f, 0);
-	    G(top_result) = vec_ref (f, 1);
-	    top_pos = fixnum_num (vec_ref (f, 2));
-	    top_op = fixnum_num (vec_ref (G(top_form), 0));
-	    G(stack) = cdr (G(stack));
+	    POP;
 	  }
 	goto eval_form;
-
+	
       default:
 	if (top_pos >= vec_len (G(top_form)))
 	  {
-	    G(value) = boot_op_funcs[top_op] (G(top_result));
-	    
-	    val f = car (G(stack));
-	    G(top_form) = vec_ref (f, 0);
-	    G(top_result) = vec_ref (f, 1);
-	    top_pos = fixnum_num (vec_ref (f, 2));
-	    top_op = fixnum_num (vec_ref (G(top_form), 0));
-	    G(stack) = cdr (G(stack));
+	    switch (top_op)
+	      {
+	      case boot_op_call:
+		{
+		  val func = vec_ref (G(top_result), 1);
+		  G(form) = rec_ref (func, 0);
+		  G(env) = cons (G(top_result),
+				 rec_ref (func, 1));
+		  POP;
+		  goto eval_form;
+		}
 
-	    goto use_value;
+	      case boot_op_apply:
+		{
+		  val func = vec_ref (G(top_result), 1);
+		  G(form) = rec_ref (func, 0);
+		  G(env) = rec_ref (func, 1);
+		  G(value) = vec_ref (G(top_result), 2);
+		  int l = vec_len (G(value));
+		  val f = vec_alloc (l + 2);
+		  for (int i = 0; i < l; i++)
+		    vec_set (f, i+2, vec_ref (G(value), i));
+		  G(env) = cons (f, G(env));
+		  POP;
+		  goto eval_form;
+		}
+
+	      default:
+		G(value) = boot_op_funcs[top_op] (G(top_result));
+		POP;
+		goto use_value;
+	      }
 	  }
 	else
 	  {
