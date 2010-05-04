@@ -1677,6 +1677,18 @@ boot_read_finish (val stack)
   return boot_read_constructs[i].finisher(x, n, data);
 }
 
+enum {
+  boot_op_if,
+  boot_op_lambda,
+  boot_op_apply,
+
+  boot_op_quote,
+  boot_op_last_special = boot_op_quote,
+
+  boot_op_sum,
+  boot_op_mul
+};
+
 struct {
   char *sym;
   val v;
@@ -1684,8 +1696,14 @@ struct {
   { "t", bool_t },
   { "f", bool_f },
 
-  { "@sum", fixnum_make (12) },
+  { "@if",     fixnum_make (boot_op_if) },
+  { "@lambda", fixnum_make (boot_op_lambda) },
+  { "@apply",  fixnum_make (boot_op_apply) },
+  { "@quote",  fixnum_make (boot_op_quote) },
 
+  { "@sum",    fixnum_make (boot_op_sum) },
+  { "@mul",    fixnum_make (boot_op_mul) },
+  
   NULL
 };
 
@@ -1833,6 +1851,171 @@ boot_read ()
   return G(x);
 }
 
+/* Bootstrap evaluator
+
+   The bootstrap evaluator understands a simple language:
+
+   - (up . n)
+
+   A pair denotes a 'environment lookup'.  It refers to the Nth
+   element in the frame UP steps up in the chain.
+
+   - [op arg1 arg2 ...]
+
+   A vector denotes a operation.  OP is a literal integer that
+   identifies the operation.  ARG1, ARG2, etc etc are the arguments
+   for that operation.  They are either used literally or evaluated
+   recursively, depending on OP itself.
+
+   As the reader, the evaluator maintains an explicit stack to keep
+   track of nested forms.  A frame on this stack contains the form
+   that is being evaluated, a parallel vector to put the results in,
+   and a index indicating which element of the form is to be evaluated
+   next.
+ */
+
+typedef val boot_op_func (val);
+
+val
+boot_op_sum_func (val vals)
+{
+  int x = 0;
+  for (int i = 1; i < vec_len (vals); i++)
+    x += fixnum_num (vec_ref (vals, i));
+  return fixnum_make (x);
+}
+
+boot_op_func *boot_op_funcs[] = {
+  [boot_op_sum] = boot_op_sum_func
+};
+
+val
+boot_eval (val form)
+{
+  val stack = nil, env = nil;
+
+  int top_op, top_pos;
+  val top_result = nil, top_form = nil;
+
+  val value = nil;
+
+  GC_BEGIN;
+  GC_PROTECT (form);
+  GC_PROTECT (stack);
+  GC_PROTECT (env);
+
+  GC_PROTECT (top_result);
+  GC_PROTECT (top_form);
+
+  GC_PROTECT (value);
+
+  G(top_result) = nil;
+  G(top_form) = vec_make (1, fixnum_make (boot_op_sum));
+  top_pos = 1;
+  top_op = boot_op_sum;
+
+ eval_form:
+  if (pair_p (G(form)))
+    {
+      int up = fixnum_num (car (G(form)));
+      int n = fixnum_num (cdr (G(form)));
+      val f = env;
+      while (up > 0)
+	{
+	  f = cdr (f);
+	  up = up - 1;
+	}
+      G(value) = vec_ref (car (f), n);
+      goto use_value;
+    }
+  else if (vec_p (G(form)))
+    {
+      int op = fixnum_num (vec_ref (G(form), 0));
+
+      if (op == boot_op_quote)
+	{
+	  G(value) = vec_ref (G(form), 1);
+	  goto use_value;
+	}
+      else
+	{
+	  val f = vec_alloc (3);
+	  vec_set (f, 0, G(top_form));
+	  vec_set (f, 1, G(top_result));
+	  vec_set (f, 2, fixnum_make (top_pos));
+	  G(stack) = cons (f, G(stack));
+
+	  G(top_form) = G(form);
+	  G(top_result) = vec_make (vec_len (G(form)), unspec);
+	  top_op = op;
+	  top_pos = 1;
+	  goto do_op_step;
+	}
+    }
+  else
+    {
+      G(value) = G(form);
+      goto use_value;
+    }
+
+ do_op_step:
+  {
+    switch (top_op)
+      {
+      case boot_op_if:
+	if (top_pos == 1)
+	  G(form) = vec_ref (G(top_form), top_pos);
+	else
+	  {
+	    if (vec_ref (G(top_result), 1) != nil)
+	      G(form) = vec_ref (G(top_form), 2);
+	    else
+	      G(form) = vec_ref (G(top_form), 3);
+	    
+	    val f = car (G(stack));
+	    G(top_form) = vec_ref (f, 0);
+	    G(top_result) = vec_ref (f, 1);
+	    top_pos = fixnum_num (vec_ref (f, 2));
+	    top_op = fixnum_num (vec_ref (G(top_form), 0));
+	    G(stack) = cdr (G(stack));
+	  }
+	goto eval_form;
+
+      default:
+	if (top_pos >= vec_len (G(top_form)))
+	  {
+	    G(value) = boot_op_funcs[top_op] (G(top_result));
+	    
+	    val f = car (G(stack));
+	    G(top_form) = vec_ref (f, 0);
+	    G(top_result) = vec_ref (f, 1);
+	    top_pos = fixnum_num (vec_ref (f, 2));
+	    top_op = fixnum_num (vec_ref (G(top_form), 0));
+	    G(stack) = cdr (G(stack));
+
+	    goto use_value;
+	  }
+	else
+	  {
+	    G(form) = vec_ref (G(top_form), top_pos);
+	    goto eval_form;
+	  }
+      }
+  }
+  
+ use_value:
+  {
+    if (G(top_result) == nil)
+      return G(value);
+    else
+      {
+	vec_set (G(top_result), top_pos, G(value));
+	top_pos++;
+	goto do_op_step;
+      }
+  }
+}
+
 /* Debugging tools
  */
 
@@ -1932,7 +2115,7 @@ pk (char *title, val x)
    Just for testing right now.
  */
 
-void
+int
 main (int arg, char **argv)
 {
   mem_init ();
@@ -1950,10 +2133,12 @@ main (int arg, char **argv)
       G(x) = boot_read ();
       if (G(x) == unspec)
 	break;
+      G(x) = boot_eval (G(x));
       boot_write (G(x));
       printf ("\n");
     }
 #endif
 
   GC_END;
+  return 0;
 }
