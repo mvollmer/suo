@@ -35,6 +35,8 @@
 void dbg (char *fmt, ...) { }
 #endif
 
+#define DEBUG_GC_BEFORE_ALLOC 1
+
 /* Data types and representation.
  
    Suo knows about the following kinds of values: small integers,
@@ -194,7 +196,7 @@ val *
 mem_alloc (int n)
 {
   val *ptr = mem_next;
-  if (ptr + n > mem_end)
+  if (ptr + n > mem_end || DEBUG_GC_BEFORE_ALLOC)
     ptr = mem_gc (n);
 
   mem_next = ptr + ((n+1)&~1);
@@ -558,18 +560,17 @@ rec_desc (val v)
    Then we continue to allocate from that second region.
 
    To find all living objects, we simply start with a set of root
-   values, and follow the graph of pointers from there.  These root
-   values are in fixed storage locations, called the registers.  Some
-   of them are allocated for fixed purposes, while others are free to
-   be used by the code as it sees fit.
-*/
-
-const int reg_max_len = 256;
-val reg[256];
-int reg_len;
+   values, and follow the graph of pointers from there.  The root
+   values are found in storage locations that are explicitly
+   registered with the garbage collector.  This is set of root
+   locations is quote smalle and pretty static.
+ */
 
 const word mem_size = 217000;
 val *mem_first;
+
+val *mem_roots[200];
+int mem_n_roots = 0;
 
 void
 mem_init ()
@@ -580,22 +581,21 @@ mem_init ()
 
   mem_next = mem_first;
   mem_end = mem_next + mem_size;
-
-  reg_len = 0;
 }
 
 /* The garbage collection algorithm itself consists of two functions:
    'copy' and 'scan'.  The 'copy' function copies one object to the
    new region without changing its content, while the 'scan' function
    examines each word of an object and calls 'copy' to move all
-   objects into the new memory region.
+   referenced objects into the new memory region.
 
-   The collection starts with calling 'copy' for each register.  This
-   will give us a number of objects in the new memory region.  Then we
-   call 'scan' in a loop for each object in the new region, starting
-   at the beginning of the region and working towards its end.  Since
-   'scan' calls 'copy', more objects will appear in the new region as
-   we scan, and we will eventually reach them with our 'scan' loop.
+   The collection starts with calling 'copy' for each root location.
+   This will give us a number of objects in the new memory region.
+   Then we call 'scan' in a loop for each object in the new region,
+   starting at the beginning of the region and working towards its
+   end.  Since 'scan' calls 'copy', more objects will appear in the
+   new region as we scan, and we will eventually reach them with our
+   'scan' loop.
 
    Note that 'scan' calls 'copy', but 'copy' never calls 'scan'.  The
    algorithm is not recursive.  This is important since recursing for
@@ -738,8 +738,8 @@ mem_gc (int n)
   mem_new_end = mem_new_first + mem_size;
   mem_new_next = mem_new_first;
 
-  for (int i = 0; i < reg_len; i++)
-    reg[i] = mem_copy (reg[i]);
+  for (int i = 0; i < mem_n_roots; i++)
+    *(mem_roots[i]) = mem_copy (*(mem_roots[i]));
 
   val *ptr = mem_new_first;
   int count = 0;
@@ -903,16 +903,15 @@ mem_check ()
 
    None of these components is recursive; no matter what program is
    executed, they only use a fixed amount of the C stack.  The
-   necessary data structures for dealing with nested data structured
-   and nested control flow are all allocated in the heap.
-*/
+   necessary data structures for dealing with nested control flow are
+   all allocated in the heap.
+ */
 
-/* The bootstrap interpreter uses the registers as a little stack.
+/* The bootstrap interpreter uses a little stack to register its roots
+   with the garbage collector.
 
-   The stack is maintained via the GC_BEGIN, GC_PROTECT, GC_END, and G
-   macros.  Each function (or block) should be within a GC_BEGIN /
-   GC_END pair.  Each variable to protect should be announced with
-   GC_PROTECT, and then used via G.
+   The stack is maintained via the GC_BEGIN, GC_PROTECT, and GC_END
+   macros.
 
    Here is a small example that creates a list with N elements
    initialized to X:
@@ -927,43 +926,35 @@ mem_check ()
 	 GC_PROTECT (res);
 	 
 	 for (int i = 0; i < n; i++)
-	   G(res) = cons (G(x), G(res));
+	   res = cons (x, res);
 
 	 GC_END;
-	 return G(res);
+	 return res;
        }
 
    One particular pattern is worth pointing out specifically: Nested
    function calls with multiple arguments should be avoided.  This
    expression
 
-      foo (bar (), G(x))
+      foo (bar (), x)
 
    is unsafe.  If 'bar' causes the garbage collector to run, the value
-   of G(x) has changed and must thus be evaluated after calling 'bar'.
+   of x has changed and must thus be evaluated after calling 'bar'.
    But there is no guarantee for this; the compiler might just as well
-   evaluate G(x) before calling bar.  It is thus necessary to write
+   evaluate x before calling bar.  It is thus necessary to write
    the expression like this:
 
       val y = bar ();
-      foo (y, G(x));
+      foo (y, x);
 
    Global variables need to be protected, too.  This is done by
-   allocating the first few registers for them, via GC_DECLARE_GLOBAL
-   and GC_PROTECT_GLOBAL.  They can be accessed with the G macro, just
-   like protected locals.  GC_PROTECT_GLOBAL must be used outside of
-   any GC_BEGIN/GC_END pair.
-
+   allocating the first few entries in the stack for them, by calling
+   GC_PROTECT outside of any GC_BEGIN/GC_END pair.
 */
 
-#define GC_BEGIN         int __gc_start = reg_len
-#define GC_PROTECT(var)  val *G_##var = &reg[reg_len++]; G(var) = var
-#define G(var)           (*G_##var)
-#define GC_END           reg_len = __gc_start
-#define GC_RETURN(var)   GC_END; return G(var)        
-
-#define GC_DECLARE_GLOBAL(var) val *G_##var
-#define GC_PROTECT_GLOBAL(var) G_##var = &reg[reg_len++]; G(var) = nil
+#define GC_BEGIN         int __gc_start = mem_n_roots
+#define GC_PROTECT(var)  mem_roots[mem_n_roots++] = &(var)
+#define GC_END           mem_n_roots = __gc_start
 
 /* Bootstrap primitives
 
@@ -971,14 +962,14 @@ mem_check ()
    itself.  They do no error checking.
 */
 
-GC_DECLARE_GLOBAL (boot_record_type_type);
-GC_DECLARE_GLOBAL (boot_string_type);
-GC_DECLARE_GLOBAL (boot_symbol_type);
-GC_DECLARE_GLOBAL (boot_function_type);
+val boot_record_type_type = nil;
+val boot_string_type = nil;
+val boot_symbol_type = nil;
+val boot_function_type = nil;
 
-GC_DECLARE_GLOBAL (boot_symbols);
+val boot_symbols = nil;
 
-GC_DECLARE_GLOBAL (boot_dot_token);
+val boot_dot_token = nil;
 
 val
 car (val v)
@@ -1012,8 +1003,8 @@ cons (val a, val d)
   GC_PROTECT (d);
 
   val v = pair_alloc ();
-  set_car (v, G(a));
-  set_cdr (v, G(d));
+  set_car (v, a);
+  set_cdr (v, d);
   
   GC_END;
   return v;
@@ -1039,7 +1030,7 @@ vec_make (word len, val init)
 
   val v = vec_alloc (len);
   for (int i = 0; i < len; i++)
-    vec_set (v, i, G(init));
+    vec_set (v, i, init);
 
   GC_END;
   return v;
@@ -1079,20 +1070,23 @@ val
 rec_make (val type, ...)
 {
   int n = fixnum_num (rec_ref (type, 0));
+  val f[n];
 
   GC_BEGIN;
   GC_PROTECT (type);
   
-  int G_args = reg_len;
   va_list ap;
   va_start (ap, type);
   for (int i = 0; i < n; i++)
-    reg[reg_len++] = va_arg (ap, val);
+    {
+      f[i] = va_arg (ap, val);
+      GC_PROTECT (f[i]);
+    }
 
   val v = rec_alloc (n);
-  rec_set_desc (v, G(type));
+  rec_set_desc (v, type);
   for (int i = 0; i < n; i++)
-    rec_set (v, i, reg[G_args+i]);
+    rec_set (v, i, f[i]);
 
   GC_END;
   return v;
@@ -1104,7 +1098,7 @@ string_make (char *str)
   int n = strlen (str);
   val b = bytev_alloc (n);
   memcpy (bytev_ptr (b, char *), str, n);
-  return rec_make (G(boot_string_type), b);
+  return rec_make (boot_string_type, b);
 }
 
 int
@@ -1119,7 +1113,7 @@ val
 intern (char *str)
 {
   val s = string_make (str);
-  return rec_make (G(boot_symbol_type), s);
+  return rec_make (boot_symbol_type, s);
 }
 
 val
@@ -1134,44 +1128,44 @@ symbol_name (val sym)
 void
 boot_init ()
 {
-  GC_PROTECT_GLOBAL (boot_record_type_type);
-  GC_PROTECT_GLOBAL (boot_string_type);
-  GC_PROTECT_GLOBAL (boot_symbol_type);
-  GC_PROTECT_GLOBAL (boot_function_type);
-  GC_PROTECT_GLOBAL (boot_symbols);
-  GC_PROTECT_GLOBAL (boot_dot_token);
+  GC_PROTECT (boot_record_type_type);
+  GC_PROTECT (boot_string_type);
+  GC_PROTECT (boot_symbol_type);
+  GC_PROTECT (boot_function_type);
+  GC_PROTECT (boot_symbols);
+  GC_PROTECT (boot_dot_token);
 
-  G(boot_record_type_type) = rec_alloc (2);
-  rec_set_desc (G(boot_record_type_type), G(boot_record_type_type));
-  rec_ptr(G(boot_record_type_type))[0] = fixnum_make (2);
-  rec_ptr(G(boot_record_type_type))[1] = nil;
+  boot_record_type_type = rec_alloc (2);
+  rec_set_desc (boot_record_type_type, boot_record_type_type);
+  rec_ptr(boot_record_type_type)[0] = fixnum_make (2);
+  rec_ptr(boot_record_type_type)[1] = nil;
 
-  G(boot_string_type) = rec_make (G(boot_record_type_type),
-				  fixnum_make (1),
-				  nil);
+  boot_string_type = rec_make (boot_record_type_type,
+			       fixnum_make (1),
+			       nil);
 
-  G(boot_symbol_type) = rec_make (G(boot_record_type_type),
-				  fixnum_make (1),
-				  nil);
+  boot_symbol_type = rec_make (boot_record_type_type,
+			       fixnum_make (1),
+			       nil);
   
-  G(boot_function_type) = rec_make (G(boot_record_type_type),
-				    fixnum_make (2),
-				    nil);
+  boot_function_type = rec_make (boot_record_type_type,
+				 fixnum_make (2),
+				 nil);
 
-  G(boot_symbols) = vec_make (511, nil);
+  boot_symbols = vec_make (511, nil);
 
-  G(boot_dot_token) = string_make ("{dot token}");
+  boot_dot_token = string_make ("{dot token}");
 
   val x;
 
   x = intern ("record-type");
-  rec_set (G(boot_record_type_type), 1, x);
+  rec_set (boot_record_type_type, 1, x);
   x = intern ("string");
-  rec_set (G(boot_string_type), 1, x);
+  rec_set (boot_string_type, 1, x);
   x = intern ("symbol");
-  rec_set (G(boot_symbol_type), 1, x);
+  rec_set (boot_symbol_type, 1, x);
   x = intern ("function");
-  rec_set (G(boot_function_type), 1, x);
+  rec_set (boot_function_type, 1, x);
 }
 
 /* Bootstrap writer
@@ -1194,11 +1188,11 @@ boot_write_push (val stack, val x, int i)
   GC_PROTECT (x);
   GC_PROTECT (res);
 
-  val y = cons (G(x), fixnum_make (i));
-  G(res) = cons (y, G(stack));
+  val y = cons (x, fixnum_make (i));
+  res = cons (y, stack);
 
   GC_END;
-  return G(res);
+  return res;
 }
 
 const char *boot_read_whitespace = " \t\n";
@@ -1235,7 +1229,7 @@ boot_write_start (val stack, val x)
   else if (rec_p (x))
     {
       val type = rec_desc (x);
-      if (type == G(boot_string_type))
+      if (type == boot_string_type)
 	{
 	  val b = rec_ref (x, 0);
 	  int n = bytev_len (b);
@@ -1250,7 +1244,7 @@ boot_write_start (val stack, val x)
 	    }
 	  printf ("\"");
 	}
-      else if (type == G(boot_symbol_type))
+      else if (type == boot_symbol_type)
 	{
 	  val s = rec_ref (x, 0);
 	  val b = rec_ref (s, 0);
@@ -1296,10 +1290,10 @@ boot_write (val x)
   GC_BEGIN;
   GC_PROTECT (stack);
 
-  G(stack) = boot_write_start (G(stack), x);
-  while (G(stack) != nil)
+  stack = boot_write_start (stack, x);
+  while (stack != nil)
     {
-      val f = car (G(stack));
+      val f = car (stack);
       val x = car (f);
       val i = cdr (f);
 
@@ -1310,7 +1304,7 @@ boot_write (val x)
 	    {
 	      val y = car (x);
 	      set_cdr (f, fixnum_make (1));
-	      G(stack) = boot_write_start (G(stack), y);
+	      stack = boot_write_start (stack, y);
 	    }
 	  else if (ii == 1)
 	    {
@@ -1324,19 +1318,19 @@ boot_write (val x)
 	      else if (y == nil)
 		{
 		  printf (")");
-		  G(stack) = cdr (G(stack));
+		  stack = cdr (stack);
 		}
 	      else
 		{
 		  set_cdr (f, fixnum_make (2));
 		  printf (" . ");
-		  G(stack) = boot_write_start (G(stack), y);
+		  stack = boot_write_start (stack, y);
 		}
 	    }
 	  else
 	    {
 	      printf (")");
-	      G(stack) = cdr (G(stack));
+	      stack = cdr (stack);
 	    }
 	}
       else if (vec_p (x))
@@ -1348,12 +1342,12 @@ boot_write (val x)
 	      set_cdr (f, fixnum_make (ii+1));
 	      if (ii > 0)
 		printf (" ");
-	      G(stack) = boot_write_start (G(stack), y);
+	      stack = boot_write_start (stack, y);
 	    }
 	  else
 	    {
 	      printf ("]");
-	      G(stack) = cdr (G(stack));
+	      stack = cdr (stack);
 	    }
 	}
     }
@@ -1455,34 +1449,34 @@ boot_read_token (int first)
 	}
       else
 	{
-	  if (bytev_len (G(tok)) < n+1)
+	  if (bytev_len (tok) < n+1)
 	    {
 	      val y = bytev_alloc (n+200);
-	      memcpy (bytev_ptr (y, void), bytev_ptr (G(tok), void),
-		      bytev_len (G(tok)));
-	      G(tok) = y;
+	      memcpy (bytev_ptr (y, void), bytev_ptr (tok, void),
+		      bytev_len (tok));
+	      tok = y;
 	    }
 	  
-	  bytev_set_u8 (G(tok), n, c);
+	  bytev_set_u8 (tok, n, c);
 	  n += 1;
 	  escaped = 0;
 	}
       c = getchar();
     }
 
-  val res = boot_read_to_fixnum (G(tok), n);
+  val res = boot_read_to_fixnum (tok, n);
   if (res == bool_f)
     {
       if (!any_escaped
 	  && n == 1
-	  && bytev_ref_u8 (G(tok), 0) == '.')
-	res = G(boot_dot_token);
+	  && bytev_ref_u8 (tok, 0) == '.')
+	res = boot_dot_token;
       else
 	{
 	  res = bytev_alloc (n);
-	  memcpy (bytev_ptr (res, void), bytev_ptr (G(tok), void), n);
-	  res = rec_make (G(boot_string_type), res);
-	  res = rec_make (G(boot_symbol_type), res);
+	  memcpy (bytev_ptr (res, void), bytev_ptr (tok, void), n);
+	  res = rec_make (boot_string_type, res);
+	  res = rec_make (boot_symbol_type, res);
 	}
     }
 
@@ -1508,23 +1502,23 @@ boot_read_string ()
 	escaped = 1;
       else
 	{
-	  if (bytev_len (G(tok)) < n+1)
+	  if (bytev_len (tok) < n+1)
 	    {
 	      val y = bytev_alloc (n+200);
-	      memcpy (bytev_ptr (y, void), bytev_ptr (G(tok), void),
-		      bytev_len (G(tok)));
-	      G(tok) = y;
+	      memcpy (bytev_ptr (y, void), bytev_ptr (tok, void),
+		      bytev_len (tok));
+	      tok = y;
 	    }
 
-	  bytev_set_u8 (G(tok), n, c);
+	  bytev_set_u8 (tok, n, c);
 	  n += 1;
 	  escaped = 0;
 	}
     }
 
   val res = bytev_alloc (n);
-  memcpy (bytev_ptr (res, void), bytev_ptr (G(tok), void), n);
-  res = rec_make (G(boot_string_type), res);
+  memcpy (bytev_ptr (res, void), bytev_ptr (tok, void), n);
+  res = rec_make (boot_string_type, res);
 
   GC_END;
   return res;
@@ -1557,7 +1551,7 @@ boot_read_finish_vector (val x, int n, char *unused)
   GC_PROTECT (x);
 
   val z = vec_alloc (n);
-  x = G(x);
+  x = x;
   for (int i = 0; i < n; i++)
     {
       vec_set (z, i, car (x));
@@ -1575,7 +1569,7 @@ boot_read_finish_abbrev (val x, int n, char *tag)
   GC_PROTECT (x);
 
   val z = intern (tag);
-  z = cons (z, G(x));
+  z = cons (z, x);
 
   GC_END;
   return z;
@@ -1587,13 +1581,13 @@ boot_read_finish_sharp_list (val x, int n, char *unused)
   GC_BEGIN;
   GC_PROTECT(x);
 
-  G(x) = cons (G(x), nil);
-  G(x) = cons (nil, G(x));
+  x = cons (x, nil);
+  x = cons (nil, x);
   val z = intern ("fn");
-  G(x) = cons (z, G(x));
+  x = cons (z, x);
 
   GC_END;
-  return G(x);
+  return x;
 }
 
 val
@@ -1602,12 +1596,12 @@ boot_read_finish_sharp_vector (val x, int n, char *unused)
   GC_BEGIN;
   GC_PROTECT(x);
 
-  G(x) = cons (G(x), nil);
+  x = cons (x, nil);
   val z = intern ("fn");
-  G(x) = cons (z, G(x));
+  x = cons (z, x);
 
   GC_END;
-  return G(x);
+  return x;
 }
 
 struct boot_read_construct {
@@ -1633,9 +1627,9 @@ boot_read_start (val stack, char opener)
 	GC_BEGIN;
 	GC_PROTECT(stack);
 	val y = cons (fixnum_make (i), nil);
-	G(stack) = cons (y, G(stack));
+	stack = cons (y, stack);
 	GC_END;
-	return G(stack);
+	return stack;
       }
   
   return unspec;
@@ -1654,8 +1648,8 @@ boot_read_add (val stack, val x)
 
   GC_BEGIN;
   GC_PROTECT (f);
-  val y = cons (x, cdr (G(f)));
-  set_cdr (G(f), y);
+  val y = cons (x, cdr (f));
+  set_cdr (f, y);
   GC_END;
 }
 
@@ -1666,7 +1660,7 @@ boot_read_finish (val stack)
   val y = cdr (f), x = nil;
   int n = 0;
 
-  if (y != nil && cdr (y) != nil && car (cdr (y)) == G(boot_dot_token))
+  if (y != nil && cdr (y) != nil && car (cdr (y)) == boot_dot_token)
     {
       x = car (y);
       y = cdr (cdr (y));
@@ -1693,7 +1687,7 @@ enum {
   boot_op_apply,
 
   boot_op_quote,
-  boot_op_last_special = boot_op_quote,
+  boot_op_set,
 
   boot_op_sum,
   boot_op_mul
@@ -1710,11 +1704,13 @@ struct {
   { "@lambda", fixnum_make (boot_op_lambda) },
   { "@call",   fixnum_make (boot_op_call) },
   { "@apply",  fixnum_make (boot_op_apply) },
+
   { "@quote",  fixnum_make (boot_op_quote) },
+  { "@set",    fixnum_make (boot_op_set) },
 
   { "@sum",    fixnum_make (boot_op_sum) },
   { "@mul",    fixnum_make (boot_op_mul) },
-  
+
   NULL
 };
 
@@ -1775,21 +1771,21 @@ boot_read ()
   GC_PROTECT (stack);
   GC_PROTECT (x);
 
-  G(stack) = boot_read_start (G(stack), ' ');
+  stack = boot_read_start (stack, ' ');
 
-  while (G(stack) != nil)
+  while (stack != nil)
     {
       int c = boot_read_skip_whitespace ();
 
       if (c == EOF)
 	{
-	  if (cdr(G(stack)) != nil)
+	  if (cdr(stack) != nil)
 	    printf ("unexpected end of input\n");
-	  G(x) = unspec;
+	  x = unspec;
 	}
       else if (c == '"')
 	{
-	  G(x) = boot_read_string ();
+	  x = boot_read_string ();
 	}
       else if (c == '#')
 	{
@@ -1802,56 +1798,56 @@ boot_read ()
 	  else if (c == '\\')
 	    {
 	      int c = boot_read_skip_whitespace ();
-	      G(x) = boot_read_char_symbol (boot_read_token (c));
+	      x = boot_read_char_symbol (boot_read_token (c));
 	    }
 	  else if (c == '(')
 	    {
-	      G(stack) = boot_read_start (G(stack), 1);
+	      stack = boot_read_start (stack, 1);
 	      continue;
 	    }
 	  else if (c == '[')
 	    {
-	      G(stack) = boot_read_start (G(stack), 2);
+	      stack = boot_read_start (stack, 2);
 	      continue;
 	    }
 	  else
-	    G(x) = boot_read_sharp_symbol (boot_read_token (c));
+	    x = boot_read_sharp_symbol (boot_read_token (c));
 	}
       else if (strchr (boot_read_delimiters, c))
 	{
-	  if (c == boot_read_delimiter (G(stack)))
+	  if (c == boot_read_delimiter (stack))
 	    {
-	      G(x) = boot_read_finish (G(stack));
-	      G(stack) = cdr (G(stack));
+	      x = boot_read_finish (stack);
+	      stack = cdr (stack);
 	    }
 	  else
 	    {
-	      G(stack) = boot_read_start (G(stack), c);
-	      if (G(stack) == unspec)
+	      stack = boot_read_start (stack, c);
+	      if (stack == unspec)
 		{
 		  printf ("unexpected delimiter '%c'\n", c);
-		  G(x) = unspec;
+		  x = unspec;
 		}
 	      else
 		continue;
 	    }
 	}
       else
-	G(x) = boot_read_token (c);
+	x = boot_read_token (c);
       
-      if (G(x) == unspec)
+      if (x == unspec)
 	{
 	  GC_END;
 	  return unspec;
 	}
 
-      while (G(stack) != nil)
+      while (stack != nil)
 	{
-	  boot_read_add (G(stack), G(x));
-	  if (boot_read_delimiter (G(stack)) == 0)
+	  boot_read_add (stack, x);
+	  if (boot_read_delimiter (stack) == 0)
 	    {
-	      G(x) = boot_read_finish (G(stack));
-	      G(stack) = cdr (G(stack));
+	      x = boot_read_finish (stack);
+	      stack = cdr (stack);
 	    }
 	  else
 	    break;
@@ -1859,7 +1855,7 @@ boot_read ()
     }
 
   GC_END;
-  return G(x);
+  return x;
 }
 
 /* Bootstrap evaluator
@@ -1883,7 +1879,7 @@ boot_read ()
    that is being evaluated, a parallel vector to put the results in,
    and a index indicating which element of the form is to be evaluated
    next.
- */
+*/
 
 typedef val boot_op_func (val);
 
@@ -1896,8 +1892,18 @@ boot_op_sum_func (val vals)
   return fixnum_make (x);
 }
 
+val
+boot_op_mul_func (val vals)
+{
+  int x = 1;
+  for (int i = 1; i < vec_len (vals); i++)
+    x *= fixnum_num (vec_ref (vals, i));
+  return fixnum_make (x);
+}
+
 boot_op_func *boot_op_funcs[] = {
-  [boot_op_sum] = boot_op_sum_func
+  [boot_op_sum] = boot_op_sum_func,
+  [boot_op_mul] = boot_op_mul_func
 };
 
 val
@@ -1920,77 +1926,74 @@ boot_eval (val form)
 
   GC_PROTECT (value);
 
-  G(top_result) = nil;
-  G(top_form) = vec_make (1, fixnum_make (boot_op_sum));
+  top_result = nil;
+  top_form = vec_make (1, fixnum_make (boot_op_sum));
   top_pos = 1;
   top_op = boot_op_sum;
 
 #define PUSH(FORM,OP)						\
   do {								\
-    pk ("push", G(top_form));					\
     val f = vec_alloc (3);					\
-    vec_set (f, 0, G(top_form));				\
-    vec_set (f, 1, G(top_result));				\
+    vec_set (f, 0, top_form);					\
+    vec_set (f, 1, top_result);					\
     vec_set (f, 2, fixnum_make (top_pos));			\
-    G(stack) = cons (f, G(stack));				\
-    G(top_form) = FORM;						\
-    G(top_result) = vec_make (vec_len (FORM), unspec);		\
+    stack = cons (f, stack);					\
+    top_form = FORM;						\
+    top_result = vec_make (vec_len (FORM), unspec);		\
     top_op = OP;						\
     top_pos = 1;						\
   } while (0)
 
 #define POP						    \
   do {							    \
-    val f = car (G(stack));				    \
-    G(top_form) = vec_ref (f, 0);			    \
-    G(top_result) = vec_ref (f, 1);			    \
+    val f = car (stack);				    \
+    top_form = vec_ref (f, 0);				    \
+    top_result = vec_ref (f, 1);			    \
     top_pos = fixnum_num (vec_ref (f, 2));		    \
-    top_op = fixnum_num (vec_ref (G(top_form), 0));	    \
-    G(stack) = cdr (G(stack));				    \
-    pk ("pop", G(top_form));				    \
+    top_op = fixnum_num (vec_ref (top_form, 0));	    \
+    stack = cdr (stack);				    \
   } while (0)
 
  eval_form:
-  pk ("on", G(form));
-  if (pair_p (G(form)))
+  if (pair_p (form))
     {
-      int up = fixnum_num (car (G(form)));
-      int n = fixnum_num (cdr (G(form)));
-      val f = G(env);
+      int up = fixnum_num (car (form));
+      int n = fixnum_num (cdr (form));
+      val f = env;
       while (up > 0)
 	{
 	  f = cdr (f);
 	  up = up - 1;
 	}
-      G(value) = vec_ref (car (f), n+2);
+      value = vec_ref (car (f), n+2);
       goto use_value;
     }
-  else if (vec_p (G(form)))
+  else if (vec_p (form))
     {
-      int op = fixnum_num (vec_ref (G(form), 0));
+      int op = fixnum_num (vec_ref (form, 0));
 
       switch (op)
 	{
 	case boot_op_quote:
-	  G(value) = vec_ref (G(form), 1);
+	  value = vec_ref (form, 1);
 	  goto use_value;
 	  
 	case boot_op_lambda:
-	  G(value) = rec_make (G(boot_function_type),
-			       vec_ref (G(form), 1),
-			       G(env));
+	  value = rec_make (boot_function_type,
+			       vec_ref (form, 1),
+			       env);
 	  goto use_value;
 
 	default:
 	  {
-	    PUSH (G(form), op);
+	    PUSH (form, op);
 	    goto do_op_step;
 	  }
 	}
     }
   else
     {
-      G(value) = G(form);
+      value = form;
       goto use_value;
     }
 
@@ -2000,56 +2003,77 @@ boot_eval (val form)
       {
       case boot_op_if:
 	if (top_pos == 1)
-	  G(form) = vec_ref (G(top_form), top_pos);
+	  form = vec_ref (top_form, top_pos);
 	else
 	  {
-	    if (vec_ref (G(top_result), 1) != nil)
-	      G(form) = vec_ref (G(top_form), 2);
+	    if (vec_ref (top_result, 1) != nil)
+	      form = vec_ref (top_form, 2);
 	    else
-	      G(form) = vec_ref (G(top_form), 3);
+	      form = vec_ref (top_form, 3);
 	    POP;
 	  }
 	goto eval_form;
+
+      case boot_op_set:
+	if (top_pos == 1) {
+	  top_pos = 2;
+	  form = vec_ref (top_form, 2);
+	  goto eval_form;
+	} else {
+	  val c = vec_ref (top_form, 1);
+	  int up = fixnum_num (car (c));
+	  int n = fixnum_num (cdr (c));
+	  val f = env;
+	  while (up > 0)
+	    {
+	      f = cdr (f);
+	      up = up - 1;
+	    }
+	  value = vec_ref (form, 1);
+	  vec_set (car (f), n+2, value);
+	  POP;
+	  goto use_value;
+	}
 	
       default:
-	if (top_pos >= vec_len (G(top_form)))
+	if (top_pos >= vec_len (top_form))
 	  {
 	    switch (top_op)
 	      {
 	      case boot_op_call:
 		{
-		  val func = vec_ref (G(top_result), 1);
-		  G(form) = rec_ref (func, 0);
-		  G(env) = cons (G(top_result),
-				 rec_ref (func, 1));
+		  val func = vec_ref (top_result, 1);
+		  form = rec_ref (func, 0);
+		  env = cons (top_result,
+			      rec_ref (func, 1));
 		  POP;
 		  goto eval_form;
 		}
 
 	      case boot_op_apply:
 		{
-		  val func = vec_ref (G(top_result), 1);
-		  G(form) = rec_ref (func, 0);
-		  G(env) = rec_ref (func, 1);
-		  G(value) = vec_ref (G(top_result), 2);
-		  int l = vec_len (G(value));
+		  val func = vec_ref (top_result, 1);
+		  form = rec_ref (func, 0);
+		  env = rec_ref (func, 1);
+		  value = vec_ref (top_result, 2);
+		  int l = vec_len (value);
 		  val f = vec_alloc (l + 2);
 		  for (int i = 0; i < l; i++)
-		    vec_set (f, i+2, vec_ref (G(value), i));
-		  G(env) = cons (f, G(env));
+		    vec_set (f, i+2, vec_ref (value, i));
+		  env = cons (f, env);
 		  POP;
 		  goto eval_form;
 		}
 
 	      default:
-		G(value) = boot_op_funcs[top_op] (G(top_result));
+		value = boot_op_funcs[top_op] (top_result);
 		POP;
 		goto use_value;
 	      }
 	  }
 	else
 	  {
-	    G(form) = vec_ref (G(top_form), top_pos);
+	    form = vec_ref (top_form, top_pos);
 	    goto eval_form;
 	  }
       }
@@ -2057,11 +2081,14 @@ boot_eval (val form)
   
  use_value:
   {
-    if (G(top_result) == nil)
-      return G(value);
+    if (top_result == nil)
+      {
+	GC_END;
+	return value;
+      }
     else
       {
-	vec_set (G(top_result), top_pos, G(value));
+	vec_set (top_result, top_pos, value);
 	top_pos++;
 	goto do_op_step;
       }
@@ -2142,17 +2169,6 @@ debug_write (val x)
     printf ("?");
 }
 
-void
-debug_regs ()
-{
-  for (int i = 0; i < reg_len; i++)
-    {
-      printf ("%3d: ", i);
-      debug_write (reg[i]);
-      printf ("\n");
-    }
-}
-
 val
 pk (char *title, val x)
 {
@@ -2170,26 +2186,27 @@ pk (char *title, val x)
 int
 main (int arg, char **argv)
 {
+  val stack_item;
+
   mem_init ();
   boot_init ();
 
   val x = nil, y = nil, z = nil;
+
   GC_BEGIN;
   GC_PROTECT (x);
   GC_PROTECT (y);
   GC_PROTECT (z);
 
-#if 1
   while (true)
     {
-      G(x) = boot_read ();
-      if (G(x) == unspec)
+      x = boot_read ();
+      if (x == unspec)
 	break;
-      G(x) = boot_eval (G(x));
-      boot_write (G(x));
+      x = boot_eval (x);
+      boot_write (x);
       printf ("\n");
     }
-#endif
 
   GC_END;
   return 0;
